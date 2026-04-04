@@ -106,7 +106,7 @@ export default {
     deleteConversationFailed: 'Failed to delete conversation',
     switchModelFailed: 'Failed to switch model',
     uploadFailed: 'File upload failed',
-    dropToUpload: 'Drop files here to upload',
+    dropToUpload: 'Drop files or folders here',
     copyFailed: 'Copy failed',
     dateToday: 'Today',
     dateYesterday: 'Yesterday',

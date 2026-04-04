@@ -240,13 +240,94 @@ function onDragLeave() {
   }
 }
 
-function onDrop(e: DragEvent) {
+async function onDrop(e: DragEvent) {
   dragCounter = 0
   isDragging.value = false
-  const files = Array.from(e.dataTransfer?.files || [])
-  if (files.length) {
-    handleFileSelect(files)
+
+  const dtFiles = Array.from(e.dataTransfer?.files || [])
+  const items = Array.from(e.dataTransfer?.items || [])
+
+  const electronDirs: File[] = []
+  const webDirEntries: FileSystemDirectoryEntry[] = []
+  const regularFiles: File[] = []
+
+  for (let i = 0; i < items.length; i++) {
+    const entry = items[i].webkitGetAsEntry?.()
+    const file = dtFiles[i]
+    if (entry?.isDirectory) {
+      if ((file as any)?.path) {
+        // Electron: has absolute path
+        electronDirs.push(file)
+      } else {
+        // Web: need to recursively collect files
+        webDirEntries.push(entry as FileSystemDirectoryEntry)
+      }
+    } else if (file) {
+      regularFiles.push(file)
+    }
   }
+
+  // Electron directories → record path reference
+  if (electronDirs.length) {
+    handleDirectoryAttach(electronDirs)
+  }
+  // Web directories → recursively collect files and upload
+  if (webDirEntries.length) {
+    const collected = await collectFilesFromEntries(webDirEntries)
+    if (collected.length) {
+      handleFileSelect(collected)
+    }
+  }
+  // Regular files → normal upload
+  if (regularFiles.length) {
+    handleFileSelect(regularFiles)
+  }
+}
+
+function handleDirectoryAttach(dirFiles: File[]) {
+  if (!currentConversationId.value) {
+    newConversation()
+  }
+  for (const dir of dirFiles) {
+    const dirPath = (dir as any).path as string
+    pendingAttachments.value.push({
+      name: dirPath.split('/').pop() || dir.name,
+      size: 0,
+      url: '',
+      storedName: '',
+      path: dirPath,
+      contentType: 'inode/directory',
+    })
+  }
+}
+
+async function collectFilesFromEntries(dirEntries: FileSystemDirectoryEntry[]): Promise<File[]> {
+  const files: File[] = []
+
+  async function readDir(dir: FileSystemDirectoryEntry) {
+    const reader = dir.createReader()
+    let batch: FileSystemEntry[]
+    do {
+      batch = await new Promise<FileSystemEntry[]>((resolve, reject) => {
+        reader.readEntries(resolve, reject)
+      })
+      for (const entry of batch) {
+        if (entry.isFile) {
+          const file = await new Promise<File>((resolve, reject) => {
+            (entry as FileSystemFileEntry).file(resolve, reject)
+          })
+          files.push(file)
+        } else if (entry.isDirectory) {
+          await readDir(entry as FileSystemDirectoryEntry)
+        }
+      }
+    } while (batch.length > 0)  // readEntries returns empty when done
+  }
+
+  for (const dir of dirEntries) {
+    await readDir(dir)
+  }
+  return files
 }
 
 const messageListRef = ref<InstanceType<typeof MessageList> | null>(null)
@@ -815,8 +896,10 @@ async function handleFileSelect(files: File[]) {
   }
 }
 
-function removeAttachment(storedName: string) {
-  pendingAttachments.value = pendingAttachments.value.filter(a => a.storedName !== storedName)
+function removeAttachment(key: string) {
+  pendingAttachments.value = pendingAttachments.value.filter(
+    a => a.storedName !== key && a.path !== key
+  )
 }
 
 function buildOutgoingParts(text: string, attachments: ChatAttachment[]): MessageContentPart[] {

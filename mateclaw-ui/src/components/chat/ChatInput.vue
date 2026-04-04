@@ -12,22 +12,25 @@
     <div v-if="attachments.length" class="attachment-list">
       <div
         v-for="attachment in attachments"
-        :key="attachment.storedName"
+        :key="attachment.storedName || attachment.path"
         class="attachment-chip"
+        :class="{ 'attachment-chip--dir': attachment.contentType === 'inode/directory' }"
       >
-        <a
-          :href="attachment.url"
+        <component
+          :is="attachment.url ? 'a' : 'span'"
+          :href="attachment.url || undefined"
           target="_blank"
           rel="noreferrer"
           class="attachment-chip__label"
         >
-          <span>{{ attachment.name }}</span>
-          <span>{{ formatFileSize(attachment.size) }}</span>
-        </a>
+          <span>{{ attachment.contentType === 'inode/directory' ? '📁 ' : '' }}{{ attachment.name }}</span>
+          <span v-if="attachment.size">{{ formatFileSize(attachment.size) }}</span>
+          <span v-else-if="attachment.contentType === 'inode/directory'" class="attachment-chip__path">{{ attachment.path }}</span>
+        </component>
         <button
           type="button"
           class="attachment-chip__remove"
-          @click="removeAttachment(attachment.storedName)"
+          @click="removeAttachment(attachment.storedName || attachment.path)"
         >
           ×
         </button>
@@ -441,6 +444,19 @@ defineExpose({
 
 .attachment-chip__remove:hover {
   background: rgba(217, 119, 87, 0.24);
+}
+
+.attachment-chip--dir {
+  border-style: dashed;
+}
+
+.attachment-chip__path {
+  font-size: 11px;
+  color: var(--mc-text-tertiary, #94a3b8);
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* 输入区域 */
