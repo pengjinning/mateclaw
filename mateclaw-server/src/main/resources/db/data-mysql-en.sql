@@ -331,6 +331,11 @@ INSERT INTO mate_tool (id, name, display_name, description, tool_type, bean_name
 VALUES (1000000013, 'MateClawDocTool', 'MateClaw Docs', 'Read built-in MateClaw project documentation. action=list to list docs, action=read to read specific doc.', 'builtin', 'mateClawDocTool', '📚', TRUE, TRUE, NOW(), NOW(), 0)
 ON DUPLICATE KEY UPDATE name=VALUES(name), display_name=VALUES(display_name), description=VALUES(description), tool_type=VALUES(tool_type), bean_name=VALUES(bean_name), icon=VALUES(icon), enabled=VALUES(enabled), builtin=VALUES(builtin), update_time=VALUES(update_time), deleted=VALUES(deleted);
 
+-- Built-in tool: Agent Delegation (Multi-Agent Collaboration)
+INSERT INTO mate_tool (id, name, display_name, description, tool_type, bean_name, icon, enabled, builtin, create_time, update_time, deleted)
+VALUES (1000000014, 'DelegateAgentTool', 'Agent Delegation', 'Delegate tasks to other Agents for multi-agent collaboration. Call target Agent by name, run in isolated session and return result.', 'builtin', 'delegateAgentTool', '🤝', TRUE, TRUE, NOW(), NOW(), 0)
+ON DUPLICATE KEY UPDATE name=VALUES(name), display_name=VALUES(display_name), description=VALUES(description), tool_type=VALUES(tool_type), bean_name=VALUES(bean_name), icon=VALUES(icon), enabled=VALUES(enabled), builtin=VALUES(builtin), update_time=VALUES(update_time), deleted=VALUES(deleted);
+
 -- Example MCP Server: Filesystem (see MateClaw docs mcpServers.filesystem)
 INSERT INTO mate_mcp_server (id, name, description, transport, url, headers_json, command, args_json, env_json, cwd,
     enabled, connect_timeout_seconds, read_timeout_seconds, last_status, last_error,

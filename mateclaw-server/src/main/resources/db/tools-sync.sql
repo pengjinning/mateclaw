@@ -48,3 +48,7 @@ VALUES (1000000010, 'DocumentExtractTool', '文档文本提取', '从 PDF、Word
 MERGE INTO mate_tool (id, name, display_name, description, tool_type, bean_name, icon, enabled, builtin, create_time, update_time, deleted)
 KEY (id)
 VALUES (1000000011, 'WorkspaceMemoryTool', '工作区记忆', '读写数据库中的工作区 Markdown 文档，用于维护 PROFILE.md、MEMORY.md 和 memory/YYYY-MM-DD.md 等持久记忆。', 'builtin', 'workspaceMemoryTool', '🧠', TRUE, TRUE, NOW(), NOW(), 0);
+
+MERGE INTO mate_tool (id, name, display_name, description, tool_type, bean_name, icon, enabled, builtin, create_time, update_time, deleted)
+KEY (id)
+VALUES (1000000014, 'DelegateAgentTool', 'Agent 委派', '委派任务给其他 Agent 执行，实现多 Agent 协作。支持按名称调用目标 Agent，在独立会话中运行并返回结果。', 'builtin', 'delegateAgentTool', '🤝', TRUE, TRUE, NOW(), NOW(), 0);
