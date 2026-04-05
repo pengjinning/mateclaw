@@ -1,7 +1,12 @@
 <template>
   <div class="chat-layout">
+    <!-- 移动端会话面板遮罩 -->
+    <Transition name="fade">
+      <div v-if="isMobile && convPanelOpen" class="conv-backdrop" @click="convPanelOpen = false"></div>
+    </Transition>
+
     <!-- 会话侧边栏 -->
-    <div class="conversation-panel">
+    <div class="conversation-panel" :class="{ 'mobile-open': convPanelOpen }">
       <div class="panel-header">
         <h2 class="panel-title">{{ $t('chat.conversations') }}</h2>
         <button class="new-chat-btn" @click="newConversation" :title="$t('chat.newChat')">
@@ -82,7 +87,12 @@
       <!-- 头部 -->
       <div class="chat-header">
         <div class="chat-header-left">
-          <div class="agent-badge" v-if="currentAgent">
+          <button v-if="isMobile" class="conv-toggle-btn" @click="convPanelOpen = !convPanelOpen" :title="$t('chat.conversations')">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+            </svg>
+          </button>
+          <div class="agent-badge" v-if="currentAgent" :title="currentAgent.name">
             <span class="agent-badge-icon">{{ currentAgent.icon || '🤖' }}</span>
             <span class="agent-badge-name">{{ currentAgent.name }}</span>
             <span class="agent-badge-type">{{ currentAgent.agentType === 'react' ? 'ReAct' : 'Plan-Execute' }}</span>
@@ -195,6 +205,16 @@ import type { Conversation, Agent, ModelConfig, ProviderInfo, ActiveModelsInfo, 
 import MessageList from '@/components/chat/MessageList.vue'
 import ChatInput from '@/components/chat/ChatInput.vue'
 import StreamLoadingBar from '@/components/chat/StreamLoadingBar.vue'
+
+// ============ 移动端状态 ============
+const isMobile = ref(false)
+const convPanelOpen = ref(false)
+let mobileQuery: MediaQueryList | null = null
+
+function handleMobileChange(e: MediaQueryListEvent | MediaQueryList) {
+  isMobile.value = e.matches
+  if (!e.matches) convPanelOpen.value = false
+}
 
 // ============ 配置和常量 ============
 const suggestions = computed(() => [
@@ -443,12 +463,16 @@ const eligibleModels = computed(() => {
 // ============ 生命周期 ============
 onMounted(async () => {
   document.addEventListener('click', handleCodeCopy)
+  mobileQuery = window.matchMedia('(max-width: 768px)')
+  handleMobileChange(mobileQuery)
+  mobileQuery.addEventListener('change', handleMobileChange)
   await Promise.all([loadAgents(), loadModelState(), loadConversations()])
   await hydrateStateFromRoute()
 })
 
 onBeforeUnmount(() => {
   document.removeEventListener('click', handleCodeCopy)
+  mobileQuery?.removeEventListener('change', handleMobileChange)
   stopChatGeneration()
 })
 
@@ -567,6 +591,7 @@ function syncRouteState() {
 }
 
 async function selectConversation(conv: Conversation) {
+  if (isMobile.value) convPanelOpen.value = false
   resetStreamingState()
   currentConversationId.value = conv.conversationId
   selectedAgentId.value = conv.agentId || selectedAgentId.value
@@ -1008,12 +1033,12 @@ function parseThinkingContent(raw: string): { content: string; thinking: string;
 }
 
 function formatConversationTime(time?: string) {
-  if (!time) return 'just now'
+  if (!time) return t('chat.timeJustNow')
   const date = new Date(time)
   const diff = Date.now() - date.getTime()
-  if (diff < 60 * 60 * 1000) return `${Math.max(1, Math.floor(diff / (60 * 1000)))}m ago`
-  if (diff < 24 * 60 * 60 * 1000) return `${Math.floor(diff / (60 * 60 * 1000))}h ago`
-  return date.toLocaleDateString('zh-CN')
+  if (diff < 60 * 60 * 1000) return t('chat.timeMinutesAgo', { n: Math.max(1, Math.floor(diff / (60 * 1000))) })
+  if (diff < 24 * 60 * 60 * 1000) return t('chat.timeHoursAgo', { n: Math.floor(diff / (60 * 60 * 1000)) })
+  return date.toLocaleDateString()
 }
 
 function handleCodeCopy(e: MouseEvent) {
@@ -1378,5 +1403,95 @@ function handleCodeCopy(e: MouseEvent) {
 
 .btn-primary:hover {
   background: var(--mc-primary-hover);
+}
+
+/* ===== 移动端元素（桌面端隐藏） ===== */
+.conv-backdrop {
+  display: none;
+}
+
+.conv-toggle-btn {
+  display: none;
+}
+
+/* ===== 移动端适配 ===== */
+@media (max-width: 768px) {
+  .conversation-panel {
+    position: fixed;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    z-index: 100;
+    width: 280px;
+    min-width: 280px;
+    transform: translateX(-100%);
+    transition: transform 0.25s ease;
+    box-shadow: none;
+  }
+
+  .conversation-panel.mobile-open {
+    transform: translateX(0);
+    box-shadow: 4px 0 16px rgba(0, 0, 0, 0.1);
+  }
+
+  .conv-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 99;
+    background: rgba(0, 0, 0, 0.3);
+  }
+
+  .conv-toggle-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    border: 1px solid var(--mc-border);
+    background: var(--mc-bg-elevated);
+    border-radius: 6px;
+    cursor: pointer;
+    color: var(--mc-text-secondary);
+    flex-shrink: 0;
+    transition: all 0.15s;
+  }
+
+  .conv-toggle-btn:hover {
+    border-color: var(--mc-primary);
+    color: var(--mc-primary);
+  }
+
+  .chat-header {
+    padding: 10px 12px;
+    gap: 8px;
+  }
+
+  .chat-header-left {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+    gap: 6px;
+  }
+
+  .agent-badge {
+    padding: 4px 8px;
+  }
+
+  .agent-badge-name,
+  .agent-badge-type {
+    display: none;
+  }
+
+  .model-select {
+    min-width: 0;
+    max-width: 160px;
+    flex: 1;
+  }
+
+  .drop-overlay__content {
+    padding: 24px 32px;
+    font-size: 14px;
+  }
 }
 </style>

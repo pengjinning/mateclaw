@@ -185,6 +185,8 @@ watch(
   display: flex;
   flex-direction: column;
   align-items: center;
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .welcome-logo {
@@ -272,9 +274,10 @@ watch(
 .suggestion-card__text {
   flex: 1;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   line-height: 1.4;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
 }
 
 .suggestion-card__arrow {
@@ -333,5 +336,47 @@ watch(
 .is-scrolling .scroll-to-bottom {
   opacity: 1;
   pointer-events: auto;
+}
+
+/* ===== 移动端适配 ===== */
+@media (max-width: 768px) {
+  .message-list {
+    padding: 16px 12px 12px;
+  }
+
+  .message-list-content {
+    gap: 12px;
+  }
+
+  .empty-state {
+    min-height: 300px;
+  }
+
+  .welcome-screen {
+    padding: 24px 12px;
+  }
+
+  .welcome-logo__icon {
+    width: 48px;
+    height: 48px;
+  }
+
+  .welcome-title {
+    font-size: 22px;
+  }
+
+  .welcome-subtitle {
+    margin-bottom: 24px;
+    max-width: 100%;
+  }
+
+  .welcome-suggestions {
+    grid-template-columns: 1fr;
+    max-width: 100%;
+  }
+
+  .suggestion-card {
+    padding: 10px 12px;
+  }
 }
 </style>

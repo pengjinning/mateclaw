@@ -45,9 +45,9 @@
             <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
           </svg>
         </span>
-        <span class="approval-bar__label">允许</span>
+        <span class="approval-bar__label">{{ t('chat.approvalAllow') }}</span>
         <span class="approval-bar__tool">{{ pendingApproval.toolName }}</span>
-        <span class="approval-bar__label">执行？</span>
+        <span class="approval-bar__label">{{ t('chat.approvalExecute') }}</span>
       </div>
       <div class="approval-bar__actions">
         <button
@@ -58,7 +58,7 @@
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
             <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
           </svg>
-          拒绝
+          {{ t('chat.deny') }}
         </button>
         <button
           type="button"
@@ -68,7 +68,7 @@
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
             <polyline points="20 6 9 17 4 12"/>
           </svg>
-          允许
+          {{ t('chat.approve') }}
         </button>
       </div>
     </div>
@@ -728,5 +728,35 @@ defineExpose({
 
 .send-btn.is-interrupt:hover:not(:disabled) {
   background: #d97706;
+}
+
+/* ===== 移动端适配 ===== */
+@media (max-width: 768px) {
+  .chat-input-wrapper {
+    padding: 10px 12px 14px;
+  }
+
+  .approval-bar {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+    padding: 10px 12px;
+  }
+
+  .approval-bar__info {
+    flex-wrap: wrap;
+  }
+
+  .approval-bar__actions {
+    justify-content: flex-end;
+  }
+
+  .approval-bar__tool {
+    max-width: 180px;
+  }
+
+  .attachment-chip__label span:first-child {
+    max-width: 180px;
+  }
 }
 </style>

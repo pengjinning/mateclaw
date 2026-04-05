@@ -145,6 +145,13 @@ export default {
     streamReconnecting: 'Reconnecting...',
     streamStopped: 'Stopped',
     streamCompleted: 'Completed',
+    // Approval bar
+    approvalAllow: 'Allow',
+    approvalExecute: 'to execute?',
+    // Time format
+    timeJustNow: 'Just now',
+    timeMinutesAgo: '{n}m ago',
+    timeHoursAgo: '{n}h ago',
   },
   nav: {
     chat: 'Chat',

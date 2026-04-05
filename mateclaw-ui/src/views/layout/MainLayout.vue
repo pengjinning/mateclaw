@@ -1,7 +1,12 @@
 <template>
   <div class="app-layout">
+    <!-- 移动端背景遮罩 -->
+    <Transition name="fade">
+      <div v-if="isMobile && mobileMenuOpen" class="sidebar-backdrop" @click="mobileMenuOpen = false"></div>
+    </Transition>
+
     <!-- 左侧导航栏 -->
-    <aside class="sidebar" :class="{ collapsed: sidebarCollapsed }">
+    <aside class="sidebar" :class="{ collapsed: sidebarCollapsed && !isMobile, 'mobile-open': mobileMenuOpen }">
       <!-- Logo -->
       <div class="sidebar-logo">
         <div class="logo-icon">
@@ -40,6 +45,7 @@
               class="nav-item"
               :class="{ active: isNavItemActive(item) }"
               :title="sidebarCollapsed ? item.label : ''"
+              @click="onNavClick"
             >
               <span class="nav-icon" v-html="item.icon"></span>
               <span v-if="!sidebarCollapsed" class="nav-label">{{ item.label }}</span>
@@ -85,13 +91,24 @@
 
     <!-- 主内容区 -->
     <main class="main-content">
+      <!-- 移动端顶部栏 -->
+      <div v-if="isMobile" class="mobile-topbar">
+        <button class="mobile-menu-btn" @click="mobileMenuOpen = true" :title="t('common.expandSidebar')">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="3" y1="6" x2="21" y2="6"/>
+            <line x1="3" y1="12" x2="21" y2="12"/>
+            <line x1="3" y1="18" x2="21" y2="18"/>
+          </svg>
+        </button>
+        <span class="mobile-topbar-title">Mate<span class="logo-name-highlight">Claw</span></span>
+      </div>
       <router-view />
     </main>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { useThemeStore } from '@/stores/useThemeStore'
@@ -102,6 +119,30 @@ const route = useRoute()
 const { t } = useI18n()
 const themeStore = useThemeStore()
 const sidebarCollapsed = ref(localStorage.getItem('mc-sidebar-collapsed') === 'true')
+
+// 移动端状态
+const isMobile = ref(false)
+const mobileMenuOpen = ref(false)
+let mobileQuery: MediaQueryList | null = null
+
+function handleMobileChange(e: MediaQueryListEvent | MediaQueryList) {
+  isMobile.value = e.matches
+  if (!e.matches) mobileMenuOpen.value = false
+}
+
+onMounted(() => {
+  mobileQuery = window.matchMedia('(max-width: 768px)')
+  handleMobileChange(mobileQuery)
+  mobileQuery.addEventListener('change', handleMobileChange)
+})
+
+onBeforeUnmount(() => {
+  mobileQuery?.removeEventListener('change', handleMobileChange)
+})
+
+function onNavClick() {
+  if (isMobile.value) mobileMenuOpen.value = false
+}
 
 const username = computed(() => localStorage.getItem('username') || 'User')
 const role = computed(() => localStorage.getItem('role') || 'user')
@@ -527,9 +568,90 @@ function logout() {
   min-width: 0;
 }
 
+/* ===== 移动端元素（桌面端隐藏） ===== */
+.sidebar-backdrop {
+  display: none;
+}
+
+.mobile-topbar {
+  display: none;
+}
+
 /* 动画 */
 .fade-enter-active,
 .fade-leave-active { transition: opacity 0.15s ease; }
 .fade-enter-from,
 .fade-leave-to { opacity: 0; }
+
+/* ===== 移动端适配 ===== */
+@media (max-width: 768px) {
+  .sidebar {
+    position: fixed;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    z-index: 1000;
+    width: 260px;
+    min-width: 260px;
+    transform: translateX(-100%);
+    transition: transform 0.25s ease;
+    box-shadow: none;
+  }
+
+  .sidebar.mobile-open {
+    transform: translateX(0);
+    box-shadow: 4px 0 24px rgba(0, 0, 0, 0.15);
+  }
+
+  .sidebar.collapsed {
+    width: 260px;
+    min-width: 260px;
+  }
+
+  .collapse-btn {
+    display: none;
+  }
+
+  .sidebar-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 999;
+    background: rgba(0, 0, 0, 0.3);
+  }
+
+  .mobile-topbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    background: var(--mc-sidebar-bg);
+    border-bottom: 1px solid var(--mc-border-light);
+    flex-shrink: 0;
+  }
+
+  .mobile-topbar-title {
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--mc-text-primary);
+  }
+
+  .mobile-menu-btn {
+    width: 36px;
+    height: 36px;
+    border: 1px solid var(--mc-border);
+    background: var(--mc-bg-elevated);
+    border-radius: 8px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--mc-text-primary);
+    flex-shrink: 0;
+  }
+
+  .mobile-menu-btn:hover {
+    background: var(--mc-bg-sunken);
+  }
+}
 </style>

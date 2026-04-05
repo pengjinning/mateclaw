@@ -21,7 +21,7 @@
         <thead>
           <tr>
             <th>{{ t('sessions.columns.session') }}</th>
-            <th>{{ t('sessions.columns.source') || '来源' }}</th>
+            <th>{{ t('sessions.columns.source') }}</th>
             <th>{{ t('sessions.columns.agent') }}</th>
             <th>{{ t('sessions.columns.messages') }}</th>
             <th>{{ t('sessions.columns.status') }}</th>

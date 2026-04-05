@@ -1560,4 +1560,26 @@ watch(isGenerating, (generating) => {
   font-weight: 600;
   color: var(--mc-text-primary, #1e293b);
 }
+
+/* ===== 移动端适配 ===== */
+@media (max-width: 768px) {
+  .message-wrapper {
+    max-width: 100%;
+    gap: 8px;
+  }
+
+  .msg-body {
+    max-width: calc(100% - 40px);
+  }
+
+  .msg-avatar {
+    width: 28px;
+    height: 28px;
+    font-size: 12px;
+  }
+
+  .error-card {
+    max-width: 100%;
+  }
+}
 </style>

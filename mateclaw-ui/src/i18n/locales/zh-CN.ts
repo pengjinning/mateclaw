@@ -145,6 +145,13 @@ export default {
     streamReconnecting: '重新连接...',
     streamStopped: '已停止',
     streamCompleted: '已完成',
+    // 审批栏
+    approvalAllow: '允许',
+    approvalExecute: '执行？',
+    // 时间格式
+    timeJustNow: '刚刚',
+    timeMinutesAgo: '{n} 分钟前',
+    timeHoursAgo: '{n} 小时前',
   },
   nav: {
     chat: '对话',
