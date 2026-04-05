@@ -905,6 +905,9 @@ async function handleFileSelect(files: File[]) {
     for (const file of files) {
       const res: any = await chatApi.uploadFile(currentConversationId.value, file)
       const data = res.data || {}
+      // 图片使用本地 ObjectURL 预览（避免 /api/v1/chat/files/ 需要 JWT 认证导致 <img> 加载失败）
+      const isImage = (data.contentType || file.type || '').startsWith('image/')
+      const previewUrl = isImage ? URL.createObjectURL(file) : data.url
       pendingAttachments.value.push({
         name: data.fileName || file.name,
         size: data.size || file.size,
@@ -912,6 +915,7 @@ async function handleFileSelect(files: File[]) {
         storedName: data.storedName,
         path: data.path,
         contentType: data.contentType || file.type,
+        previewUrl,
       })
     }
   } catch (e) {

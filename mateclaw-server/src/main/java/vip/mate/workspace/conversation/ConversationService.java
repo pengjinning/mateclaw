@@ -246,6 +246,15 @@ public class ConversationService {
     }
 
     /**
+     * 获取会话最后一条消息内容（用于 rate limit 防护等场景）
+     */
+    public String getLastMessage(String conversationId) {
+        ConversationEntity conv = conversationMapper.selectOne(new LambdaQueryWrapper<ConversationEntity>()
+                .eq(ConversationEntity::getConversationId, conversationId));
+        return conv != null ? conv.getLastMessage() : null;
+    }
+
+    /**
      * 获取会话的消息数量
      */
     public int getMessageCount(String conversationId) {

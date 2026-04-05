@@ -351,7 +351,8 @@ public class StateGraphReActAgent extends BaseAgent implements StructuredStreamC
         }
 
         List<Message> messages = new ArrayList<>(historyMessages);
-        messages.add(new UserMessage(userMessage));
+        // 构建当前用户消息：支持 multimodal（如果有图片附件，直接注入 Media）
+        messages.add(buildCurrentUserMessage(conversationId, userMessage));
 
         Map<String, Object> inputs = new HashMap<>();
         // 输入

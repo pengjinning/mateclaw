@@ -99,6 +99,8 @@ export interface ChatAttachment {
   storedName: string
   path: string
   contentType?: string
+  /** 本地预览 URL（ObjectURL），图片附件用于避免 JWT 认证问题 */
+  previewUrl?: string
 }
 
 export interface ToolCallMeta {

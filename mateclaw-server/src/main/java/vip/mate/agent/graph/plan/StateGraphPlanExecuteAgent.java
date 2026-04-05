@@ -255,7 +255,7 @@ public class StateGraphPlanExecuteAgent extends BaseAgent implements StructuredS
         }
 
         List<Message> messages = new ArrayList<>(historyMessages);
-        messages.add(new UserMessage(userMessage));
+        messages.add(buildCurrentUserMessage(conversationId, userMessage));
 
         // 构建 working context：对历史消息做受控长度摘要
         String workingContext = buildWorkingContext(historyMessages, List.of());

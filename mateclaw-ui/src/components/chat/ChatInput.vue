@@ -14,8 +14,19 @@
         v-for="attachment in attachments"
         :key="attachment.storedName || attachment.path"
         class="attachment-chip"
-        :class="{ 'attachment-chip--dir': attachment.contentType === 'inode/directory' }"
+        :class="{
+          'attachment-chip--dir': attachment.contentType === 'inode/directory',
+          'attachment-chip--image': attachment.contentType?.startsWith('image/'),
+        }"
       >
+        <!-- 图片缩略图预览（优先用本地 previewUrl，避免 JWT 认证问题） -->
+        <img
+          v-if="attachment.contentType?.startsWith('image/') && (attachment.previewUrl || attachment.url)"
+          :src="attachment.previewUrl || attachment.url"
+          :alt="attachment.name"
+          class="attachment-chip__thumbnail"
+          loading="lazy"
+        />
         <component
           :is="attachment.url ? 'a' : 'span'"
           :href="attachment.url || undefined"
@@ -403,6 +414,18 @@ defineExpose({
   border: 1px solid var(--mc-attachment-border, #e2e8f0);
   border-radius: 999px;
   padding: 6px 8px 6px 12px;
+}
+
+.attachment-chip--image {
+  padding: 4px 6px;
+}
+
+.attachment-chip__thumbnail {
+  width: 36px;
+  height: 36px;
+  object-fit: cover;
+  border-radius: 4px;
+  flex-shrink: 0;
 }
 
 .attachment-chip__label {

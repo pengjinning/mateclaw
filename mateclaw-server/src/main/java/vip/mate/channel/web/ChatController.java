@@ -922,6 +922,26 @@ public class ChatController {
             return;
         }
 
+        // Rate Limit 防护：如果上一轮以 rate limit 错误结束，不立即续跑排队消息（必然再次 429）。
+        // 改为持久化用户消息 + 通知前端"稍后重试"，避免连锁 429 浪费配额。
+        String lastMessage = conversationService.getLastMessage(conversationId);
+        if (lastMessage != null && (lastMessage.contains("频率过高") || lastMessage.contains("rate_limit")
+                || lastMessage.contains("429") || lastMessage.contains("速率限制"))) {
+            log.warn("Skipping queued message after rate limit error: conversationId={}, lastMessage={}",
+                    conversationId, lastMessage.substring(0, Math.min(50, lastMessage.length())));
+            // 持久化用户消息不丢失
+            if (preConsumedInput.message() != null && !preConsumedInput.message().isBlank()
+                    && !preConsumedInput.persisted()) {
+                conversationService.saveMessage(conversationId, "user", preConsumedInput.message());
+            }
+            broadcastEvent(conversationId, "warning", Map.of(
+                    "message", "上一轮请求触发了频率限制，排队消息已保存，请稍后重新发送"));
+            broadcastEvent(conversationId, "done", Map.of("status", "rate_limited"));
+            conversationService.updateStreamStatus(conversationId, "idle");
+            completeEmitterQuietly(emitter, emitterDone);
+            return;
+        }
+
         String queuedMessage = preConsumedInput.message();
         Long agentId = preConsumedInput.agentId() != null ? preConsumedInput.agentId() : 1L;
         log.info("Starting queued message: conversationId={}, agentId={}, message={}",
