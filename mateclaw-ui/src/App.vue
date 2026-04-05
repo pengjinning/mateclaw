@@ -5,7 +5,8 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, watchEffect } from 'vue'
+import { useI18n } from 'vue-i18n'
 import en from 'element-plus/es/locale/lang/en'
 import zhCn from 'element-plus/es/locale/lang/zh-cn'
 import { currentLocale } from '@/i18n'
@@ -13,6 +14,12 @@ import { useThemeStore } from '@/stores/useThemeStore'
 
 // Initialize theme — applies .dark class to <html> immediately
 useThemeStore()
+
+const { t } = useI18n()
+
+watchEffect(() => {
+  document.title = t('app.title')
+})
 
 const elementLocale = computed(() => (currentLocale.value === 'en-US' ? en : zhCn))
 </script>

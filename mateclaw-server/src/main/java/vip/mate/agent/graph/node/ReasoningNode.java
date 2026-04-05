@@ -7,6 +7,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.SystemMessage;
+import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.prompt.ChatOptions;
 import org.springframework.ai.chat.prompt.Prompt;
@@ -18,6 +19,7 @@ import vip.mate.agent.AgentToolSet;
 import vip.mate.agent.GraphEventPublisher;
 import vip.mate.agent.graph.NodeStreamingChatHelper;
 import vip.mate.agent.context.ConversationWindowManager;
+import vip.mate.agent.context.RuntimeContextInjector;
 import vip.mate.agent.graph.state.FinishReason;
 import vip.mate.agent.graph.state.MateClawStateAccessor;
 import vip.mate.agent.graph.state.MateClawStateKeys;
@@ -155,6 +157,8 @@ public class ReasoningNode implements NodeAction {
         // 构建 Prompt，附带工具定义但禁用内部工具执行
         List<Message> promptMessages = new ArrayList<>();
         promptMessages.add(new SystemMessage(systemPrompt));
+        // 注入运行时上下文（当前时间），让 LLM 在推理阶段即可感知真实日期
+        promptMessages.add(new UserMessage(RuntimeContextInjector.buildContextMessage()));
         promptMessages.addAll(messages);
 
         ChatOptions options;

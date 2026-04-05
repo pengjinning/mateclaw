@@ -123,7 +123,7 @@
         :loading="isGenerating"
         :assistant-icon="currentAgent?.icon || '🤖'"
         :user-icon="userInitial"
-        :title="showModelPrompt ? modelPromptTitle : 'MateClaw'"
+        :title="showModelPrompt ? modelPromptTitle : $t('app.title')"
         :subtitle="showModelPrompt ? modelPromptDesc : $t('chat.subtitle')"
         :suggestions="showModelPrompt ? [] : suggestions"
         @regenerate="handleRegenerate"

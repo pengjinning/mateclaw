@@ -16,6 +16,7 @@ import vip.mate.agent.graph.plan.state.PlanStateAccessor;
 import vip.mate.agent.graph.plan.state.PlanStateKeys;
 import vip.mate.agent.graph.state.MateClawStateKeys;
 import vip.mate.agent.context.ConversationWindowManager;
+import vip.mate.agent.context.RuntimeContextInjector;
 import vip.mate.planning.service.PlanningService;
 
 import java.util.ArrayList;
@@ -125,6 +126,8 @@ public class PlanGenerationNode implements NodeAction {
             // 构建 prompt 消息列表：system + 历史上下文 + 当前规划请求
             List<Message> promptMessages = new ArrayList<>();
             promptMessages.add(new SystemMessage(systemPrompt + "\n\n" + PLANNING_PROMPT));
+            // 注入运行时上下文（当前时间）
+            promptMessages.add(new UserMessage(RuntimeContextInjector.buildContextMessage()));
 
             // 注入 working context（对话历史摘要），让规划能感知之前对话的约束和补充条件
             String workingContext = accessor.workingContext();

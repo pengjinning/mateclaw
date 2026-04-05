@@ -1,4 +1,7 @@
 export default {
+  app: {
+    title: 'MateClaw - AI Assistant',
+  },
   common: {
     save: 'Save',
     cancel: 'Cancel',

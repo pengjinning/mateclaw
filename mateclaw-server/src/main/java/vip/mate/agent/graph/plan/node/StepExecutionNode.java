@@ -23,6 +23,7 @@ import vip.mate.agent.graph.plan.state.PlanStateAccessor;
 import vip.mate.agent.graph.plan.state.PlanStateKeys;
 import vip.mate.agent.graph.state.MateClawStateKeys;
 import vip.mate.agent.context.ConversationWindowManager;
+import vip.mate.agent.context.RuntimeContextInjector;
 import vip.mate.agent.graph.executor.ToolExecutionExecutor;
 import vip.mate.channel.web.ChatStreamTracker;
 import vip.mate.planning.service.PlanningService;
@@ -304,6 +305,8 @@ public class StepExecutionNode implements NodeAction {
                 8. 每一步最多做一个必要的检查和一个必要的执行，不要无意义循环。
                 """;
         messages.add(new SystemMessage(enhancedSystemPrompt));
+        // 注入运行时上下文（当前时间）
+        messages.add(new UserMessage(RuntimeContextInjector.buildContextMessage()));
 
         // Layer 2: Working context（对话历史 + 步骤结果的受控长度摘要）
         String workingContext = accessor.workingContext();
