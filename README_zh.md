@@ -124,7 +124,11 @@ docker compose up -d
 
 ## 截图
 
-<!-- TODO: 添加控制台、Agent 工作台、技能市场等截图 -->
+<p align="center">
+  <img src="assets/images/chat-echarts-demo.png" alt="MateClaw 对话界面 — ECharts 可视化" width="800">
+</p>
+
+<p align="center"><em>对话控制台 — AI 自我介绍并自动生成 ECharts 环形图</em></p>
 
 ---
 

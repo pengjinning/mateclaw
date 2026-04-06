@@ -124,7 +124,11 @@ Double-click to run. The app bundles JRE 21 + the Spring Boot backend, no Java i
 
 ## Screenshots
 
-<!-- TODO: Add screenshots of the chat console, agent workspace, skill market, etc. -->
+<p align="center">
+  <img src="assets/images/chat-echarts-demo.png" alt="MateClaw Chat with ECharts Visualization" width="800">
+</p>
+
+<p align="center"><em>Chat console — AI self-introduction with auto-generated ECharts donut chart</em></p>
 
 ---
 
