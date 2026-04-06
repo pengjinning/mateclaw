@@ -17,6 +17,7 @@ import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.*;
 
 /**
@@ -32,6 +33,9 @@ public class BrowserUseTool {
     private static final int MAX_SNAPSHOT_LENGTH = 20_000;
     private static final int CDP_SCAN_PORT_MIN = 9000;
     private static final int CDP_SCAN_PORT_MAX = 10000;
+
+    private static final boolean IS_WINDOWS = System.getProperty("os.name", "")
+            .toLowerCase(Locale.ROOT).contains("win");
 
     /**
      * 共享 Playwright 实例（Node.js 进程）。
@@ -150,6 +154,13 @@ public class BrowserUseTool {
         Playwright pw = getOrCreatePlaywright();
         BrowserType.LaunchOptions launchOptions = new BrowserType.LaunchOptions()
                 .setHeadless(!headed);
+
+        // 平台特定启动参数
+        List<String> extraArgs = chromiumLaunchArgs();
+        if (!extraArgs.isEmpty()) {
+            launchOptions.setArgs(extraArgs);
+            log.debug("[BrowserUse] Chromium extra args: {}", extraArgs);
+        }
 
         Browser browser = pw.chromium().launch(launchOptions);
         BrowserContext context = browser.newContext(new Browser.NewContextOptions()
@@ -521,6 +532,49 @@ public class BrowserUseTool {
         result.set("ok", true);
         result.set("result", resultStr);
         return JSONUtil.toJsonPrettyStr(result);
+    }
+
+    // ==================== Platform Helpers ====================
+
+    /**
+     * 返回 Chromium 在当前平台下需要的额外启动参数。
+     * <p>
+     * Windows: --no-sandbox（沙箱兼容性）+ --disable-gpu（GPU 硬件加速问题）
+     * 容器环境: --no-sandbox + --disable-dev-shm-usage（共享内存不足）
+     */
+    private static List<String> chromiumLaunchArgs() {
+        List<String> args = new ArrayList<>();
+        boolean inContainer = isRunningInContainer();
+
+        if (IS_WINDOWS || inContainer) {
+            args.add("--no-sandbox");
+        }
+        if (inContainer) {
+            args.add("--disable-dev-shm-usage");
+        }
+        if (IS_WINDOWS) {
+            args.add("--disable-gpu");
+        }
+        return args;
+    }
+
+    /**
+     * 检测是否运行在 Docker/容器环境中。
+     */
+    private static boolean isRunningInContainer() {
+        try {
+            // Docker 容器中通常存在 /.dockerenv 文件
+            if (java.nio.file.Files.exists(java.nio.file.Path.of("/.dockerenv"))) {
+                return true;
+            }
+            // 或者 /proc/1/cgroup 包含 docker/kubepods
+            java.nio.file.Path cgroup = java.nio.file.Path.of("/proc/1/cgroup");
+            if (java.nio.file.Files.exists(cgroup)) {
+                String content = java.nio.file.Files.readString(cgroup);
+                return content.contains("docker") || content.contains("kubepods") || content.contains("containerd");
+            }
+        } catch (Exception ignored) {}
+        return false;
     }
 
     // ==================== CDP Helpers ====================
