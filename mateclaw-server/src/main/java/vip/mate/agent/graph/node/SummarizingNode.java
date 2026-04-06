@@ -82,6 +82,10 @@ public class SummarizingNode implements NodeAction {
 
         log.info("[SummarizingNode] Summarizing {} observations ({} total chars) for user query",
                 observations.size(), accessor.totalObservationChars());
+        pushPhase(conversationId, "summarizing_observations", Map.of(
+                "observationCount", observations.size(),
+                "summaryChars", accessor.totalObservationChars()
+        ));
 
         // 构建 summarize prompt
         StringBuilder observationText = new StringBuilder();
@@ -175,5 +179,13 @@ public class SummarizingNode implements NodeAction {
                         "observationCount", observations.size(),
                         "summaryChars", summaryContent.length()))))
                 .build();
+    }
+
+    private void pushPhase(String conversationId, String phase, Map<String, Object> extra) {
+        if (streamTracker == null || conversationId == null || conversationId.isEmpty()) {
+            return;
+        }
+        streamTracker.updatePhase(conversationId, phase);
+        streamTracker.broadcastObject(conversationId, "phase", GraphEventPublisher.phase(phase, extra).data());
     }
 }

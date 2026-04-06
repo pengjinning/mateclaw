@@ -2,8 +2,12 @@
   <div v-if="isLoading && !hideBar" class="stream-loading-bar">
     <div class="stream-loading-content">
       <span class="loading-icon" :class="phaseIconClass">{{ phaseIcon }}</span>
-      <span class="loading-text" :class="phaseTextClass">{{ statusText }}</span>
-      <span v-if="runningToolName" class="loading-tool">{{ runningToolName }}</span>
+      <div class="loading-copy">
+        <span class="loading-text" :class="phaseTextClass">{{ statusText }}</span>
+        <span v-if="runningToolName" class="loading-tool">{{ runningToolName }}</span>
+        <span v-if="statusDetail" class="loading-detail">{{ statusDetail }}</span>
+        <span v-if="slowHint" class="loading-slow">{{ slowHint }}</span>
+      </div>
     </div>
     <div class="loading-right">
       <!-- 排队指示器 -->
@@ -25,7 +29,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, onBeforeUnmount } from 'vue'
 import { useI18n } from 'vue-i18n'
-import type { StreamPhase } from '@/types'
+import type { PhaseEventData, StreamPhase } from '@/types'
 
 interface Props {
   isLoading: boolean
@@ -36,6 +40,8 @@ interface Props {
   promptTokens?: number
   /** 当前流阶段 */
   phase?: StreamPhase
+  /** 最近一次阶段事件 */
+  phaseInfo?: PhaseEventData | null
   /** 当前正在执行的工具名称 */
   runningToolName?: string
   /** 是否有排队消息 */
@@ -49,6 +55,7 @@ const props = withDefaults(defineProps<Props>(), {
   completionTokens: 0,
   promptTokens: 0,
   phase: 'thinking',
+  phaseInfo: null,
   runningToolName: '',
   hasQueued: false,
 })
@@ -57,10 +64,17 @@ const { t } = useI18n()
 
 // Phase-aware 状态文本（i18n）
 const phaseI18nMap: Record<string, string> = {
+  preparing_context: 'chat.streamPreparingContext',
+  reading_memory: 'chat.streamReadingMemory',
+  reasoning: 'chat.streamReasoning',
+  drafting_answer: 'chat.streamDraftingAnswer',
+  summarizing_observations: 'chat.streamSummarizingObservations',
   thinking: 'chat.streamThinking',
   streaming: 'chat.streamGenerating',
   executing_tool: 'chat.streamExecutingTool',
   awaiting_approval: 'chat.streamAwaitingApproval',
+  finalizing: 'chat.streamFinalizing',
+  failed: 'chat.streamFailed',
   interrupting: 'chat.streamInterrupting',
   queued: 'chat.streamQueued',
   reconnecting: 'chat.streamReconnecting',
@@ -77,10 +91,17 @@ const statusText = computed(() => {
 
 const phaseIcon = computed(() => {
   switch (props.phase) {
+    case 'preparing_context': return '◔'
+    case 'reading_memory': return '⌕'
+    case 'reasoning': return '◐'
+    case 'drafting_answer': return '✎'
+    case 'summarizing_observations': return '≋'
     case 'thinking': return '◐'
     case 'streaming': return '▸'
     case 'executing_tool': return '⚙'
     case 'awaiting_approval': return '⏸'
+    case 'finalizing': return '✓'
+    case 'failed': return '!'
     case 'interrupting': return '⊘'
     case 'queued': return '◷'
     case 'reconnecting': return '↻'
@@ -91,6 +112,7 @@ const phaseIcon = computed(() => {
 const phaseIconClass = computed(() => {
   switch (props.phase) {
     case 'awaiting_approval': return 'icon-paused'
+    case 'failed': return 'icon-warning'
     case 'interrupting': return 'icon-warning'
     case 'queued': return 'icon-queued'
     default: return 'icon-active'
@@ -100,10 +122,51 @@ const phaseIconClass = computed(() => {
 const phaseTextClass = computed(() => {
   switch (props.phase) {
     case 'awaiting_approval': return 'text-amber'
+    case 'failed': return 'text-red'
     case 'interrupting': return 'text-red'
     case 'queued': return 'text-blue'
     default: return ''
   }
+})
+
+const detailI18nMap: Record<string, string> = {
+  preparing_context: 'chat.streamPreparingContextDetail',
+  reading_memory: 'chat.streamReadingMemoryDetail',
+  reasoning: 'chat.streamReasoningDetail',
+  drafting_answer: 'chat.streamDraftingAnswerDetail',
+  summarizing_observations: 'chat.streamSummarizingObservationsDetail',
+  thinking: 'chat.streamThinkingDetail',
+  streaming: 'chat.streamGeneratingDetail',
+  executing_tool: 'chat.streamExecutingToolDetail',
+  awaiting_approval: 'chat.streamAwaitingApprovalDetail',
+  finalizing: 'chat.streamFinalizingDetail',
+  failed: 'chat.streamFailedDetail',
+}
+
+const statusDetail = computed(() => {
+  if (props.phaseInfo?.phase) {
+    const key = detailI18nMap[props.phaseInfo.phase]
+    if (key) return t(key)
+  }
+  const key = detailI18nMap[props.phase]
+  return key ? t(key) : ''
+})
+
+const slowHint = computed(() => {
+  const secs = elapsedSeconds.value
+  if (props.phase === 'summarizing_observations' && secs >= 15) {
+    return t('chat.streamSlowSummarizing')
+  }
+  if ((props.phase === 'reasoning' || props.phase === 'thinking') && secs >= 20) {
+    return t('chat.streamSlowReasoning')
+  }
+  if (secs >= 45) {
+    return t('chat.streamSlowGeneral')
+  }
+  if (secs >= 8) {
+    return t('chat.streamSlowShort')
+  }
+  return ''
 })
 
 // 耗时统计
@@ -174,9 +237,16 @@ onBeforeUnmount(() => {
 
 .stream-loading-content {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 6px;
   color: #f97316;
+}
+
+.loading-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
 }
 
 .loading-icon {
@@ -214,6 +284,7 @@ onBeforeUnmount(() => {
 .text-blue { color: #3b82f6; }
 
 .loading-tool {
+  align-self: flex-start;
   font-family: ui-monospace, 'SFMono-Regular', Consolas, monospace;
   font-size: 12px;
   background: rgba(249, 115, 22, 0.1);
@@ -224,6 +295,16 @@ onBeforeUnmount(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.loading-detail {
+  font-size: 12px;
+  color: var(--mc-text-secondary, #94a3b8);
+}
+
+.loading-slow {
+  font-size: 12px;
+  color: #f59e0b;
 }
 
 .loading-right {

@@ -159,6 +159,7 @@
         :completion-tokens="currentGeneratingTokens"
         :prompt-tokens="currentPromptTokens"
         :phase="streamPhase"
+        :phase-info="phaseInfo"
         :running-tool-name="currentRunningToolName"
         :has-queued="hasQueued"
       />
@@ -363,6 +364,7 @@ const {
   messages,
   isGenerating,
   streamPhase,
+  phaseInfo,
   queuedMessage,
   hasQueued,
   queueSize,

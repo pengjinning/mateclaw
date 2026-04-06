@@ -172,7 +172,7 @@ public class ToolExecutionExecutor {
 
             // 4. 分类: concurrencySafe
             boolean safe = isConcurrencySafe(toolName);
-            preparedCalls.add(new PreparedToolCall(toolCall, callback, arguments, safe, allResponses.size()));
+            preparedCalls.add(new PreparedToolCall(toolCall, callback, arguments, safe, allResponses.size(), conversationId));
             // 占位，Phase 2 填充
             allResponses.add(null);
         }
@@ -235,6 +235,14 @@ public class ToolExecutionExecutor {
     private void executePreparedCalls(List<PreparedToolCall> preparedCalls,
                                        List<ToolResponseMessage.ToolResponse> allResponses,
                                        List<GraphEventPublisher.GraphEvent> events) {
+        if (!preparedCalls.isEmpty() && streamTracker != null) {
+            String conversationId = preparedCalls.get(0).conversationId;
+            String phase = classifyBatchPhase(preparedCalls);
+            streamTracker.updatePhase(conversationId, phase);
+            streamTracker.broadcastObject(conversationId, "phase", GraphEventPublisher.phase(phase, Map.of(
+                    "toolCount", preparedCalls.size()
+            )).data());
+        }
         // 分组: 连续的 safe 工具可以并行，遇到 unsafe 工具则先等待所有 safe 完成再独占执行
         List<List<PreparedToolCall>> batches = buildExecutionBatches(preparedCalls);
 
@@ -320,6 +328,11 @@ public class ToolExecutionExecutor {
                                                                 List<GraphEventPublisher.GraphEvent> events) {
         String toolName = pc.toolCall.name();
         try {
+            if (streamTracker != null) {
+                streamTracker.updateRunningTool(pc.conversationId, toolName);
+                streamTracker.broadcastObject(pc.conversationId, GraphEventPublisher.EVENT_TOOL_START,
+                        GraphEventPublisher.toolStart(toolName, pc.arguments).data());
+            }
             log.info("[ToolExecutor] Executing tool: {} with args: {}",
                     toolName, pc.arguments != null && pc.arguments.length() > 200
                             ? pc.arguments.substring(0, 200) + "..." : pc.arguments);
@@ -338,12 +351,22 @@ public class ToolExecutionExecutor {
                 log.info("[ToolExecutor] Tool {} returned {} chars", toolName, rawLen);
             }
             events.add(GraphEventPublisher.toolComplete(toolName, result, true));
+            if (streamTracker != null) {
+                streamTracker.broadcastObject(pc.conversationId, GraphEventPublisher.EVENT_TOOL_COMPLETE,
+                        GraphEventPublisher.toolComplete(toolName, result, true).data());
+                streamTracker.updateRunningTool(pc.conversationId, null);
+            }
             return new ToolResponseMessage.ToolResponse(
                     pc.toolCall.id(), toolName, result != null ? result : "");
         } catch (Exception e) {
             log.error("[ToolExecutor] Tool {} execution failed: {}", toolName, e.getMessage(), e);
             String normalizedError = normalizeToolExecutionError(e);
             events.add(GraphEventPublisher.toolComplete(toolName, normalizedError, false));
+            if (streamTracker != null) {
+                streamTracker.broadcastObject(pc.conversationId, GraphEventPublisher.EVENT_TOOL_COMPLETE,
+                        GraphEventPublisher.toolComplete(toolName, normalizedError, false).data());
+                streamTracker.updateRunningTool(pc.conversationId, null);
+            }
             return new ToolResponseMessage.ToolResponse(
                     pc.toolCall.id(), toolName, normalizedError);
         }
@@ -408,6 +431,13 @@ public class ToolExecutionExecutor {
         return !DEFAULT_UNSAFE_TOOLS.contains(toolName);
     }
 
+    private String classifyBatchPhase(List<PreparedToolCall> preparedCalls) {
+        boolean memoryOnly = preparedCalls.stream().allMatch(pc ->
+                "read_workspace_memory_file".equals(pc.toolCall.name())
+                        || "list_workspace_memory_files".equals(pc.toolCall.name()));
+        return memoryOnly ? "reading_memory" : "executing_tool";
+    }
+
     private String normalizeToolExecutionError(Exception e) {
         String message = e != null && e.getMessage() != null ? e.getMessage() : "未知错误";
         String lower = message.toLowerCase(Locale.ROOT);
@@ -444,7 +474,8 @@ public class ToolExecutionExecutor {
             ToolCallback callback,
             String arguments,
             boolean concurrencySafe,
-            int resultIndex
+            int resultIndex,
+            String conversationId
     ) {}
 
     private record ApprovalBarrier(String pendingId, String toolName) {}

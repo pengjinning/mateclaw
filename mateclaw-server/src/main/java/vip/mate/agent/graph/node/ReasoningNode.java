@@ -206,6 +206,10 @@ public class ReasoningNode implements NodeAction {
 
         GraphEventPublisher.GraphEvent phaseEvent = GraphEventPublisher.phase("reasoning",
                 Map.of("iteration", accessor.iterationCount()));
+        pushPhase(conversationId, "reasoning", Map.of(
+                "iteration", accessor.iterationCount(),
+                "llmCallCount", nextLlmCallCount
+        ));
 
         NodeStreamingChatHelper.StreamResult result;
         try {
@@ -225,6 +229,11 @@ public class ReasoningNode implements NodeAction {
                             messages.size(), compactedMessages.size());
                     // compact retry 是第 2 次 LLM 调用，先递增再调用
                     nextLlmCallCount++;
+                    pushPhase(conversationId, "reasoning", Map.of(
+                            "iteration", accessor.iterationCount(),
+                            "llmCallCount", nextLlmCallCount,
+                            "compacted", true
+                    ));
                     result = streamingHelper.streamCall(chatModel, retryPrompt, conversationId, "reasoning_compact_retry");
                 } else {
                     log.warn("[ReasoningNode] Compaction did not reduce messages, cannot retry");
@@ -296,6 +305,10 @@ public class ReasoningNode implements NodeAction {
             log.info("[ReasoningNode] LLM requested {} tool call(s): {}",
                     result.toolCalls().size(),
                     result.toolCalls().stream().map(AssistantMessage.ToolCall::name).toList());
+            pushPhase(conversationId, "executing_tool", Map.of(
+                    "iteration", accessor.iterationCount(),
+                    "toolCount", result.toolCalls().size()
+            ));
 
             return MateClawStateAccessor.output()
                     .needsToolCall(true)
@@ -315,6 +328,10 @@ public class ReasoningNode implements NodeAction {
         } else {
             String content = result.text();
             log.info("[ReasoningNode] LLM produced final answer ({} chars)", content != null ? content.length() : 0);
+            pushPhase(conversationId, "drafting_answer", Map.of(
+                    "iteration", accessor.iterationCount(),
+                    "answerChars", content != null ? content.length() : 0
+            ));
 
             return MateClawStateAccessor.output()
                     .needsToolCall(false)
@@ -346,5 +363,13 @@ public class ReasoningNode implements NodeAction {
             log.error("[ReasoningNode] Failed to deserialize forced_tool_call: {}", e.getMessage());
             throw new RuntimeException("无法反序列化 forced_tool_call: " + e.getMessage(), e);
         }
+    }
+
+    private void pushPhase(String conversationId, String phase, Map<String, Object> extra) {
+        if (streamTracker == null || !StringUtils.hasText(conversationId)) {
+            return;
+        }
+        streamTracker.updatePhase(conversationId, phase);
+        streamTracker.broadcastObject(conversationId, "phase", GraphEventPublisher.phase(phase, extra).data());
     }
 }

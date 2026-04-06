@@ -12,7 +12,7 @@ import { ref, computed } from 'vue'
 import { useMessages } from './useMessages'
 import { useStream } from './useStream'
 import { useMessageQueue } from './useMessageQueue'
-import type { Message, MessageContentPart, StreamPhase, HeartbeatData, QueuedMessage } from '@/types'
+import type { Message, MessageContentPart, StreamPhase, HeartbeatData, QueuedMessage, PhaseEventData } from '@/types'
 import { classifyBackendError, type ChatErrorInfo } from '@/types/chatError'
 
 export interface UseChatOptions {
@@ -46,6 +46,8 @@ export interface UseChatReturn {
   isGenerating: import('vue').ComputedRef<boolean>
   /** 当前流阶段 */
   streamPhase: import('vue').Ref<StreamPhase>
+  /** 最近一次阶段事件 */
+  phaseInfo: import('vue').Ref<PhaseEventData | null>
   /** 当前错误 */
   error: import('vue').Ref<Error | null>
   /** 排队的消息 */
@@ -105,6 +107,7 @@ export function useChat(options: UseChatOptions): UseChatReturn {
   /** stopGeneration 的 fallback timer，新流开始时必须清除，防止误杀新连接 */
   let stopFallbackTimer: ReturnType<typeof setTimeout> | null = null
   const streamPhase = ref<StreamPhase>('idle')
+  const phaseInfo = ref<PhaseEventData | null>(null)
   const heartbeat = ref<HeartbeatData | null>(null)
   /** Track which conversation the current stream belongs to */
   let streamConversationId = ''
@@ -159,7 +162,7 @@ export function useChat(options: UseChatOptions): UseChatReturn {
   stream.on('content_delta', (data) => {
     if (currentAssistantId.value) {
       appendMessageContent(currentAssistantId.value, data.delta || '', 'text')
-      if (streamPhase.value === 'thinking') {
+      if (['thinking', 'reasoning', 'drafting_answer', 'preparing_context'].includes(streamPhase.value)) {
         streamPhase.value = 'streaming'
       }
     }
@@ -168,7 +171,9 @@ export function useChat(options: UseChatOptions): UseChatReturn {
   stream.on('thinking_delta', (data) => {
     if (currentAssistantId.value) {
       appendMessageContent(currentAssistantId.value, data.delta || '', 'thinking')
-      streamPhase.value = 'thinking'
+      if (streamPhase.value !== 'summarizing_observations') {
+        streamPhase.value = 'thinking'
+      }
     }
   })
 
@@ -265,6 +270,9 @@ export function useChat(options: UseChatOptions): UseChatReturn {
 
     streamPhase.value = data.status === 'awaiting_approval' ? 'awaiting_approval'
       : data.status === 'stopped' ? 'stopped' : 'completed'
+    if (data.status !== 'awaiting_approval') {
+      phaseInfo.value = null
+    }
 
     // 兜底清理排队状态（如果 queued_input_started 已经处理了则这里是 no-op）
     if (!messageQueue.hasQueued.value) {
@@ -307,6 +315,7 @@ export function useChat(options: UseChatOptions): UseChatReturn {
     }
     error.value = new Error(data.message || '请求失败')
     streamPhase.value = 'idle'
+    phaseInfo.value = null
     // 错误时清理排队状态，避免脏残留
     messageQueue.clear()
 
@@ -369,11 +378,16 @@ export function useChat(options: UseChatOptions): UseChatReturn {
 
   stream.on('phase', (data) => {
     const phase = data.phase as StreamPhase
-    if (phase) streamPhase.value = phase
+    if (phase) {
+      streamPhase.value = phase
+      phaseInfo.value = { ...data, phase }
+    }
     if (currentAssistantId.value) {
       const msg = getMessage(currentAssistantId.value)
       if (msg) {
         const metadata = parseMetadata((msg as any).metadata)
+        // 去重：相同 phase 不触发 updateMessage，避免不必要的 Vue 响应式更新
+        if (metadata.currentPhase === data.phase) return
         updateMessage(currentAssistantId.value, {
           ...msg,
           metadata: { ...metadata, currentPhase: data.phase }
@@ -538,10 +552,17 @@ export function useChat(options: UseChatOptions): UseChatReturn {
     // 从 heartbeat 中更新 phase（如果前端还没有更精确的 phase）
     if (data.currentPhase && streamPhase.value !== 'interrupting') {
       const phaseMap: Record<string, StreamPhase> = {
+        'preparing_context': 'preparing_context',
+        'reading_memory': 'reading_memory',
+        'reasoning': 'reasoning',
+        'drafting_answer': 'drafting_answer',
+        'summarizing_observations': 'summarizing_observations',
         'thinking': 'thinking',
         'streaming': 'streaming',
         'executing_tool': 'executing_tool',
         'awaiting_approval': 'awaiting_approval',
+        'finalizing': 'finalizing',
+        'failed': 'failed',
       }
       const mapped = phaseMap[data.currentPhase]
       if (mapped) streamPhase.value = mapped
@@ -594,6 +615,7 @@ export function useChat(options: UseChatOptions): UseChatReturn {
     assistantMessage.conversationId = data.conversationId || streamConversationId
     currentAssistantId.value = assistantMessage.id as string
     streamPhase.value = 'thinking'
+    phaseInfo.value = null
   })
 
   // ===== 发送消息（支持运行中继续发送） =====
@@ -619,6 +641,7 @@ export function useChat(options: UseChatOptions): UseChatReturn {
     errorFired = false
     streamConversationId = conversationId
     streamPhase.value = 'thinking'
+    phaseInfo.value = null
 
     try {
       if (!isApprovalCommand) {
@@ -684,6 +707,7 @@ export function useChat(options: UseChatOptions): UseChatReturn {
         assistantMessage.conversationId = conversationId
         currentAssistantId.value = assistantMessage.id as string
         streamPhase.value = 'thinking'
+        phaseInfo.value = null
         await stream.connect({
           agentId,
           message: content,
@@ -716,6 +740,7 @@ export function useChat(options: UseChatOptions): UseChatReturn {
 
     // 标记为停止中（让 UI 立即反馈）
     streamPhase.value = 'stopped'
+    phaseInfo.value = null
 
     if (streamConversationId) {
       try {
@@ -783,6 +808,7 @@ export function useChat(options: UseChatOptions): UseChatReturn {
     streamConversationId = conversationId
     error.value = null
     errorFired = false
+    phaseInfo.value = null
 
     // 创建 assistant 占位消息用于接收重连后的流数据
     const assistantMessage = createAssistantMessage('')
@@ -841,6 +867,7 @@ export function useChat(options: UseChatOptions): UseChatReturn {
     messages,
     isGenerating,
     streamPhase,
+    phaseInfo,
     error,
     queuedMessage: messageQueue.queuedMessage,
     hasQueued: messageQueue.hasQueued,

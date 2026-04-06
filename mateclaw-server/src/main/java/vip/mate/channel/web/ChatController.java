@@ -1218,8 +1218,14 @@ public class ChatController {
                     runtimeProviderId = String.valueOf(data.getOrDefault("runtimeProviderId", ""));
                     return;
                 }
+                if ("phase".equals(delta.eventType())) {
+                    String phase = String.valueOf(delta.eventData().getOrDefault("phase", ""));
+                    if (!phase.isBlank()) {
+                        streamTracker.updatePhase(conversationId, phase);
+                    }
+                }
                 // 累积工具调用事件，用于持久化到消息历史
-                accumulateToolEvent(delta.eventType(), delta.eventData());
+                accumulateToolEvent(delta.eventType(), delta.eventData(), conversationId);
                 try {
                     broadcastEvent(conversationId, delta.eventType(), delta.eventData());
                 } catch (Exception e) {
@@ -1229,6 +1235,7 @@ public class ChatController {
             }
             if (delta.content() != null && !delta.content().isBlank()) {
                 content.append(delta.content());
+                streamTracker.updatePhase(conversationId, "drafting_answer");
                 if (!delta.persistenceOnly()) {
                     broadcastEvent(conversationId, "content_delta", Map.of("delta", delta.content()));
                 }
@@ -1243,9 +1250,10 @@ public class ChatController {
 
         boolean isAwaitingApproval() { return awaitingApproval; }
 
-        private void accumulateToolEvent(String eventType, Map<String, Object> data) {
+        private void accumulateToolEvent(String eventType, Map<String, Object> data, String conversationId) {
             if ("tool_approval_requested".equals(eventType)) {
                 awaitingApproval = true;
+                streamTracker.updatePhase(conversationId, "awaiting_approval");
             } else if ("tool_call_started".equals(eventType)) {
                 Map<String, Object> tc = new LinkedHashMap<>();
                 tc.put("name", data.getOrDefault("toolName", ""));

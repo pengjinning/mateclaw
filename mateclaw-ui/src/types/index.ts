@@ -362,16 +362,34 @@ export const CHANNEL_FIELD_DEFS: Record<string, ChannelFieldDef[]> = {
 
 /** 流阶段（前后端统一命名） */
 export type StreamPhase =
+  | 'preparing_context' // 正在准备上下文
+  | 'reading_memory'    // 正在读取记忆/历史
+  | 'reasoning'         // 正在推理分析
+  | 'drafting_answer'   // 正在起草答案
+  | 'summarizing_observations' // 正在整理工具结果
   | 'thinking'         // 模型推理中
   | 'streaming'        // 正在输出文本
   | 'executing_tool'   // 正在执行工具
   | 'awaiting_approval' // 等待审批
+  | 'finalizing'       // 正在收尾
+  | 'failed'           // 已失败
   | 'interrupting'     // 正在中断
   | 'queued'           // 有排队消息
   | 'reconnecting'     // 正在重连
   | 'stopped'          // 已停止
   | 'completed'        // 已完成
   | 'idle'             // 空闲
+
+/** 阶段事件数据 */
+export interface PhaseEventData {
+  phase: StreamPhase | string
+  timestamp?: number
+  toolName?: string
+  toolCount?: number
+  observationCount?: number
+  summaryChars?: number
+  iteration?: number
+}
 
 /** 排队的用户消息 */
 export interface QueuedMessage {
