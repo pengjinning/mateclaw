@@ -29,7 +29,7 @@ ON DUPLICATE KEY UPDATE name=VALUES(name), description=VALUES(description), agen
 -- ==================== 本地模型 Provider（优先展示） ====================
 
 INSERT INTO mate_model_provider (provider_id, name, api_key_prefix, chat_model, api_key, base_url, generate_kwargs, is_custom, is_local, support_model_discovery, support_connection_check, freeze_url, require_api_key, create_time, update_time)
-VALUES ('ollama', 'Ollama', '', 'OpenAIChatModel', '', 'http://127.0.0.1:11434', '{"max_tokens":null}', FALSE, TRUE, TRUE, TRUE, FALSE, FALSE, NOW(), NOW())
+VALUES ('ollama', 'Ollama', '', 'OpenAIChatModel', 'ollama', 'http://127.0.0.1:11434', '{"max_tokens":null}', FALSE, TRUE, TRUE, TRUE, FALSE, FALSE, NOW(), NOW())
 ON DUPLICATE KEY UPDATE name=VALUES(name), api_key_prefix=VALUES(api_key_prefix), chat_model=VALUES(chat_model), api_key=VALUES(api_key), base_url=VALUES(base_url), generate_kwargs=VALUES(generate_kwargs), is_custom=VALUES(is_custom), is_local=VALUES(is_local), support_model_discovery=VALUES(support_model_discovery), support_connection_check=VALUES(support_connection_check), freeze_url=VALUES(freeze_url), require_api_key=VALUES(require_api_key), update_time=VALUES(update_time);
 
 INSERT INTO mate_model_provider (provider_id, name, api_key_prefix, chat_model, api_key, base_url, generate_kwargs, is_custom, is_local, support_model_discovery, support_connection_check, freeze_url, require_api_key, create_time, update_time)

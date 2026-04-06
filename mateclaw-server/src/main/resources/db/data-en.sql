@@ -30,7 +30,7 @@ VALUES (1000000003, 'StateGraph ReAct', 'StateGraph-based ReAct Agent with expli
 
 MERGE INTO mate_model_provider (provider_id, name, api_key_prefix, chat_model, api_key, base_url, generate_kwargs, is_custom, is_local, support_model_discovery, support_connection_check, freeze_url, require_api_key, create_time, update_time)
 KEY (provider_id)
-VALUES ('ollama', 'Ollama', '', 'OpenAIChatModel', '', 'http://127.0.0.1:11434', '{"max_tokens":null}', FALSE, TRUE, TRUE, TRUE, FALSE, FALSE, NOW(), NOW());
+VALUES ('ollama', 'Ollama', '', 'OpenAIChatModel', 'ollama', 'http://127.0.0.1:11434', '{"max_tokens":null}', FALSE, TRUE, TRUE, TRUE, FALSE, FALSE, NOW(), NOW());
 
 MERGE INTO mate_model_provider (provider_id, name, api_key_prefix, chat_model, api_key, base_url, generate_kwargs, is_custom, is_local, support_model_discovery, support_connection_check, freeze_url, require_api_key, create_time, update_time)
 KEY (provider_id)
