@@ -99,7 +99,6 @@ VALUES ('gemini', 'Google Gemini', '', 'GeminiChatModel', '', 'https://generativ
 ON DUPLICATE KEY UPDATE name=VALUES(name), api_key_prefix=VALUES(api_key_prefix), chat_model=VALUES(chat_model), api_key=VALUES(api_key), base_url=VALUES(base_url), generate_kwargs=VALUES(generate_kwargs), is_custom=VALUES(is_custom), is_local=VALUES(is_local), support_model_discovery=VALUES(support_model_discovery), support_connection_check=VALUES(support_connection_check), freeze_url=VALUES(freeze_url), require_api_key=VALUES(require_api_key), update_time=VALUES(update_time);
 
 INSERT INTO mate_model_provider (provider_id, name, api_key_prefix, chat_model, api_key, base_url, generate_kwargs, is_custom, is_local, support_model_discovery, support_connection_check, freeze_url, require_api_key, create_time, update_time)
-INSERT INTO mate_model_provider (provider_id, name, api_key_prefix, chat_model, api_key, base_url, generate_kwargs, is_custom, is_local, support_model_discovery, support_connection_check, freeze_url, require_api_key, create_time, update_time)
 VALUES ('openrouter', 'OpenRouter', 'sk-or-', 'OpenAIChatModel', '', 'https://openrouter.ai/api/v1', '{}', FALSE, FALSE, TRUE, TRUE, TRUE, TRUE, NOW(), NOW())
 ON DUPLICATE KEY UPDATE name=VALUES(name), api_key_prefix=VALUES(api_key_prefix), chat_model=VALUES(chat_model), api_key=VALUES(api_key), base_url=VALUES(base_url), generate_kwargs=VALUES(generate_kwargs), is_custom=VALUES(is_custom), is_local=VALUES(is_local), support_model_discovery=VALUES(support_model_discovery), support_connection_check=VALUES(support_connection_check), freeze_url=VALUES(freeze_url), require_api_key=VALUES(require_api_key), update_time=VALUES(update_time);
 
@@ -225,6 +224,9 @@ VALUES
 (1000000203, 'Gemini 2.5 Pro', 'openrouter', 'google/gemini-2.5-pro', 'OpenRouter 代理 Gemini 2.5 Pro', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
 (1000000204, 'Llama 4 Maverick', 'openrouter', 'meta-llama/llama-4-maverick', 'OpenRouter 代理 Llama 4 Maverick', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
 (1000000205, 'DeepSeek R1', 'openrouter', 'deepseek/deepseek-r1', 'OpenRouter 代理 DeepSeek R1', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
+(1000000206, 'Qwen3.6 Plus (free)', 'openrouter', 'qwen/qwen3.6-plus:free', 'OpenRouter 免费 Qwen3.6 Plus（支持视觉）', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
+(1000000207, 'Gemini 2.5 Flash (free)', 'openrouter', 'google/gemini-2.5-flash:free', 'OpenRouter 免费 Gemini 2.5 Flash（支持视觉）', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
+(1000000208, 'Llama 4 Maverick (free)', 'openrouter', 'meta-llama/llama-4-maverick:free', 'OpenRouter 免费 Llama 4 Maverick（支持视觉）', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
 (1000000210, 'GLM-5-Turbo', 'zhipu-cn', 'glm-5-turbo', '高速推理模型（推荐）', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
 (1000000211, 'GLM-5V-Turbo', 'zhipu-cn', 'glm-5v-turbo', '多模态视觉模型（推荐）', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
 (1000000212, 'GLM-5', 'zhipu-cn', 'glm-5', '旗舰模型', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
