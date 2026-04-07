@@ -86,9 +86,8 @@ mvn spring-boot:run
 **终端 2：启动前端**
 
 ```bash
-cd ..
-nvm use
 cd mateclaw-ui
+nvm use
 pnpm install
 pnpm dev
 # 前端运行在 http://localhost:5173（代理 /api 到 :18088）
