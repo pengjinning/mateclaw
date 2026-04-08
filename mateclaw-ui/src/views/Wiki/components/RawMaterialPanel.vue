@@ -264,6 +264,7 @@ async function handleScanDir() {
 .status-badge.pending { background: var(--mc-bg-sunken); color: var(--mc-text-tertiary); }
 .status-badge.processing { background: var(--mc-primary-bg); color: var(--mc-primary); }
 .status-badge.completed { background: rgba(90, 138, 90, 0.15); color: var(--mc-success); }
+.status-badge.partial { background: rgba(217, 119, 87, 0.15); color: var(--mc-primary); }
 .status-badge.failed { background: var(--mc-danger-bg); color: var(--mc-danger); }
 
 /* Process button */

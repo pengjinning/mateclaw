@@ -75,16 +75,26 @@ public class WikiProcessingService {
             }
 
             // Phase 2: LLM 消化
-            int totalPages;
+            // result[0] = totalPages, result[1] = failedChunks, result[2] = totalChunks
+            int[] result;
             if (textContent.length() > properties.getMaxChunkSize()) {
-                totalPages = processInChunks(kb, raw, textContent);
+                result = processInChunks(kb, raw, textContent);
             } else {
-                totalPages = processChunk(kb, raw, textContent);
+                int pages = processChunk(kb, raw, textContent);
+                result = new int[]{pages, pages == 0 ? 1 : 0, 1};
             }
+
+            int totalPages = result[0];
+            int failedChunks = result[1];
+            int totalChunks = result[2];
 
             // Phase 3: 更新状态和计数
             if (totalPages == 0) {
                 rawService.updateProcessingStatus(rawId, "failed", "No pages generated from LLM response");
+            } else if (failedChunks > 0) {
+                // 部分成功：有些 chunk 失败但有些产出了页面
+                rawService.updateProcessingStatus(rawId, "partial",
+                        failedChunks + " of " + totalChunks + " chunks failed, " + totalPages + " pages generated");
             } else {
                 rawService.updateProcessingStatus(rawId, "completed", null);
             }
@@ -120,13 +130,14 @@ public class WikiProcessingService {
     /**
      * 分块处理大文档
      *
-     * @return 创建+更新的页面总数
+     * @return int[3]: [totalPages, failedChunks, totalChunks]
      */
-    private int processInChunks(WikiKnowledgeBaseEntity kb, WikiRawMaterialEntity raw, String text) {
+    private int[] processInChunks(WikiKnowledgeBaseEntity kb, WikiRawMaterialEntity raw, String text) {
         int chunkSize = properties.getMaxChunkSize();
         int overlap = 500; // 块间重叠
         int start = 0;
         int totalPages = 0;
+        int failedChunks = 0;
 
         int chunkIndex = 0;
         while (start < text.length()) {
@@ -145,7 +156,17 @@ public class WikiProcessingService {
 
             String chunk = text.substring(start, end);
             log.info("[Wiki] Processing chunk {}: chars {}-{} of {}", chunkIndex, start, end, text.length());
-            totalPages += processChunk(kb, raw, chunk);
+            try {
+                totalPages += processChunk(kb, raw, chunk);
+            } catch (Exception e) {
+                failedChunks++;
+                // content_filter 错误：标注后继续处理其他 chunk
+                if (e.getMessage() != null && e.getMessage().contains("content_filter")) {
+                    log.warn("[Wiki] Chunk {} blocked by content filter, skipping", chunkIndex);
+                } else {
+                    log.warn("[Wiki] Chunk {} failed: {}", chunkIndex, e.getMessage());
+                }
+            }
 
             start = end - overlap;
             if (start < 0) start = 0;
@@ -153,7 +174,7 @@ public class WikiProcessingService {
             if (start <= previousStart) start = end;
             chunkIndex++;
         }
-        return totalPages;
+        return new int[]{totalPages, failedChunks, chunkIndex};
     }
 
     /**
@@ -287,6 +308,8 @@ public class WikiProcessingService {
         if (response == null || response.isBlank()) return null;
 
         String cleaned = response.trim();
+
+        // 1. 剥离 markdown 代码块标记
         if (cleaned.startsWith("```json")) {
             cleaned = cleaned.substring(7);
         } else if (cleaned.startsWith("```")) {
@@ -297,9 +320,24 @@ public class WikiProcessingService {
         }
         cleaned = cleaned.trim();
 
+        // 2. 清洗控制字符（保留 \n \r \t），防止 LLM 输出含不可见字符导致 JSON 解析失败
+        cleaned = cleaned.replaceAll("[\\x00-\\x08\\x0B\\x0C\\x0E-\\x1F]", "");
+
+        // 3. 第一次尝试直接解析
         try {
             return objectMapper.readTree(cleaned);
         } catch (Exception e) {
+            // 4. 如果整体不是 JSON，尝试提取第一个 JSON 对象块（LLM 可能在 JSON 前后加了说明文字）
+            int jsonStart = cleaned.indexOf("{");
+            int jsonEnd = cleaned.lastIndexOf("}");
+            if (jsonStart >= 0 && jsonEnd > jsonStart) {
+                String extracted = cleaned.substring(jsonStart, jsonEnd + 1);
+                try {
+                    return objectMapper.readTree(extracted);
+                } catch (Exception e2) {
+                    log.warn("[Wiki] Failed to parse extracted JSON block: {}", e2.getMessage());
+                }
+            }
             log.warn("[Wiki] Failed to parse JSON response: {}", e.getMessage());
             return null;
         }

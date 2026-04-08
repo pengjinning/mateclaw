@@ -44,6 +44,16 @@ public class WikiPageService {
     }
 
     /**
+     * 列出知识库所有页面（含 content，用于全文搜索）
+     */
+    public List<WikiPageEntity> listByKbIdWithContent(Long kbId) {
+        return pageMapper.selectList(
+                new LambdaQueryWrapper<WikiPageEntity>()
+                        .eq(WikiPageEntity::getKbId, kbId)
+                        .orderByAsc(WikiPageEntity::getTitle));
+    }
+
+    /**
      * 列出页面摘要（用于上下文注入和 LLM 消化）
      */
     public List<WikiPageEntity> listSummaries(Long kbId) {
