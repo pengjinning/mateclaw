@@ -69,6 +69,11 @@ CREATE TABLE IF NOT EXISTS mate_model_provider (
     support_connection_check    TINYINT(1)   NOT NULL DEFAULT 0,
     freeze_url                  TINYINT(1)   NOT NULL DEFAULT 0,
     require_api_key             TINYINT(1)   NOT NULL DEFAULT 1,
+    auth_type                   VARCHAR(16)  NOT NULL DEFAULT 'api_key',
+    oauth_access_token          TEXT,
+    oauth_refresh_token         TEXT,
+    oauth_expires_at            BIGINT,
+    oauth_account_id            VARCHAR(128),
     create_time                 DATETIME     NOT NULL,
     update_time                 DATETIME     NOT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
