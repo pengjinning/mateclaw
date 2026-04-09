@@ -280,7 +280,7 @@ export const settingsApi = {
 const encodeFilePath = (filename: string) =>
   filename.split('/').map(encodeURIComponent).join('/')
 
-export const workspaceApi = {
+export const agentContextApi = {
   listFiles: (agentId: string | number) =>
     http.get(`/agents/${agentId}/workspace/files`),
   getFile: (agentId: string | number, filename: string) =>

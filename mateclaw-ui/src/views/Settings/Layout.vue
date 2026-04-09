@@ -1,23 +1,31 @@
 <template>
-  <div class="settings-layout">
-    <div class="settings-nav">
-      <h2 class="nav-title">{{ t('settings.title') }}</h2>
-      <template v-for="section in sections" :key="section.id">
-        <div v-if="section.isDivider" class="nav-divider">{{ section.label }}</div>
-        <router-link
-          v-else
-          :to="section.path"
-          class="nav-item"
-          :class="{ active: isActive(section.path) }"
-        >
-          <span class="nav-icon" v-html="section.icon"></span>
-          {{ section.label }}
-        </router-link>
-      </template>
-    </div>
+  <div class="mc-page-shell settings-shell">
+    <div class="mc-page-frame">
+      <div class="mc-page-inner settings-layout">
+        <div class="settings-nav mc-surface-card">
+          <div class="settings-nav__intro">
+            <div class="mc-page-kicker">System</div>
+            <h2 class="nav-title">{{ t('settings.title') }}</h2>
+            <p class="nav-desc">Tune the machine, shape the context, and keep the product coherent as it grows.</p>
+          </div>
+          <template v-for="section in sections" :key="section.id">
+            <div v-if="section.isDivider" class="nav-divider">{{ section.label }}</div>
+            <router-link
+              v-else
+              :to="section.path"
+              class="nav-item"
+              :class="{ active: isActive(section.path) }"
+            >
+              <span class="nav-icon" v-html="section.icon"></span>
+              {{ section.label }}
+            </router-link>
+          </template>
+        </div>
 
-    <div class="settings-content">
-      <router-view />
+        <div class="settings-content mc-surface-card">
+          <router-view />
+        </div>
+      </div>
     </div>
   </div>
 </template>
@@ -76,9 +84,9 @@ const sections = computed(() => [
   // Divider: Advanced
   { id: 'divider-advanced', path: '', label: t('settings.sections.advanced'), icon: '', isDivider: true },
   {
-    id: 'workspace',
-    path: '/settings/workspace',
-    label: t('nav.workspace'),
+    id: 'agent-context',
+    path: '/settings/agent-context',
+    label: t('nav.agentContext', 'Agent Context'),
     icon: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg>',
   },
   {
@@ -119,20 +127,27 @@ function isActive(path: string) {
 </script>
 
 <style scoped>
-.settings-layout { display: flex; height: 100%; overflow: hidden; background: var(--mc-bg); }
-.settings-nav { width: 220px; min-width: 220px; background: var(--mc-bg-elevated); border-right: 1px solid var(--mc-border); padding: 20px 12px; }
-.nav-title { font-size: 13px; font-weight: 600; color: var(--mc-text-tertiary); text-transform: uppercase; letter-spacing: 0.05em; padding: 0 8px; margin: 0 0 12px; }
-.nav-item { display: flex; align-items: center; gap: 10px; width: 100%; padding: 8px 12px; border: none; background: none; border-radius: 6px; font-size: 14px; font-weight: 400; color: var(--mc-text-secondary); cursor: pointer; transition: all 0.15s; text-align: left; text-decoration: none; }
-.nav-item:hover { background: var(--mc-bg-sunken); color: var(--mc-text-primary); }
-.nav-item.active { background: var(--mc-primary-bg); color: var(--mc-primary); font-weight: 500; }
+.settings-shell {
+  background: transparent;
+}
+
+.settings-layout { display: flex; min-height: calc(100vh - 120px); gap: 20px; }
+.settings-nav { width: 270px; min-width: 270px; padding: 18px 14px; align-self: flex-start; }
+.settings-nav__intro { padding: 6px 8px 16px; }
+.nav-title { font-size: 28px; font-weight: 800; color: var(--mc-text-primary); letter-spacing: -0.04em; margin: 0 0 6px; }
+.nav-desc { color: var(--mc-text-secondary); font-size: 13px; line-height: 1.65; }
+.nav-item { display: flex; align-items: center; gap: 10px; width: 100%; padding: 10px 12px; border: none; background: none; border-radius: 14px; font-size: 14px; font-weight: 500; color: var(--mc-text-secondary); cursor: pointer; transition: all 0.15s; text-align: left; text-decoration: none; }
+.nav-item:hover { background: var(--mc-bg-muted); color: var(--mc-text-primary); }
+.nav-item.active { background: var(--mc-primary-bg); color: var(--mc-primary); font-weight: 600; box-shadow: inset 0 0 0 1px rgba(217, 109, 70, 0.08); }
 .nav-item + .nav-item { margin-top: 2px; }
 .nav-icon { width: 18px; height: 18px; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
 .nav-icon :deep(svg) { width: 18px; height: 18px; display: block; }
-.nav-divider { font-size: 11px; font-weight: 600; color: var(--mc-text-tertiary); text-transform: uppercase; letter-spacing: 0.05em; padding: 16px 8px 6px; margin-top: 4px; }
-.settings-content { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 24px; }
+.nav-divider { font-size: 11px; font-weight: 700; color: var(--mc-text-tertiary); text-transform: uppercase; letter-spacing: 0.1em; padding: 18px 8px 8px; margin-top: 4px; }
+.settings-content { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 24px; min-height: 720px; }
 
 @media (max-width: 900px) {
   .settings-layout { flex-direction: column; }
-  .settings-nav { width: 100%; min-width: 100%; border-right: none; border-bottom: 1px solid var(--mc-border); }
+  .settings-nav { width: 100%; min-width: 100%; }
+  .settings-content { min-height: 0; }
 }
 </style>

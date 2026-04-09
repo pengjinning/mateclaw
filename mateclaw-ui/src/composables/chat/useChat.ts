@@ -152,10 +152,18 @@ export function useChat(options: UseChatOptions): UseChatReturn {
   // 消息队列
   const messageQueue = useMessageQueue()
 
-  // 流连接
+  // 流连接（注入 auth + workspace header，与 axios interceptor 保持一致）
+  const streamHeaders: Record<string, string> = {}
+  if (token) {
+    streamHeaders['Authorization'] = `Bearer ${token}`
+  }
+  const wsId = localStorage.getItem('mc-workspace-id')
+  if (wsId) {
+    streamHeaders['X-Workspace-Id'] = wsId
+  }
   const stream = useStream({
     url: `${baseUrl}/api/v1/chat/stream`,
-    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    headers: streamHeaders,
   })
 
   // ===== SSE 事件处理器 =====

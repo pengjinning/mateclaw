@@ -256,8 +256,10 @@ public class CronJobService implements ApplicationRunner {
         try {
             log.info("[CronJob] Executing job {} ({}), type={}", job.getId(), job.getName(), job.getTaskType());
 
-            // 确保会话存在（使用 SYSTEM_USER 作为定时触发的所有者标识）
-            conversationService.getOrCreateConversation(conversationId, job.getAgentId(), SYSTEM_USER);
+            // 确保会话存在（使用 SYSTEM_USER 作为定时触发的所有者标识，workspace 从 agent 获取）
+            AgentEntity cronAgent = agentMapper.selectById(job.getAgentId());
+            Long cronWorkspaceId = cronAgent != null ? cronAgent.getWorkspaceId() : 1L;
+            conversationService.getOrCreateConversation(conversationId, job.getAgentId(), SYSTEM_USER, cronWorkspaceId);
 
             String userMessage;
             String result;

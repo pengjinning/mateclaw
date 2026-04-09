@@ -54,11 +54,21 @@ public class ChannelService {
     }
 
     /**
-     * 按类型获取渠道列表
+     * 按类型获取渠道列表（全局，向后兼容）
      */
     public List<ChannelEntity> listChannelsByType(String channelType) {
         return channelMapper.selectList(new LambdaQueryWrapper<ChannelEntity>()
                 .eq(ChannelEntity::getChannelType, channelType)
+                .orderByDesc(ChannelEntity::getCreateTime));
+    }
+
+    /**
+     * 按类型和 workspace 获取渠道列表
+     */
+    public List<ChannelEntity> listChannelsByTypeAndWorkspace(String channelType, Long workspaceId) {
+        return channelMapper.selectList(new LambdaQueryWrapper<ChannelEntity>()
+                .eq(ChannelEntity::getChannelType, channelType)
+                .eq(ChannelEntity::getWorkspaceId, workspaceId)
                 .orderByDesc(ChannelEntity::getCreateTime));
     }
 

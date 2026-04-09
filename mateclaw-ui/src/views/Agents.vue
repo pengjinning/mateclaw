@@ -1,37 +1,41 @@
 <template>
-  <div class="page-container">
-    <div class="page-header">
-      <div>
-        <h1 class="page-title">{{ t('agents.title') }}</h1>
-        <p class="page-desc">{{ t('agents.desc') }}</p>
-      </div>
-      <button class="btn-primary" @click="openCreateModal">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
-        </svg>
-        {{ t('agents.newAgent') }}
-      </button>
-    </div>
+  <div class="mc-page-shell">
+    <div class="mc-page-frame">
+      <div class="mc-page-inner agents-page">
+        <div class="mc-page-header">
+          <div>
+            <div class="mc-page-kicker">Agent Studio</div>
+            <h1 class="mc-page-title">{{ t('agents.title') }}</h1>
+            <p class="mc-page-desc">{{ t('agents.desc') }}</p>
+          </div>
+          <button class="btn-primary" @click="openCreateModal">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+            </svg>
+            {{ t('agents.newAgent') }}
+          </button>
+        </div>
 
-    <!-- Filter bar -->
-    <div class="filter-bar">
-      <div class="search-box">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
-        </svg>
-        <input v-model="searchText" :placeholder="t('agents.search')" class="search-input" />
-      </div>
-      <div class="filter-tabs">
-        <button v-for="tab in filterTabs" :key="tab.value" class="filter-tab"
-          :class="{ active: activeFilter === tab.value }" @click="activeFilter = tab.value">
-          {{ t(tab.key) }}
-        </button>
-      </div>
-    </div>
+        <div class="agents-toolbar mc-surface-card">
+          <div class="filter-bar">
+            <div class="search-box">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+              </svg>
+              <input v-model="searchText" :placeholder="t('agents.search')" class="search-input" />
+            </div>
+            <div class="filter-tabs">
+              <button v-for="tab in filterTabs" :key="tab.value" class="filter-tab"
+                :class="{ active: activeFilter === tab.value }" @click="activeFilter = tab.value">
+                {{ t(tab.key) }}
+              </button>
+            </div>
+          </div>
+        </div>
 
-    <!-- Agent table -->
-    <div class="table-wrap" v-if="filteredAgents.length > 0">
-      <table class="agent-table">
+        <!-- Agent table -->
+        <div class="table-wrap mc-surface-card" v-if="filteredAgents.length > 0">
+          <table class="agent-table">
         <thead>
           <tr>
             <th class="col-name">{{ t('agents.columns.name') }}</th>
@@ -89,16 +93,19 @@
             </td>
           </tr>
         </tbody>
-      </table>
-    </div>
+          </table>
+        </div>
 
-    <!-- Empty state -->
-    <div v-else class="empty-state">
-      <div class="empty-icon">🤖</div>
-      <h3>{{ t('agents.emptyTitle') }}</h3>
-      <p>{{ t('agents.emptyDesc') }}</p>
-      <button class="btn-primary" @click="openCreateModal">{{ t('agents.newAgent') }}</button>
+        <!-- Empty state -->
+        <div v-else class="empty-state mc-surface-card">
+          <div class="empty-icon">🤖</div>
+          <h3>{{ t('agents.emptyTitle') }}</h3>
+          <p>{{ t('agents.emptyDesc') }}</p>
+          <button class="btn-primary" @click="openCreateModal">{{ t('agents.newAgent') }}</button>
+        </div>
+      </div>
     </div>
+    
 
     <!-- Create/Edit Modal -->
     <div v-if="showModal" class="modal-overlay" @click.self="closeModal">
@@ -411,33 +418,31 @@ async function toggleAgent(agent: Agent) {
 </script>
 
 <style scoped>
-.page-container { height: 100%; overflow-y: auto; padding: 24px; background: var(--mc-bg); }
-.page-header { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 24px; }
-.page-title { font-size: 20px; font-weight: 700; color: var(--mc-text-primary); margin: 0 0 4px; }
-.page-desc { font-size: 14px; color: var(--mc-text-secondary); margin: 0; }
+.agents-page { gap: 18px; }
 
-.btn-primary { display: flex; align-items: center; gap: 6px; padding: 8px 16px; background: var(--mc-primary); color: white; border: none; border-radius: 8px; font-size: 14px; font-weight: 500; cursor: pointer; transition: background 0.15s; }
+.btn-primary { display: flex; align-items: center; gap: 6px; padding: 10px 16px; background: linear-gradient(135deg, var(--mc-primary), var(--mc-primary-hover)); color: white; border: none; border-radius: 14px; font-size: 14px; font-weight: 600; cursor: pointer; transition: background 0.15s, transform 0.15s; box-shadow: var(--mc-shadow-soft); }
 .btn-primary:hover { background: var(--mc-primary-hover); }
 .btn-primary:disabled { background: var(--mc-border); cursor: not-allowed; }
-.btn-secondary { padding: 8px 16px; background: var(--mc-bg-elevated); color: var(--mc-text-primary); border: 1px solid var(--mc-border); border-radius: 8px; font-size: 14px; cursor: pointer; }
+.btn-secondary { padding: 8px 16px; background: var(--mc-bg-elevated); color: var(--mc-text-primary); border: 1px solid var(--mc-border); border-radius: 12px; font-size: 14px; cursor: pointer; }
 .btn-secondary:hover { background: var(--mc-bg-sunken); }
 
-.filter-bar { display: flex; align-items: center; gap: 16px; margin-bottom: 20px; flex-wrap: wrap; }
-.search-box { display: flex; align-items: center; gap: 8px; background: var(--mc-bg-elevated); border: 1px solid var(--mc-border); border-radius: 8px; padding: 8px 12px; flex: 1; max-width: 300px; }
+.agents-toolbar { padding: 18px; }
+.filter-bar { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+.search-box { display: flex; align-items: center; gap: 8px; background: var(--mc-bg-muted); border: 1px solid var(--mc-border); border-radius: 14px; padding: 10px 12px; flex: 1; max-width: 360px; }
 .search-box svg { color: var(--mc-text-tertiary); flex-shrink: 0; }
 .search-input { border: none; outline: none; font-size: 14px; color: var(--mc-text-primary); flex: 1; background: transparent; }
-.filter-tabs { display: flex; gap: 4px; }
-.filter-tab { padding: 6px 14px; border: 1px solid var(--mc-border); background: var(--mc-bg-elevated); border-radius: 6px; font-size: 13px; color: var(--mc-text-secondary); cursor: pointer; transition: all 0.15s; }
+.filter-tabs { display: flex; gap: 6px; flex-wrap: wrap; }
+.filter-tab { padding: 8px 14px; border: 1px solid var(--mc-border); background: var(--mc-bg-muted); border-radius: 999px; font-size: 13px; color: var(--mc-text-secondary); cursor: pointer; transition: all 0.15s; font-weight: 600; }
 .filter-tab:hover { background: var(--mc-bg-sunken); }
 .filter-tab.active { background: var(--mc-primary-bg); border-color: var(--mc-primary); color: var(--mc-primary); font-weight: 500; }
 
 /* Table */
-.table-wrap { overflow-x: auto; border: 1px solid var(--mc-border); border-radius: 12px; background: var(--mc-bg-elevated); }
+.table-wrap { overflow-x: auto; }
 .agent-table { width: 100%; border-collapse: collapse; font-size: 14px; }
-.agent-table th { padding: 12px 16px; text-align: left; font-weight: 600; font-size: 13px; color: var(--mc-text-secondary); background: var(--mc-bg-sunken); border-bottom: 1px solid var(--mc-border); white-space: nowrap; }
+.agent-table th { padding: 14px 16px; text-align: left; font-weight: 700; font-size: 12px; color: var(--mc-text-secondary); background: var(--mc-bg-muted); border-bottom: 1px solid var(--mc-border); white-space: nowrap; text-transform: uppercase; letter-spacing: 0.08em; }
 .agent-table td { padding: 12px 16px; border-bottom: 1px solid var(--mc-border-light); vertical-align: middle; }
 .agent-table tbody tr:last-child td { border-bottom: none; }
-.agent-table tbody tr:hover { background: var(--mc-bg-sunken); }
+.agent-table tbody tr:hover { background: var(--mc-bg-muted); }
 .agent-table tbody tr.row-disabled { opacity: 0.55; }
 
 .col-name { min-width: 200px; }
@@ -535,4 +540,15 @@ async function toggleAgent(agent: Agent) {
 .form-input:focus, .form-textarea:focus { border-color: var(--mc-primary); box-shadow: 0 0 0 2px rgba(217,119,87,0.1); }
 .form-textarea { resize: vertical; font-family: inherit; }
 .modal-footer { display: flex; justify-content: flex-end; gap: 10px; padding: 16px 24px; border-top: 1px solid var(--mc-border-light); }
+
+@media (max-width: 900px) {
+  .filter-bar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .search-box {
+    max-width: none;
+  }
+}
 </style>

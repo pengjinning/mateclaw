@@ -95,8 +95,10 @@ public class WebChatController {
 
         sseExecutor.execute(() -> {
             try {
-                // 创建或获取会话
-                var conv = conversationService.getOrCreateConversation(conversationId, agentId, "webchat:" + visitorId);
+                // 创建或获取会话（workspace 从 agent 获取）
+                var webAgent = agentService.getAgent(agentId);
+                Long webWsId = webAgent != null ? webAgent.getWorkspaceId() : 1L;
+                var conv = conversationService.getOrCreateConversation(conversationId, agentId, "webchat:" + visitorId, webWsId);
 
                 // 保存用户消息
                 conversationService.saveMessage(conversationId, "user", message, List.of());

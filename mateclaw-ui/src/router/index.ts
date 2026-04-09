@@ -102,10 +102,10 @@ const router = createRouter({
             },
             // Advanced (absorbed from top-level nav)
             {
-              path: 'workspace',
-              name: 'SettingsWorkspace',
-              component: () => import('@/views/AgentWorkspace.vue'),
-              meta: { title: 'Settings - Workspace' },
+              path: 'agent-context',
+              name: 'SettingsAgentContext',
+              component: () => import('@/views/AgentContext.vue'),
+              meta: { title: 'Settings - Agent Context' },
             },
             {
               path: 'cron-jobs',
@@ -164,22 +164,28 @@ const router = createRouter({
               meta: { title: 'Security - Audit Logs' },
             },
             {
-              path: 'activity',
-              name: 'SecurityActivity',
-              component: () => import('@/views/Security/Activity/index.vue'),
-              meta: { title: 'Security - Activity' },
-            },
-            {
               path: 'members',
               name: 'SecurityMembers',
               component: () => import('@/views/Security/Members/index.vue'),
               meta: { title: 'Security - Members' },
             },
+            {
+              path: 'workspaces',
+              name: 'SecurityWorkspaces',
+              component: () => import('@/views/Security/Workspaces/index.vue'),
+              meta: { title: 'Security - Workspaces' },
+            },
+            {
+              path: 'activity',
+              name: 'SecurityActivity',
+              component: () => import('@/views/Security/Activity/index.vue'),
+              meta: { title: 'Security - Activity' },
+            },
           ],
         },
         // ==================== Redirects (backward compatibility) ====================
         { path: 'sessions', redirect: '/chat' },
-        { path: 'workspace', redirect: '/settings/workspace' },
+        { path: 'workspace', redirect: '/settings/agent-context' },
         { path: 'cron-jobs', redirect: '/settings/cron-jobs' },
         { path: 'datasources', redirect: '/settings/datasources' },
         { path: 'mcp-servers', redirect: '/settings/mcp-servers' },

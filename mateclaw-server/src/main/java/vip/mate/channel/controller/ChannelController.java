@@ -45,8 +45,10 @@ public class ChannelController {
     @RequireWorkspaceRole("viewer")
     @Operation(summary = "按类型获取渠道列表")
     @GetMapping("/type/{channelType}")
-    public R<List<ChannelEntity>> listByType(@PathVariable String channelType) {
-        return R.ok(channelService.listChannelsByType(channelType));
+    public R<List<ChannelEntity>> listByType(@PathVariable String channelType,
+                                              @RequestHeader(value = "X-Workspace-Id", required = false) Long workspaceId) {
+        long wsId = workspaceId != null ? workspaceId : 1L;
+        return R.ok(channelService.listChannelsByTypeAndWorkspace(channelType, wsId));
     }
 
     @RequireWorkspaceRole("viewer")
@@ -117,8 +119,8 @@ public class ChannelController {
         return R.ok(channel);
     }
 
-    @RequireWorkspaceRole("viewer")
-    @Operation(summary = "获取渠道运行状态")
+    @RequireWorkspaceRole("admin")
+    @Operation(summary = "获取渠道运行状态（全局系统视图，仅管理员可见）")
     @GetMapping("/status")
     public R<Map<String, Object>> status() {
         return R.ok(channelManager.getStatus());

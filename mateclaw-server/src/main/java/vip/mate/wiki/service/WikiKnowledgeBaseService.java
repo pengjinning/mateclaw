@@ -79,16 +79,22 @@ public class WikiKnowledgeBaseService {
 
     @Transactional
     public WikiKnowledgeBaseEntity create(String name, String description, Long agentId) {
+        return create(name, description, agentId, 1L);
+    }
+
+    @Transactional
+    public WikiKnowledgeBaseEntity create(String name, String description, Long agentId, Long workspaceId) {
         WikiKnowledgeBaseEntity entity = new WikiKnowledgeBaseEntity();
         entity.setName(name);
         entity.setDescription(description);
         entity.setAgentId(agentId);
+        entity.setWorkspaceId(workspaceId);
         entity.setConfigContent(DEFAULT_CONFIG);
         entity.setStatus("active");
         entity.setPageCount(0);
         entity.setRawCount(0);
         kbMapper.insert(entity);
-        log.info("[Wiki] Knowledge base created: id={}, name={}", entity.getId(), name);
+        log.info("[Wiki] Knowledge base created: id={}, name={}, workspaceId={}", entity.getId(), name, workspaceId);
         return entity;
     }
 

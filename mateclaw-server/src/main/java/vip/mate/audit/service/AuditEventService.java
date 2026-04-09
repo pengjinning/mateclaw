@@ -42,9 +42,23 @@ public class AuditEventService {
      */
     public void record(String action, String resourceType, String resourceId,
                        String resourceName, String detailJson) {
+        record(action, resourceType, resourceId, resourceName, detailJson, null);
+    }
+
+    /**
+     * 异步记录审计事件（显式指定 workspace ID）。
+     * <p>
+     * 当调用方已知 workspace ID 时，优先使用此方法以避免依赖 request header 解析。
+     */
+    public void record(String action, String resourceType, String resourceId,
+                       String resourceName, String detailJson, Long workspaceId) {
         // 在请求线程中构建事件（可以访问 SecurityContext 和 RequestContext）
         AuditEventEntity event = buildEvent(action, resourceType, resourceId, resourceName, detailJson);
         if (event != null) {
+            // 显式传入的 workspaceId 优先于 header 解析结果
+            if (workspaceId != null) {
+                event.setWorkspaceId(workspaceId);
+            }
             insertAsync(event);
         }
     }

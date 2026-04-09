@@ -7,6 +7,7 @@ import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 import vip.mate.common.result.R;
+import vip.mate.exception.MateClawException;
 import vip.mate.workspace.core.annotation.RequireWorkspaceRole;
 import vip.mate.wiki.WikiProperties;
 import vip.mate.wiki.event.WikiProcessingEvent;
@@ -54,16 +55,16 @@ public class WikiController {
     @GetMapping("/knowledge-bases")
     public R<List<WikiKnowledgeBaseEntity>> listKBs(
             @RequestHeader(value = "X-Workspace-Id", required = false) Long workspaceId) {
-        if (workspaceId != null) {
-            return R.ok(kbService.listByWorkspace(workspaceId));
-        }
-        return R.ok(kbService.listAll());
+        long wsId = workspaceId != null ? workspaceId : 1L;
+        return R.ok(kbService.listByWorkspace(wsId));
     }
 
     @RequireWorkspaceRole("viewer")
     @Operation(summary = "获取知识库详情")
     @GetMapping("/knowledge-bases/{id}")
-    public R<WikiKnowledgeBaseEntity> getKB(@PathVariable Long id) {
+    public R<WikiKnowledgeBaseEntity> getKB(@PathVariable Long id,
+                                             @RequestHeader(value = "X-Workspace-Id", required = false) Long workspaceId) {
+        verifyKBWorkspace(id, workspaceId);
         WikiKnowledgeBaseEntity kb = kbService.getById(id);
         if (kb == null) return R.fail("Knowledge base not found");
         return R.ok(kb);
@@ -72,8 +73,14 @@ public class WikiController {
     @RequireWorkspaceRole("viewer")
     @Operation(summary = "按 Agent 获取知识库")
     @GetMapping("/knowledge-bases/agent/{agentId}")
-    public R<List<WikiKnowledgeBaseEntity>> listKBsByAgent(@PathVariable Long agentId) {
-        return R.ok(kbService.listByAgentId(agentId));
+    public R<List<WikiKnowledgeBaseEntity>> listKBsByAgent(@PathVariable Long agentId,
+                                                            @RequestHeader(value = "X-Workspace-Id", required = false) Long workspaceId) {
+        long wsId = workspaceId != null ? workspaceId : 1L;
+        // 按 agent 查询后，过滤出属于当前 workspace 的知识库
+        List<WikiKnowledgeBaseEntity> kbs = kbService.listByAgentId(agentId);
+        return R.ok(kbs.stream()
+                .filter(kb -> kb.getWorkspaceId() == null || kb.getWorkspaceId().equals(wsId))
+                .toList());
     }
 
     @RequireWorkspaceRole("member")
@@ -84,19 +91,17 @@ public class WikiController {
         String name = (String) body.get("name");
         String description = (String) body.get("description");
         Long agentId = body.get("agentId") != null ? Long.valueOf(body.get("agentId").toString()) : null;
-        WikiKnowledgeBaseEntity kb = kbService.create(name, description, agentId);
-        // 注入 workspace_id（create 方法内部不感知 workspace，需要在 controller 层补充）
-        if (kb.getWorkspaceId() == null || kb.getWorkspaceId() == 0) {
-            kb.setWorkspaceId(workspaceId != null ? workspaceId : 1L);
-            kbService.updateWorkspaceId(kb.getId(), kb.getWorkspaceId());
-        }
+        long wsId = workspaceId != null ? workspaceId : 1L;
+        WikiKnowledgeBaseEntity kb = kbService.create(name, description, agentId, wsId);
         return R.ok(kb);
     }
 
     @RequireWorkspaceRole("member")
     @Operation(summary = "更新知识库")
     @PutMapping("/knowledge-bases/{id}")
-    public R<WikiKnowledgeBaseEntity> updateKB(@PathVariable Long id, @RequestBody Map<String, Object> body) {
+    public R<WikiKnowledgeBaseEntity> updateKB(@PathVariable Long id, @RequestBody Map<String, Object> body,
+                                                @RequestHeader(value = "X-Workspace-Id", required = false) Long workspaceId) {
+        verifyKBWorkspace(id, workspaceId);
         String name = (String) body.get("name");
         String description = (String) body.get("description");
         Long agentId = body.get("agentId") != null ? Long.valueOf(body.get("agentId").toString()) : null;
@@ -106,7 +111,9 @@ public class WikiController {
     @RequireWorkspaceRole("admin")
     @Operation(summary = "删除知识库")
     @DeleteMapping("/knowledge-bases/{id}")
-    public R<Void> deleteKB(@PathVariable Long id) {
+    public R<Void> deleteKB(@PathVariable Long id,
+                             @RequestHeader(value = "X-Workspace-Id", required = false) Long workspaceId) {
+        verifyKBWorkspace(id, workspaceId);
         kbService.delete(id);
         return R.ok();
     }
@@ -114,7 +121,9 @@ public class WikiController {
     @RequireWorkspaceRole("viewer")
     @Operation(summary = "获取知识库配置")
     @GetMapping("/knowledge-bases/{id}/config")
-    public R<Map<String, String>> getConfig(@PathVariable Long id) {
+    public R<Map<String, String>> getConfig(@PathVariable Long id,
+                                             @RequestHeader(value = "X-Workspace-Id", required = false) Long workspaceId) {
+        verifyKBWorkspace(id, workspaceId);
         WikiKnowledgeBaseEntity kb = kbService.getById(id);
         if (kb == null) return R.fail("Knowledge base not found");
         return R.ok(Map.of("content", kb.getConfigContent() != null ? kb.getConfigContent() : ""));
@@ -123,7 +132,9 @@ public class WikiController {
     @RequireWorkspaceRole("member")
     @Operation(summary = "更新知识库配置")
     @PutMapping("/knowledge-bases/{id}/config")
-    public R<Void> updateConfig(@PathVariable Long id, @RequestBody Map<String, String> body) {
+    public R<Void> updateConfig(@PathVariable Long id, @RequestBody Map<String, String> body,
+                                 @RequestHeader(value = "X-Workspace-Id", required = false) Long workspaceId) {
+        verifyKBWorkspace(id, workspaceId);
         kbService.updateConfig(id, body.get("content"));
         return R.ok();
     }
@@ -133,7 +144,9 @@ public class WikiController {
     @RequireWorkspaceRole("member")
     @Operation(summary = "设置知识库关联目录")
     @PutMapping("/knowledge-bases/{id}/source-directory")
-    public R<Void> setSourceDirectory(@PathVariable Long id, @RequestBody Map<String, String> body) {
+    public R<Void> setSourceDirectory(@PathVariable Long id, @RequestBody Map<String, String> body,
+                                       @RequestHeader(value = "X-Workspace-Id", required = false) Long workspaceId) {
+        verifyKBWorkspace(id, workspaceId);
         String path = body.get("path");
         kbService.updateSourceDirectory(id, path);
         return R.ok();
@@ -142,7 +155,9 @@ public class WikiController {
     @RequireWorkspaceRole("member")
     @Operation(summary = "扫描关联目录导入文件")
     @PostMapping("/knowledge-bases/{id}/scan")
-    public R<Map<String, Object>> scanDirectory(@PathVariable Long id) {
+    public R<Map<String, Object>> scanDirectory(@PathVariable Long id,
+                                                 @RequestHeader(value = "X-Workspace-Id", required = false) Long workspaceId) {
+        verifyKBWorkspace(id, workspaceId);
         WikiDirectoryScanService.ScanResult result = scanService.scan(id);
         Map<String, Object> response = new LinkedHashMap<>();
         response.put("scanned", result.scanned());
@@ -157,14 +172,18 @@ public class WikiController {
     @RequireWorkspaceRole("viewer")
     @Operation(summary = "获取原始材料列表")
     @GetMapping("/knowledge-bases/{kbId}/raw")
-    public R<List<WikiRawMaterialEntity>> listRaw(@PathVariable Long kbId) {
+    public R<List<WikiRawMaterialEntity>> listRaw(@PathVariable Long kbId,
+                                                    @RequestHeader(value = "X-Workspace-Id", required = false) Long workspaceId) {
+        verifyKBWorkspace(kbId, workspaceId);
         return R.ok(rawService.listByKbId(kbId));
     }
 
     @RequireWorkspaceRole("member")
     @Operation(summary = "添加文本材料")
     @PostMapping("/knowledge-bases/{kbId}/raw/text")
-    public R<WikiRawMaterialEntity> addRawText(@PathVariable Long kbId, @RequestBody Map<String, String> body) {
+    public R<WikiRawMaterialEntity> addRawText(@PathVariable Long kbId, @RequestBody Map<String, String> body,
+                                                @RequestHeader(value = "X-Workspace-Id", required = false) Long workspaceId) {
+        verifyKBWorkspace(kbId, workspaceId);
         String title = body.get("title");
         String content = body.get("content");
         return R.ok(rawService.addText(kbId, title, content));
@@ -174,7 +193,9 @@ public class WikiController {
     @Operation(summary = "上传文件材料")
     @PostMapping("/knowledge-bases/{kbId}/raw/upload")
     public R<WikiRawMaterialEntity> uploadRaw(@PathVariable Long kbId,
-                                               @RequestParam("file") MultipartFile file) throws IOException {
+                                               @RequestParam("file") MultipartFile file,
+                                               @RequestHeader(value = "X-Workspace-Id", required = false) Long workspaceId) throws IOException {
+        verifyKBWorkspace(kbId, workspaceId);
         String originalName = file.getOriginalFilename();
         String extension = originalName != null && originalName.contains(".")
                 ? originalName.substring(originalName.lastIndexOf(".") + 1).toLowerCase()
@@ -206,7 +227,9 @@ public class WikiController {
     @RequireWorkspaceRole("admin")
     @Operation(summary = "删除原始材料")
     @DeleteMapping("/knowledge-bases/{kbId}/raw/{rawId}")
-    public R<Void> deleteRaw(@PathVariable Long kbId, @PathVariable Long rawId) {
+    public R<Void> deleteRaw(@PathVariable Long kbId, @PathVariable Long rawId,
+                              @RequestHeader(value = "X-Workspace-Id", required = false) Long workspaceId) {
+        verifyKBWorkspace(kbId, workspaceId);
         WikiRawMaterialEntity raw = rawService.getById(rawId);
         if (raw == null || !kbId.equals(raw.getKbId())) {
             return R.fail("Raw material not found in this knowledge base");
@@ -219,7 +242,9 @@ public class WikiController {
     @RequireWorkspaceRole("member")
     @Operation(summary = "重新处理原始材料")
     @PostMapping("/knowledge-bases/{kbId}/raw/{rawId}/reprocess")
-    public R<Void> reprocessRaw(@PathVariable Long kbId, @PathVariable Long rawId) {
+    public R<Void> reprocessRaw(@PathVariable Long kbId, @PathVariable Long rawId,
+                                 @RequestHeader(value = "X-Workspace-Id", required = false) Long workspaceId) {
+        verifyKBWorkspace(kbId, workspaceId);
         WikiRawMaterialEntity raw = rawService.getById(rawId);
         if (raw == null || !kbId.equals(raw.getKbId())) {
             return R.fail("Raw material not found in this knowledge base");
@@ -233,14 +258,18 @@ public class WikiController {
     @RequireWorkspaceRole("viewer")
     @Operation(summary = "获取 Wiki 页面列表")
     @GetMapping("/knowledge-bases/{kbId}/pages")
-    public R<List<WikiPageEntity>> listPages(@PathVariable Long kbId) {
+    public R<List<WikiPageEntity>> listPages(@PathVariable Long kbId,
+                                              @RequestHeader(value = "X-Workspace-Id", required = false) Long workspaceId) {
+        verifyKBWorkspace(kbId, workspaceId);
         return R.ok(pageService.listByKbId(kbId));
     }
 
     @RequireWorkspaceRole("viewer")
     @Operation(summary = "获取 Wiki 页面内容")
     @GetMapping("/knowledge-bases/{kbId}/pages/{slug}")
-    public R<WikiPageEntity> getPage(@PathVariable Long kbId, @PathVariable String slug) {
+    public R<WikiPageEntity> getPage(@PathVariable Long kbId, @PathVariable String slug,
+                                      @RequestHeader(value = "X-Workspace-Id", required = false) Long workspaceId) {
+        verifyKBWorkspace(kbId, workspaceId);
         WikiPageEntity page = pageService.getBySlug(kbId, slug);
         if (page == null) return R.fail("Page not found");
         return R.ok(page);
@@ -250,14 +279,18 @@ public class WikiController {
     @Operation(summary = "手动编辑 Wiki 页面")
     @PutMapping("/knowledge-bases/{kbId}/pages/{slug}")
     public R<WikiPageEntity> updatePage(@PathVariable Long kbId, @PathVariable String slug,
-                                         @RequestBody Map<String, String> body) {
+                                         @RequestBody Map<String, String> body,
+                                         @RequestHeader(value = "X-Workspace-Id", required = false) Long workspaceId) {
+        verifyKBWorkspace(kbId, workspaceId);
         return R.ok(pageService.updatePageManually(kbId, slug, body.get("content"), body.get("summary")));
     }
 
     @RequireWorkspaceRole("admin")
     @Operation(summary = "删除 Wiki 页面")
     @DeleteMapping("/knowledge-bases/{kbId}/pages/{slug}")
-    public R<Void> deletePage(@PathVariable Long kbId, @PathVariable String slug) {
+    public R<Void> deletePage(@PathVariable Long kbId, @PathVariable String slug,
+                               @RequestHeader(value = "X-Workspace-Id", required = false) Long workspaceId) {
+        verifyKBWorkspace(kbId, workspaceId);
         pageService.delete(kbId, slug);
         kbService.setPageCount(kbId, pageService.countByKbId(kbId));
         return R.ok();
@@ -266,7 +299,9 @@ public class WikiController {
     @RequireWorkspaceRole("viewer")
     @Operation(summary = "获取反向链接")
     @GetMapping("/knowledge-bases/{kbId}/pages/{slug}/backlinks")
-    public R<List<WikiPageEntity>> getBacklinks(@PathVariable Long kbId, @PathVariable String slug) {
+    public R<List<WikiPageEntity>> getBacklinks(@PathVariable Long kbId, @PathVariable String slug,
+                                                 @RequestHeader(value = "X-Workspace-Id", required = false) Long workspaceId) {
+        verifyKBWorkspace(kbId, workspaceId);
         return R.ok(pageService.getBacklinks(kbId, slug));
     }
 
@@ -275,7 +310,9 @@ public class WikiController {
     @RequireWorkspaceRole("member")
     @Operation(summary = "触发知识库处理（异步）")
     @PostMapping("/knowledge-bases/{kbId}/process")
-    public R<Map<String, Object>> processKB(@PathVariable Long kbId) {
+    public R<Map<String, Object>> processKB(@PathVariable Long kbId,
+                                             @RequestHeader(value = "X-Workspace-Id", required = false) Long workspaceId) {
+        verifyKBWorkspace(kbId, workspaceId);
         List<WikiRawMaterialEntity> pending = rawService.listPending(kbId);
         for (WikiRawMaterialEntity raw : pending) {
             eventPublisher.publishEvent(new WikiProcessingEvent(this, raw.getId(), kbId));
@@ -286,7 +323,9 @@ public class WikiController {
     @RequireWorkspaceRole("viewer")
     @Operation(summary = "获取处理状态")
     @GetMapping("/knowledge-bases/{kbId}/processing-status")
-    public R<Map<String, Object>> getProcessingStatus(@PathVariable Long kbId) {
+    public R<Map<String, Object>> getProcessingStatus(@PathVariable Long kbId,
+                                                       @RequestHeader(value = "X-Workspace-Id", required = false) Long workspaceId) {
+        verifyKBWorkspace(kbId, workspaceId);
         WikiKnowledgeBaseEntity kb = kbService.getById(kbId);
         if (kb == null) return R.fail("Knowledge base not found");
 
@@ -305,5 +344,18 @@ public class WikiController {
                 "totalRaw", rawList.size(),
                 "totalPages", kb.getPageCount()
         ));
+    }
+
+    // ==================== Workspace Verification ====================
+
+    private void verifyKBWorkspace(Long kbId, Long headerWorkspaceId) {
+        WikiKnowledgeBaseEntity kb = kbService.getById(kbId);
+        if (kb == null) {
+            throw new MateClawException("Knowledge base not found");
+        }
+        long wsId = headerWorkspaceId != null ? headerWorkspaceId : 1L;
+        if (kb.getWorkspaceId() != null && !kb.getWorkspaceId().equals(wsId)) {
+            throw new MateClawException("资源不属于当前工作区");
+        }
     }
 }

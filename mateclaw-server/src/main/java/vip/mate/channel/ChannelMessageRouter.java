@@ -378,8 +378,8 @@ public class ChannelMessageRouter {
             }
             // ======= 审批拦截层结束 =======
 
-            // 确保会话存在
-            conversationService.getOrCreateSharedConversation(conversationId, agentId);
+            // 确保会话存在（workspace 感知）
+            conversationService.getOrCreateSharedConversation(conversationId, agentId, channelEntity.getWorkspaceId());
 
             // 更新渠道会话存储（用于主动推送）
             String replyTarget = resolveReplyTarget(message);
@@ -566,7 +566,7 @@ public class ChannelMessageRouter {
         String conversationId = buildConversationId(message);
         String username = message.getSenderName() != null ? message.getSenderName() : message.getSenderId();
 
-        conversationService.getOrCreateConversation(conversationId, agentId, username);
+        conversationService.getOrCreateConversation(conversationId, agentId, username, channelEntity.getWorkspaceId());
         List<MessageContentPart> parts = message.getContentParts();
         conversationService.saveMessage(conversationId, "user", message.getContent(), parts);
 

@@ -1,21 +1,24 @@
 <template>
-  <div class="page-container">
-    <div class="page-header">
-      <div>
-        <h1 class="page-title">{{ t('nav.wiki') }}</h1>
-        <p class="page-desc">{{ t('wiki.desc') }}</p>
-      </div>
-      <button class="btn-primary" @click="showCreateKB = true">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
-        </svg>
-        {{ t('wiki.createKB') }}
-      </button>
-    </div>
+  <div class="mc-page-shell wiki-shell">
+    <div class="mc-page-frame">
+      <div class="mc-page-inner">
+        <div class="mc-page-header">
+          <div>
+            <div class="mc-page-kicker">Knowledge Engine</div>
+            <h1 class="mc-page-title">{{ t('nav.wiki') }}</h1>
+            <p class="mc-page-desc">{{ t('wiki.desc') }}</p>
+          </div>
+          <button class="btn-primary page-cta" @click="showCreateKB = true">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+            </svg>
+            {{ t('wiki.createKB') }}
+          </button>
+        </div>
 
-    <div class="wiki-layout">
+        <div class="wiki-layout">
       <!-- Left: Knowledge Base List -->
-      <div class="wiki-sidebar">
+      <div class="wiki-sidebar mc-surface-card">
         <div class="sidebar-section">
           <h3 class="sidebar-title">{{ t('wiki.knowledgeBases') }}</h3>
           <div v-if="store.loading" class="text-center py-4 text-gray-400">Loading...</div>
@@ -39,7 +42,7 @@
         </div>
 
         <!-- Pages List when KB selected -->
-        <div v-if="store.currentKB" class="sidebar-section">
+        <div v-if="store.currentKB" class="sidebar-section sidebar-section--pages">
           <h3 class="sidebar-title">
             {{ t('wiki.pages') }}
             <span class="text-xs text-gray-400">({{ store.pages.length }})</span>
@@ -64,7 +67,7 @@
       </div>
 
       <!-- Right: Content Area -->
-      <div class="wiki-content">
+      <div class="wiki-content mc-surface-card">
         <!-- No KB selected -->
         <div v-if="!store.currentKB" class="empty-state">
           <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" class="mx-auto mb-4 text-gray-400">
@@ -103,6 +106,8 @@
             <WikiConfig />
           </div>
         </div>
+      </div>
+    </div>
       </div>
     </div>
 
@@ -182,39 +187,37 @@ onMounted(() => {
 </script>
 
 <style scoped>
-/* Base styles */
-.page-container { height: 100%; overflow-y: auto; padding: 24px; background: var(--mc-bg); }
-.page-header { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 24px; }
-.page-title { font-size: 20px; font-weight: 700; color: var(--mc-text-primary); margin: 0 0 4px; }
-.page-desc { font-size: 14px; color: var(--mc-text-secondary); margin: 0; }
+.wiki-shell {
+  background: transparent;
+}
 
-.btn-primary { display: flex; align-items: center; gap: 6px; padding: 8px 16px; background: var(--mc-primary); color: white; border: none; border-radius: 8px; font-size: 14px; font-weight: 500; cursor: pointer; }
+.btn-primary { display: flex; align-items: center; gap: 6px; padding: 10px 16px; background: linear-gradient(135deg, var(--mc-primary), var(--mc-primary-hover)); color: white; border: none; border-radius: 14px; font-size: 14px; font-weight: 600; cursor: pointer; box-shadow: var(--mc-shadow-soft); }
 .btn-primary:hover { background: var(--mc-primary-hover); }
 .btn-primary:disabled { background: var(--mc-border); cursor: not-allowed; }
-.btn-secondary { padding: 8px 16px; background: var(--mc-bg-elevated); color: var(--mc-text-primary); border: 1px solid var(--mc-border); border-radius: 8px; font-size: 14px; cursor: pointer; }
+.btn-secondary { padding: 8px 16px; background: var(--mc-bg-elevated); color: var(--mc-text-primary); border: 1px solid var(--mc-border); border-radius: 12px; font-size: 14px; cursor: pointer; }
 .btn-secondary:hover { background: var(--mc-bg-sunken); }
 
 /* Layout */
-.wiki-layout { display: flex; gap: 16px; height: calc(100vh - 180px); overflow: hidden; }
+.wiki-layout { display: flex; gap: 18px; min-height: calc(100vh - 200px); overflow: hidden; }
 
-.wiki-sidebar { width: 280px; min-width: 280px; overflow-y: auto; border-right: 1px solid var(--mc-border); padding-right: 16px; display: flex; flex-direction: column; gap: 16px; }
+.wiki-sidebar { width: 320px; min-width: 320px; overflow-y: auto; padding: 18px; display: flex; flex-direction: column; gap: 18px; }
 
-.sidebar-section { display: flex; flex-direction: column; gap: 8px; }
+.sidebar-section { display: flex; flex-direction: column; gap: 10px; }
 
-.sidebar-title { font-size: 12px; font-weight: 600; text-transform: uppercase; color: var(--mc-text-secondary); letter-spacing: 0.05em; }
+.sidebar-title { font-size: 11px; font-weight: 700; text-transform: uppercase; color: var(--mc-text-tertiary); letter-spacing: 0.1em; }
 
-.sidebar-search { width: 100%; padding: 6px 12px; border: 1px solid var(--mc-border); border-radius: 8px; font-size: 13px; background: var(--mc-bg-sunken); color: var(--mc-text-primary); outline: none; }
+.sidebar-search { width: 100%; padding: 10px 12px; border: 1px solid var(--mc-border); border-radius: 12px; font-size: 13px; background: var(--mc-bg-muted); color: var(--mc-text-primary); outline: none; }
 .sidebar-search:focus { border-color: var(--mc-primary); }
 
 .kb-list, .page-list { display: flex; flex-direction: column; gap: 4px; }
 
-.kb-item, .page-item { padding: 8px 12px; border-radius: 8px; cursor: pointer; transition: background 0.15s; position: relative; }
-.kb-item:hover, .page-item:hover { background: var(--mc-sidebar-hover); }
-.kb-item.active, .page-item.active { background: var(--mc-primary-bg); border-left: 2px solid var(--mc-primary); }
+.kb-item, .page-item { padding: 12px 14px; border-radius: 16px; cursor: pointer; transition: background 0.15s, transform 0.15s; position: relative; border: 1px solid transparent; }
+.kb-item:hover, .page-item:hover { background: var(--mc-bg-muted); transform: translateY(-1px); }
+.kb-item.active, .page-item.active { background: var(--mc-primary-bg); border-color: rgba(217, 109, 70, 0.12); }
 
-.kb-item-name { font-size: 14px; font-weight: 500; color: var(--mc-text-primary); }
+.kb-item-name { font-size: 14px; font-weight: 700; color: var(--mc-text-primary); margin-bottom: 4px; }
 .kb-item-meta, .page-item-meta { font-size: 12px; color: var(--mc-text-secondary); display: flex; gap: 8px; }
-.page-item-title { font-size: 13px; color: var(--mc-text-primary); }
+.page-item-title { font-size: 13px; color: var(--mc-text-primary); font-weight: 600; }
 
 .kb-status { position: absolute; right: 8px; top: 8px; font-size: 10px; padding: 2px 6px; border-radius: 9999px; text-transform: uppercase; font-weight: 500; }
 .kb-status.active { background: rgba(90, 138, 90, 0.15); color: var(--mc-success); }
@@ -222,16 +225,16 @@ onMounted(() => {
 .kb-status.error { background: var(--mc-danger-bg); color: var(--mc-danger); }
 
 /* Content area */
-.wiki-content { flex: 1; overflow-y: auto; min-width: 0; }
+.wiki-content { flex: 1; overflow-y: auto; min-width: 0; padding: 20px; }
 
-.content-tabs { display: flex; gap: 0; border-bottom: 1px solid var(--mc-border); margin-bottom: 16px; }
-.tab-btn { padding: 8px 16px; border: none; background: none; cursor: pointer; font-size: 14px; color: var(--mc-text-secondary); border-bottom: 2px solid transparent; transition: all 0.15s; }
+.content-tabs { display: inline-flex; gap: 4px; padding: 4px; background: var(--mc-bg-muted); border-radius: 16px; margin-bottom: 20px; border: 1px solid var(--mc-border-light); }
+.tab-btn { padding: 10px 16px; border: none; background: none; cursor: pointer; font-size: 14px; color: var(--mc-text-secondary); border-radius: 12px; transition: all 0.15s; font-weight: 600; }
 .tab-btn:hover { color: var(--mc-text-primary); }
-.tab-btn.active { color: var(--mc-primary); border-bottom-color: var(--mc-primary); }
+.tab-btn.active { color: var(--mc-primary); background: var(--mc-bg-elevated); box-shadow: var(--mc-shadow-soft); }
 
 .tab-content { min-height: 400px; }
 
-.empty-state { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 300px; color: var(--mc-text-tertiary); }
+.empty-state { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 300px; color: var(--mc-text-tertiary); text-align: center; padding: 32px; }
 
 /* Modal */
 .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.4); display: flex; align-items: center; justify-content: center; z-index: 1000; padding: 20px; }
@@ -245,4 +248,15 @@ onMounted(() => {
 .form-input:focus { border-color: var(--mc-primary); box-shadow: 0 0 0 2px rgba(217,119,87,0.1); }
 
 .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
+
+@media (max-width: 980px) {
+  .wiki-layout {
+    flex-direction: column;
+  }
+
+  .wiki-sidebar {
+    width: 100%;
+    min-width: 0;
+  }
+}
 </style>

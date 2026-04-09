@@ -1,21 +1,29 @@
 <template>
-  <div class="settings-layout">
-    <div class="settings-nav">
-      <h2 class="nav-title">{{ t('security.title') }}</h2>
-      <router-link
-        v-for="section in sections"
-        :key="section.id"
-        :to="section.path"
-        class="nav-item"
-        :class="{ active: isActive(section.path) }"
-      >
-        <span class="nav-icon" v-html="section.icon"></span>
-        {{ section.label }}
-      </router-link>
-    </div>
+  <div class="mc-page-shell security-shell">
+    <div class="mc-page-frame">
+      <div class="mc-page-inner settings-layout">
+        <div class="settings-nav mc-surface-card">
+          <div class="settings-nav__intro">
+            <div class="mc-page-kicker">Governance</div>
+            <h2 class="nav-title">{{ t('security.title') }}</h2>
+            <p class="nav-desc">This is where the product becomes trustworthy: boundaries, approvals, audit, and operational truth.</p>
+          </div>
+          <router-link
+            v-for="section in sections"
+            :key="section.id"
+            :to="section.path"
+            class="nav-item"
+            :class="{ active: isActive(section.path) }"
+          >
+            <span class="nav-icon" v-html="section.icon"></span>
+            {{ section.label }}
+          </router-link>
+        </div>
 
-    <div class="settings-content">
-      <router-view />
+        <div class="settings-content mc-surface-card">
+          <router-view />
+        </div>
+      </div>
     </div>
   </div>
 </template>
@@ -48,16 +56,22 @@ const sections = computed(() => [
     icon: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>',
   },
   {
-    id: 'activity',
-    path: '/security/activity',
-    label: t('security.sections.activity', 'Activity'),
-    icon: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>',
-  },
-  {
     id: 'members',
     path: '/security/members',
     label: t('security.sections.members', 'Members'),
     icon: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>',
+  },
+  {
+    id: 'workspaces',
+    path: '/security/workspaces',
+    label: t('security.sections.workspaces', 'Workspaces'),
+    icon: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="7" width="20" height="14" rx="2" ry="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/></svg>',
+  },
+  {
+    id: 'activity',
+    path: '/security/activity',
+    label: t('security.sections.activity', 'Activity'),
+    icon: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>',
   },
 ])
 
@@ -67,51 +81,68 @@ function isActive(path: string) {
 </script>
 
 <style scoped>
+.security-shell {
+  background: transparent;
+}
+
 .settings-layout {
   display: flex;
-  height: 100%;
-  overflow: hidden;
+  min-height: calc(100vh - 120px);
+  gap: 20px;
 }
 
 .settings-nav {
-  width: 200px;
-  min-width: 200px;
-  border-right: 1px solid var(--mc-border-light);
-  padding: 20px 12px;
+  width: 270px;
+  min-width: 270px;
+  padding: 18px 14px;
   overflow-y: auto;
+  align-self: flex-start;
+}
+
+.settings-nav__intro {
+  padding: 6px 8px 16px;
 }
 
 .nav-title {
-  font-size: 18px;
-  font-weight: 700;
+  font-size: 28px;
+  font-weight: 800;
   color: var(--mc-text-primary);
-  margin: 0 0 16px 4px;
+  letter-spacing: -0.04em;
+  margin: 0 0 6px;
+}
+
+.nav-desc {
+  color: var(--mc-text-secondary);
+  font-size: 13px;
+  line-height: 1.65;
 }
 
 .nav-item {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   width: 100%;
-  padding: 8px 12px;
+  padding: 10px 12px;
   border: none;
   background: transparent;
   color: var(--mc-text-secondary);
   font-size: 14px;
-  border-radius: 6px;
+  border-radius: 14px;
   cursor: pointer;
   text-align: left;
   text-decoration: none;
   margin-bottom: 2px;
+  font-weight: 500;
 }
 
-.nav-item:hover { background: var(--mc-bg-hover); color: var(--mc-text-primary); }
-.nav-item.active { background: var(--mc-sidebar-active); color: var(--mc-text-primary); font-weight: 500; }
+.nav-item:hover { background: var(--mc-bg-muted); color: var(--mc-text-primary); }
+.nav-item.active { background: var(--mc-primary-bg); color: var(--mc-primary); font-weight: 600; box-shadow: inset 0 0 0 1px rgba(217, 109, 70, 0.08); }
 .nav-icon { display: flex; align-items: center; flex-shrink: 0; }
 
 .settings-content {
   flex: 1;
   overflow-y: auto;
   padding: 24px 32px;
+  min-height: 720px;
 }
 </style>

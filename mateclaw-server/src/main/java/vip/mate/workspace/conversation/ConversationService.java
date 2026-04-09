@@ -96,10 +96,19 @@ public class ConversationService {
     }
 
     /**
-     * 获取或创建会话
+     * 获取或创建会话（向后兼容，默认 workspace 1）
      */
     @Transactional
     public ConversationEntity getOrCreateConversation(String conversationId, Long agentId, String username) {
+        return getOrCreateConversation(conversationId, agentId, username, 1L);
+    }
+
+    /**
+     * 获取或创建会话（workspace 感知）
+     */
+    @Transactional
+    public ConversationEntity getOrCreateConversation(String conversationId, Long agentId,
+                                                       String username, Long workspaceId) {
         ConversationEntity conv = conversationMapper.selectOne(new LambdaQueryWrapper<ConversationEntity>()
                 .eq(ConversationEntity::getConversationId, conversationId));
         if (conv == null) {
@@ -107,6 +116,7 @@ public class ConversationService {
             conv.setConversationId(conversationId);
             conv.setAgentId(agentId);
             conv.setUsername(username != null ? username : "anonymous");
+            conv.setWorkspaceId(workspaceId != null ? workspaceId : 1L);
             conv.setTitle("新对话");
             conv.setMessageCount(0);
             conv.setLastActiveTime(LocalDateTime.now());
@@ -126,6 +136,14 @@ public class ConversationService {
      */
     @Transactional
     public ConversationEntity getOrCreateSharedConversation(String conversationId, Long agentId) {
+        return getOrCreateSharedConversation(conversationId, agentId, null);
+    }
+
+    /**
+     * 获取或创建共享渠道会话（workspace 感知）
+     */
+    @Transactional
+    public ConversationEntity getOrCreateSharedConversation(String conversationId, Long agentId, Long workspaceId) {
         ConversationEntity conv = conversationMapper.selectOne(new LambdaQueryWrapper<ConversationEntity>()
                 .eq(ConversationEntity::getConversationId, conversationId));
         if (conv == null) {
@@ -133,6 +151,7 @@ public class ConversationService {
             conv.setConversationId(conversationId);
             conv.setAgentId(agentId);
             conv.setUsername(SYSTEM_USER);
+            conv.setWorkspaceId(workspaceId != null ? workspaceId : 1L);
             conv.setTitle("新对话");
             conv.setMessageCount(0);
             conv.setLastActiveTime(LocalDateTime.now());

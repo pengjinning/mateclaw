@@ -130,9 +130,11 @@ public class TalkModeWebSocketHandler extends AbstractWebSocketHandler {
             // 3. 推送转写结果
             sendJson(session, Map.of("type", "transcript", "text", transcript));
 
-            // 4. 保存用户消息
+            // 4. 保存用户消息（workspace 从 agent 获取）
+            var talkAgent = agentService.getAgent(talkSession.agentId);
+            Long talkWsId = talkAgent != null ? talkAgent.getWorkspaceId() : 1L;
             conversationService.getOrCreateConversation(
-                    talkSession.conversationId, talkSession.agentId, talkSession.username);
+                    talkSession.conversationId, talkSession.agentId, talkSession.username, talkWsId);
             conversationService.saveMessage(talkSession.conversationId, "user", transcript, List.of());
 
             // 5. Agent 对话（同步）

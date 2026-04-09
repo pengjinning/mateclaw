@@ -96,10 +96,14 @@ public class AgentController {
 
     @Operation(summary = "流式对话（SSE）")
     @GetMapping("/{id}/chat/stream")
+    @RequireWorkspaceRole("viewer")
     public SseEmitter chatStream(
             @PathVariable Long id,
             @RequestParam String message,
-            @RequestParam(defaultValue = "default") String conversationId) {
+            @RequestParam(defaultValue = "default") String conversationId,
+            @RequestHeader(value = "X-Workspace-Id", required = false) Long workspaceId) {
+        AgentEntity agent = agentService.getAgent(id);
+        verifyResourceWorkspace(agent != null ? agent.getWorkspaceId() : null, workspaceId);
 
         SseEmitter emitter = new SseEmitter(5 * 60 * 1000L);
         sseExecutor.execute(() -> {
@@ -131,23 +135,35 @@ public class AgentController {
 
     @Operation(summary = "同步对话")
     @PostMapping("/{id}/chat")
+    @RequireWorkspaceRole("viewer")
     public R<String> chat(
             @PathVariable Long id,
-            @RequestBody ChatRequest request) {
+            @RequestBody ChatRequest request,
+            @RequestHeader(value = "X-Workspace-Id", required = false) Long workspaceId) {
+        AgentEntity agent = agentService.getAgent(id);
+        verifyResourceWorkspace(agent != null ? agent.getWorkspaceId() : null, workspaceId);
         return R.ok(agentService.chat(id, request.getMessage(), request.getConversationId()));
     }
 
     @Operation(summary = "执行复杂任务（Plan-Execute）")
     @PostMapping("/{id}/execute")
+    @RequireWorkspaceRole("viewer")
     public R<String> execute(
             @PathVariable Long id,
-            @RequestBody ChatRequest request) {
+            @RequestBody ChatRequest request,
+            @RequestHeader(value = "X-Workspace-Id", required = false) Long workspaceId) {
+        AgentEntity agent = agentService.getAgent(id);
+        verifyResourceWorkspace(agent != null ? agent.getWorkspaceId() : null, workspaceId);
         return R.ok(agentService.execute(id, request.getMessage(), request.getConversationId()));
     }
 
     @Operation(summary = "获取Agent运行状态")
     @GetMapping("/{id}/state")
-    public R<AgentState> getState(@PathVariable Long id) {
+    @RequireWorkspaceRole("viewer")
+    public R<AgentState> getState(@PathVariable Long id,
+                                   @RequestHeader(value = "X-Workspace-Id", required = false) Long workspaceId) {
+        AgentEntity agent = agentService.getAgent(id);
+        verifyResourceWorkspace(agent != null ? agent.getWorkspaceId() : null, workspaceId);
         return R.ok(agentService.getAgentState(id));
     }
 

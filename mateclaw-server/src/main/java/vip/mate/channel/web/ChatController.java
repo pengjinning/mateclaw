@@ -17,6 +17,7 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import org.springframework.context.ApplicationEventPublisher;
 import vip.mate.common.result.R;
 import vip.mate.agent.AgentService;
+import vip.mate.agent.model.AgentEntity;
 import vip.mate.approval.ApprovalService;
 import vip.mate.approval.PendingApproval;
 import vip.mate.memory.event.ConversationCompletedEvent;
@@ -73,6 +74,7 @@ public class ChatController {
     @PostMapping(value = "/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter chatStream(
             @RequestBody ChatStreamRequest request,
+            @RequestHeader(value = "X-Workspace-Id", required = false) Long workspaceId,
             Authentication auth) {
 
         String conversationId = request.getConversationId() != null ? request.getConversationId() : "default";
@@ -124,6 +126,26 @@ public class ChatController {
         }
         String username = auth.getName();
         log.info("SSE chat: agentId={}, conversationId={}, user={}", agentId, conversationId, username);
+
+        // ---- Workspace 边界校验：确保 agent 属于当前 workspace ----
+        if (agentId != null) {
+            AgentEntity agent = agentService.getAgent(agentId);
+            if (agent != null && agent.getWorkspaceId() != null) {
+                long wsId = workspaceId != null ? workspaceId : 1L;
+                if (!agent.getWorkspaceId().equals(wsId)) {
+                    log.warn("Chat workspace mismatch: agent {} belongs to workspace {}, request workspace {}",
+                            agentId, agent.getWorkspaceId(), wsId);
+                    try {
+                        sendEvent(emitter, "error", Map.of("message", "Agent 不属于当前工作区"));
+                        sendEvent(emitter, "done", Map.of("status", "completed"));
+                    } catch (IOException e) {
+                        log.warn("SSE workspace error send failed: {}", e.getMessage());
+                    }
+                    emitter.complete();
+                    return emitter;
+                }
+            }
+        }
 
         // ---- 审批命令拦截：/approve、/deny 走 SSE 流式 replay ----
         String normalizedMsg = message.trim().toLowerCase();
@@ -382,7 +404,7 @@ public class ChatController {
             StreamAccumulator accumulator = new StreamAccumulator();
             AtomicBoolean finalized = new AtomicBoolean(false);
             try {
-                conversationService.getOrCreateConversation(conversationId, agentId, username);
+                conversationService.getOrCreateConversation(conversationId, agentId, username, workspaceId);
                 List<MessageContentPart> requestParts = normalizeRequestParts(request);
                 String promptText = buildPromptText(message, requestParts);
                 conversationService.saveMessage(conversationId, "user", message, requestParts);
@@ -785,13 +807,14 @@ public class ChatController {
     public R<String> chat(
             @RequestParam Long agentId,
             @RequestBody ChatRequest request,
+            @RequestHeader(value = "X-Workspace-Id", required = false) Long workspaceId,
             Authentication auth) {
 
         String username = auth != null ? auth.getName() : null;
         if (username == null) {
             return R.fail("未登录，请先登录");
         }
-        conversationService.getOrCreateConversation(request.getConversationId(), agentId, username);
+        conversationService.getOrCreateConversation(request.getConversationId(), agentId, username, workspaceId);
         conversationService.saveMessage(request.getConversationId(), "user", request.getMessage(), request.getContentParts());
 
         String promptText = buildPromptText(request.getMessage(), request.getContentParts());

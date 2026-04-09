@@ -35,6 +35,14 @@
             </span>
             {{ ws.name }}
           </el-dropdown-item>
+          <el-dropdown-item divided command="__manage__">
+            <span class="ws-menu-icon">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+              </svg>
+            </span>
+            Manage Workspaces
+          </el-dropdown-item>
         </el-dropdown-menu>
       </template>
     </el-dropdown>
@@ -43,6 +51,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted } from 'vue'
+import { useRouter } from 'vue-router'
 import { useWorkspaceStore } from '@/stores/useWorkspaceStore'
 
 defineProps<{
@@ -50,6 +59,7 @@ defineProps<{
 }>()
 
 const store = useWorkspaceStore()
+const router = useRouter()
 const workspaces = computed(() => store.workspaces)
 const currentWorkspaceId = computed(() => store.currentWorkspaceId)
 const currentLabel = computed(() => store.currentWorkspace?.name || 'Workspace')
@@ -58,10 +68,12 @@ onMounted(() => {
   store.fetchWorkspaces()
 })
 
-function onSwitch(id: number) {
-  store.switchWorkspace(id)
-  // Reload current page data by emitting event
-  window.dispatchEvent(new CustomEvent('workspace-changed', { detail: { workspaceId: id } }))
+function onSwitch(id: number | string) {
+  if (id === '__manage__') {
+    router.push('/security/workspaces')
+    return
+  }
+  store.switchWorkspace(id as number)
 }
 </script>
 

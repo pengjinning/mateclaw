@@ -4,10 +4,15 @@ import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.*;
+import vip.mate.agent.AgentService;
+import vip.mate.agent.model.AgentEntity;
 import vip.mate.common.result.R;
+import vip.mate.cron.model.CronJobEntity;
+import vip.mate.cron.repository.CronJobMapper;
 import vip.mate.dashboard.model.CronJobRunEntity;
 import vip.mate.dashboard.service.CronJobRunService;
 import vip.mate.dashboard.service.DashboardService;
+import vip.mate.exception.MateClawException;
 import vip.mate.workspace.core.annotation.RequireWorkspaceRole;
 
 import java.util.List;
@@ -26,6 +31,8 @@ public class DashboardController {
 
     private final DashboardService dashboardService;
     private final CronJobRunService cronJobRunService;
+    private final CronJobMapper cronJobMapper;
+    private final AgentService agentService;
 
     @Operation(summary = "获取概览统计")
     @GetMapping("/overview")
@@ -49,8 +56,19 @@ public class DashboardController {
     @RequireWorkspaceRole("viewer")
     public R<List<CronJobRunEntity>> cronJobRuns(
             @PathVariable Long cronJobId,
+            @RequestHeader(value = "X-Workspace-Id", required = false) Long workspaceId,
             @RequestParam(defaultValue = "20") int limit) {
-        // TODO: 校验 cronJobId 对应的 agent 属于当前 workspace
+        // 校验 cronJobId 对应的 agent 属于当前 workspace
+        CronJobEntity job = cronJobMapper.selectById(cronJobId);
+        if (job != null && job.getAgentId() != null) {
+            AgentEntity agent = agentService.getAgent(job.getAgentId());
+            if (agent != null && agent.getWorkspaceId() != null) {
+                long wsId = workspaceId != null ? workspaceId : 1L;
+                if (!agent.getWorkspaceId().equals(wsId)) {
+                    throw new MateClawException("资源不属于当前工作区");
+                }
+            }
+        }
         return R.ok(cronJobRunService.listByJobId(cronJobId, Math.min(limit, 100)));
     }
 

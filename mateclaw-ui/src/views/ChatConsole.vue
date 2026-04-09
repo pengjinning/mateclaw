@@ -1,9 +1,11 @@
 <template>
-  <div class="chat-layout">
-    <!-- 移动端会话面板遮罩 -->
-    <Transition name="fade">
-      <div v-if="isMobile && convPanelOpen" class="conv-backdrop" @click="convPanelOpen = false"></div>
-    </Transition>
+  <div class="mc-page-shell chat-console-shell">
+    <div class="mc-page-frame chat-console-frame">
+      <div class="chat-layout mc-surface-card">
+        <!-- 移动端会话面板遮罩 -->
+        <Transition name="fade">
+          <div v-if="isMobile && convPanelOpen" class="conv-backdrop" @click="convPanelOpen = false"></div>
+        </Transition>
 
     <!-- 会话侧边栏 -->
     <div class="conversation-panel" :class="{ 'mobile-open': convPanelOpen }">
@@ -191,13 +193,15 @@
       />
     </div>
 
-    <!-- Talk Mode 覆盖层 -->
-    <TalkMode
-      :visible="showTalkMode"
-      :agent-id="selectedAgentId"
-      :conversation-id="currentConversationId"
-      @close="showTalkMode = false"
-    />
+        <!-- Talk Mode 覆盖层 -->
+        <TalkMode
+          :visible="showTalkMode"
+          :agent-id="selectedAgentId"
+          :conversation-id="currentConversationId"
+          @close="showTalkMode = false"
+        />
+      </div>
+    </div>
   </div>
 </template>
 
@@ -1131,17 +1135,26 @@ function handleCodeCopy(e: MouseEvent) {
 </script>
 
 <style scoped>
+.chat-console-shell {
+  background: transparent;
+}
+
+.chat-console-frame {
+  height: calc(100vh - 28px);
+}
+
 .chat-layout {
   display: flex;
   height: 100%;
   overflow: hidden;
+  min-height: 0;
 }
 
 .conversation-panel {
   width: 260px;
   min-width: 260px;
-  background: var(--mc-bg-elevated);
-  border-right: 1px solid var(--mc-border);
+  background: linear-gradient(180deg, var(--mc-panel-top), var(--mc-panel-bottom));
+  border-right: 1px solid var(--mc-border-light);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -1166,8 +1179,8 @@ function handleCodeCopy(e: MouseEvent) {
   width: 28px;
   height: 28px;
   border: 1px solid var(--mc-border);
-  background: var(--mc-bg-elevated);
-  border-radius: 6px;
+  background: var(--mc-panel-raised);
+  border-radius: 10px;
   cursor: pointer;
   display: flex;
   align-items: center;
@@ -1224,7 +1237,7 @@ function handleCodeCopy(e: MouseEvent) {
   align-items: center;
   gap: 8px;
   padding: 9px 10px;
-  border-radius: 6px;
+  border-radius: 12px;
   cursor: pointer;
   transition: all 0.15s;
 }
@@ -1316,7 +1329,7 @@ function handleCodeCopy(e: MouseEvent) {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  background: var(--mc-chat-bg);
+  background: linear-gradient(180deg, var(--mc-chat-header-bg), var(--mc-chat-bg));
   position: relative;
 }
 
@@ -1361,9 +1374,10 @@ function handleCodeCopy(e: MouseEvent) {
   align-items: center;
   justify-content: space-between;
   padding: 12px 20px;
-  background: var(--mc-chat-header-bg);
+  background: linear-gradient(180deg, var(--mc-panel-raised), var(--mc-surface-overlay));
   border-bottom: 1px solid var(--mc-border);
   min-height: 52px;
+  backdrop-filter: blur(12px);
 }
 
 .chat-header-right {
@@ -1419,8 +1433,8 @@ function handleCodeCopy(e: MouseEvent) {
   width: 32px;
   height: 32px;
   border: 1px solid var(--mc-border);
-  background: var(--mc-bg-elevated);
-  border-radius: 6px;
+  background: var(--mc-panel-raised);
+  border-radius: 10px;
   cursor: pointer;
   display: flex;
   align-items: center;
@@ -1461,10 +1475,10 @@ function handleCodeCopy(e: MouseEvent) {
 
 .btn-primary {
   padding: 8px 16px;
-  background: var(--mc-primary);
+  background: linear-gradient(135deg, var(--mc-primary), var(--mc-primary-hover));
   color: white;
   border: none;
-  border-radius: 8px;
+  border-radius: 12px;
   font-size: 14px;
   cursor: pointer;
   transition: background 0.15s;
@@ -1485,6 +1499,11 @@ function handleCodeCopy(e: MouseEvent) {
 
 /* ===== 移动端适配 ===== */
 @media (max-width: 768px) {
+  .chat-console-frame {
+    height: auto;
+    min-height: calc(100vh - 28px);
+  }
+
   .conversation-panel {
     position: fixed;
     left: 0;

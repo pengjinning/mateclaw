@@ -72,13 +72,37 @@ public class DashboardService {
         }
         long conversations = conversationMapper.selectCount(convWrapper);
 
-        // 消息统计（只统计 assistant 消息的 token）
+        // Workspace 级消息过滤：通过 conversation 关联 workspace
+        // MessageEntity 没有 workspaceId 字段，需通过所属 conversation 间接过滤
+        List<String> wsConversationIds = null;
+        if (workspaceId != null) {
+            List<ConversationEntity> wsConvs = conversationMapper.selectList(
+                    new LambdaQueryWrapper<ConversationEntity>()
+                            .eq(ConversationEntity::getWorkspaceId, workspaceId)
+                            .select(ConversationEntity::getConversationId));
+            wsConversationIds = wsConvs.stream()
+                    .map(ConversationEntity::getConversationId).toList();
+            if (wsConversationIds.isEmpty()) {
+                // 该 workspace 无任何对话，直接返回零值
+                Map<String, Object> empty = new LinkedHashMap<>();
+                empty.put("conversations", conversations);
+                empty.put("messages", 0L);
+                empty.put("totalTokens", 0L);
+                empty.put("promptTokens", 0L);
+                empty.put("completionTokens", 0L);
+                empty.put("toolCalls", 0L);
+                return empty;
+            }
+        }
+
+        // 总消息数
         LambdaQueryWrapper<MessageEntity> msgWrapper = new LambdaQueryWrapper<MessageEntity>()
                 .ge(MessageEntity::getCreateTime, startTime)
                 .le(MessageEntity::getCreateTime, endTime)
                 .eq(MessageEntity::getDeleted, 0);
-
-        // 总消息数
+        if (wsConversationIds != null) {
+            msgWrapper.in(MessageEntity::getConversationId, wsConversationIds);
+        }
         long messages = messageMapper.selectCount(msgWrapper);
 
         // Token 统计（assistant 消息）
@@ -88,6 +112,9 @@ public class DashboardService {
                 .le(MessageEntity::getCreateTime, endTime)
                 .eq(MessageEntity::getDeleted, 0)
                 .select(MessageEntity::getPromptTokens, MessageEntity::getCompletionTokens);
+        if (wsConversationIds != null) {
+            tokenWrapper.in(MessageEntity::getConversationId, wsConversationIds);
+        }
 
         List<MessageEntity> assistantMessages = messageMapper.selectList(tokenWrapper);
 
@@ -106,6 +133,9 @@ public class DashboardService {
                 .ge(MessageEntity::getCreateTime, startTime)
                 .le(MessageEntity::getCreateTime, endTime)
                 .eq(MessageEntity::getDeleted, 0);
+        if (wsConversationIds != null) {
+            toolWrapper.in(MessageEntity::getConversationId, wsConversationIds);
+        }
         long toolCalls = messageMapper.selectCount(toolWrapper);
 
         Map<String, Object> stats = new LinkedHashMap<>();

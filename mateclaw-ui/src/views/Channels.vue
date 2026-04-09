@@ -1,21 +1,24 @@
 <template>
-  <div class="page-container">
-    <div class="page-header">
-      <div>
-        <h1 class="page-title">{{ t('channels.title') }}</h1>
-        <p class="page-desc">{{ t('channels.desc') }}</p>
-      </div>
-      <button class="btn-primary" @click="openCreateModal">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
-        </svg>
-        {{ t('channels.newChannel') }}
-      </button>
-    </div>
+  <div class="mc-page-shell">
+    <div class="mc-page-frame">
+      <div class="mc-page-inner channels-page">
+        <div class="mc-page-header">
+          <div>
+            <div class="mc-page-kicker">Connect</div>
+            <h1 class="mc-page-title">{{ t('channels.title') }}</h1>
+            <p class="mc-page-desc">{{ t('channels.desc') }}</p>
+          </div>
+          <button class="btn-primary" @click="openCreateModal">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+            </svg>
+            {{ t('channels.newChannel') }}
+          </button>
+        </div>
 
-    <!-- 渠道卡片 -->
-    <div class="channel-grid">
-      <div v-for="channel in channels" :key="channel.id" class="channel-card">
+        <!-- 渠道卡片 -->
+        <div class="channel-grid">
+          <div v-for="channel in channels" :key="channel.id" class="channel-card mc-surface-card">
         <div class="channel-header">
           <div class="channel-icon-wrap">
             <img class="channel-icon-img" :src="getChannelIconPath(channel.channelType)" :alt="channel.channelType" />
@@ -63,12 +66,14 @@
             {{ t('common.delete') }}
           </button>
         </div>
-      </div>
+          </div>
 
-      <!-- 添加渠道卡片 -->
-      <div class="channel-card add-card" @click="openCreateModal">
-        <div class="add-icon">+</div>
-        <p class="add-label">{{ t('channels.addChannel') }}</p>
+          <!-- 添加渠道卡片 -->
+          <div class="channel-card add-card mc-surface-card" @click="openCreateModal">
+            <div class="add-icon">+</div>
+            <p class="add-label">{{ t('channels.addChannel') }}</p>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -1157,26 +1162,23 @@ function getChannelIconPath(type: string) {
 </script>
 
 <style scoped>
-.page-container { height: 100%; overflow-y: auto; padding: 24px; background: var(--mc-bg); }
-.page-header { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 24px; }
-.page-title { font-size: 20px; font-weight: 700; color: var(--mc-text-primary); margin: 0 0 4px; }
-.page-desc { font-size: 14px; color: var(--mc-text-secondary); margin: 0; }
+.channels-page { gap: 18px; }
 
-.btn-primary { display: flex; align-items: center; gap: 6px; padding: 8px 16px; background: var(--mc-primary); color: white; border: none; border-radius: 8px; font-size: 14px; font-weight: 500; cursor: pointer; }
+.btn-primary { display: flex; align-items: center; gap: 6px; padding: 10px 16px; background: linear-gradient(135deg, var(--mc-primary), var(--mc-primary-hover)); color: white; border: none; border-radius: 14px; font-size: 14px; font-weight: 600; cursor: pointer; box-shadow: var(--mc-shadow-soft); }
 .btn-primary:hover { background: var(--mc-primary-hover); }
 .btn-primary:disabled { background: var(--mc-border); cursor: not-allowed; }
-.btn-secondary { padding: 8px 16px; background: var(--mc-bg-elevated); color: var(--mc-text-primary); border: 1px solid var(--mc-border); border-radius: 8px; font-size: 14px; cursor: pointer; }
+.btn-secondary { padding: 8px 16px; background: var(--mc-bg-elevated); color: var(--mc-text-primary); border: 1px solid var(--mc-border); border-radius: 12px; font-size: 14px; cursor: pointer; }
 .btn-secondary:hover { background: var(--mc-bg-sunken); }
 
 /* 渠道卡片 */
-.channel-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; }
-.channel-card { background: var(--mc-bg-elevated); border: 1px solid var(--mc-border); border-radius: 12px; padding: 16px; transition: all 0.15s; }
-.channel-card:hover { border-color: var(--mc-primary-light); box-shadow: 0 4px 12px rgba(217,119,87,0.08); }
-.channel-header { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 10px; }
-.channel-icon-wrap { width: 40px; height: 40px; border-radius: 10px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; overflow: hidden; }
-.channel-icon-img { width: 40px; height: 40px; border-radius: 10px; object-fit: cover; }
+.channel-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 18px; }
+.channel-card { padding: 20px; transition: all 0.15s; min-height: 238px; display: flex; flex-direction: column; }
+.channel-card:hover { border-color: var(--mc-primary-light); box-shadow: var(--mc-shadow-medium); transform: translateY(-2px); }
+.channel-header { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px; }
+.channel-icon-wrap { width: 48px; height: 48px; border-radius: 14px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; overflow: hidden; background: linear-gradient(135deg, rgba(217,109,87,0.12), rgba(24,74,69,0.08)); }
+.channel-icon-img { width: 42px; height: 42px; border-radius: 12px; object-fit: cover; }
 .channel-meta { flex: 1; }
-.channel-name { font-size: 15px; font-weight: 600; color: var(--mc-text-primary); margin: 0 0 2px; }
+.channel-name { font-size: 16px; font-weight: 700; color: var(--mc-text-primary); margin: 0 0 2px; }
 .channel-type { font-size: 12px; color: var(--mc-text-tertiary); }
 
 .channel-status { padding: 3px 10px; border-radius: 20px; font-size: 12px; font-weight: 500; }
@@ -1190,13 +1192,13 @@ function getChannelIconPath(type: string) {
 .conn-disconnected { color: var(--mc-text-tertiary); background: var(--mc-bg-sunken); }
 @keyframes pulse-reconnecting { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
 
-.channel-desc { font-size: 13px; color: var(--mc-text-secondary); margin: 0 0 14px; line-height: 1.5; }
-.channel-footer { display: flex; gap: 6px; border-top: 1px solid var(--mc-border-light); padding-top: 12px; }
-.card-btn { display: flex; align-items: center; gap: 4px; padding: 5px 10px; border: 1px solid var(--mc-border); background: var(--mc-bg-elevated); border-radius: 6px; font-size: 12px; color: var(--mc-text-primary); cursor: pointer; transition: all 0.15s; }
+.channel-desc { font-size: 13px; color: var(--mc-text-secondary); margin: 0 0 14px; line-height: 1.6; min-height: 42px; }
+.channel-footer { display: flex; gap: 6px; border-top: 1px solid var(--mc-border-light); padding-top: 12px; margin-top: auto; flex-wrap: wrap; }
+.card-btn { display: flex; align-items: center; gap: 4px; padding: 7px 11px; border: 1px solid var(--mc-border); background: var(--mc-bg-muted); border-radius: 10px; font-size: 12px; color: var(--mc-text-primary); cursor: pointer; transition: all 0.15s; font-weight: 600; }
 .card-btn:hover { background: var(--mc-bg-sunken); }
 .card-btn.danger:hover { background: var(--mc-danger-bg); border-color: var(--mc-danger); color: var(--mc-danger); }
 
-.add-card { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 160px; border: 2px dashed var(--mc-border); cursor: pointer; background: transparent; }
+.add-card { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 238px; border: 2px dashed var(--mc-border); cursor: pointer; background: transparent; }
 .add-card:hover { border-color: var(--mc-primary); background: var(--mc-primary-bg); }
 .add-icon { font-size: 28px; color: var(--mc-text-tertiary); margin-bottom: 8px; }
 .add-label { font-size: 14px; color: var(--mc-text-tertiary); }

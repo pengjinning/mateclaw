@@ -2,7 +2,6 @@ package vip.mate.skill.workspace;
 
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.scheduling.annotation.EnableAsync;
 import vip.mate.skill.installer.SkillHubProperties;
 
 /**
@@ -11,7 +10,6 @@ import vip.mate.skill.installer.SkillHubProperties;
  * @author MateClaw Team
  */
 @Configuration
-@EnableAsync
 @EnableConfigurationProperties({SkillWorkspaceProperties.class, SkillHubProperties.class})
 public class SkillWorkspaceAutoConfiguration {
 }

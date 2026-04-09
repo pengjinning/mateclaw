@@ -233,10 +233,6 @@ public class WikiTool {
      */
     private Long resolveKbId(Long agentId) {
         List<WikiKnowledgeBaseEntity> kbs = kbService.listByAgentId(agentId);
-        if (kbs.isEmpty()) {
-            // agentId 为 null 时也尝试查公共 KB
-            kbs = kbService.listAll();
-        }
         return kbs.isEmpty() ? null : kbs.get(0).getId();
     }
 

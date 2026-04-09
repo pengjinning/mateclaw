@@ -3,12 +3,12 @@
     <!-- 顶部栏 -->
     <div class="workspace-header">
       <div>
-        <h1 class="page-title">{{ t('workspace.title') }}</h1>
-        <p class="page-desc">{{ t('workspace.desc') }}</p>
+        <h1 class="page-title">{{ t('agentContext.title') }}</h1>
+        <p class="page-desc">{{ t('agentContext.desc') }}</p>
       </div>
       <div class="header-actions">
         <select v-model="selectedAgentId" class="agent-select" @change="onAgentChange">
-          <option value="" disabled>{{ t('workspace.selectAgent') }}</option>
+          <option value="" disabled>{{ t('agentContext.selectAgent') }}</option>
           <option v-for="agent in agents" :key="agent.id" :value="agent.id">
             {{ agent.icon || '🤖' }} {{ agent.name }}
           </option>
@@ -19,7 +19,7 @@
     <!-- 无 Agent 提示 -->
     <div v-if="!selectedAgentId" class="empty-state">
       <div class="empty-icon">📂</div>
-      <h3>{{ t('workspace.noAgent') }}</h3>
+      <h3>{{ t('agentContext.noAgent') }}</h3>
     </div>
 
     <!-- 主体：文件列表 + 编辑器 -->
@@ -28,9 +28,9 @@
       <div class="file-list-panel">
         <div class="panel-card">
           <div class="panel-header">
-            <h3 class="section-title">{{ t('workspace.coreFiles') }}</h3>
+            <h3 class="section-title">{{ t('agentContext.coreFiles') }}</h3>
             <div class="panel-actions">
-              <button class="icon-btn" @click="showNewFileDialog = true" :title="t('workspace.newFile')">
+              <button class="icon-btn" @click="showNewFileDialog = true" :title="t('agentContext.newFile')">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
                 </svg>
@@ -42,12 +42,12 @@
               </button>
             </div>
           </div>
-          <p class="info-text">{{ t('workspace.coreFilesDesc') }}</p>
+          <p class="info-text">{{ t('agentContext.coreFilesDesc') }}</p>
           <div class="divider"></div>
 
           <div class="file-scroll">
             <div v-if="sortedFiles.length === 0" class="empty-files">
-              {{ t('workspace.noFiles') }}
+              {{ t('agentContext.noFiles') }}
             </div>
             <div
               v-for="file in sortedFiles"
@@ -113,7 +113,7 @@
                   class="preview-mode-btn"
                   :class="{ active: previewMode === 'off' }"
                   @click="previewMode = 'off'"
-                  :title="t('workspace.editOnly') || 'Edit'"
+                  :title="t('agentContext.editOnly') || 'Edit'"
                 >
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
@@ -124,7 +124,7 @@
                   class="preview-mode-btn"
                   :class="{ active: previewMode === 'split' }"
                   @click="previewMode = 'split'"
-                  :title="t('workspace.splitView') || 'Split'"
+                  :title="t('agentContext.splitView') || 'Split'"
                 >
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <rect x="3" y="3" width="18" height="18" rx="2"/><line x1="12" y1="3" x2="12" y2="21"/>
@@ -134,14 +134,14 @@
                   class="preview-mode-btn"
                   :class="{ active: previewMode === 'preview' }"
                   @click="previewMode = 'preview'"
-                  :title="t('workspace.preview') || 'Preview'"
+                  :title="t('agentContext.preview') || 'Preview'"
                 >
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>
                   </svg>
                 </button>
               </div>
-              <span v-if="hasChanges" class="change-badge">{{ t('workspace.modified') || '已修改' }}</span>
+              <span v-if="hasChanges" class="change-badge">{{ t('agentContext.modified') || '已修改' }}</span>
             </div>
 
             <div class="editor-content" :class="'mode-' + previewMode">
@@ -149,7 +149,7 @@
                 v-if="previewMode !== 'preview'"
                 v-model="fileContent"
                 class="editor-textarea"
-                :placeholder="t('workspace.fileContent')"
+                :placeholder="t('agentContext.fileContent')"
                 spellcheck="false"
               ></textarea>
               <div
@@ -162,7 +162,7 @@
           </template>
 
           <div v-else class="empty-editor">
-            {{ t('workspace.selectFile') }}
+            {{ t('agentContext.selectFile') }}
           </div>
         </div>
       </div>
@@ -172,7 +172,7 @@
     <div v-if="showNewFileDialog" class="modal-overlay" @click.self="showNewFileDialog = false">
       <div class="modal small-modal">
         <div class="modal-header">
-          <h2>{{ t('workspace.newFileTitle') }}</h2>
+          <h2>{{ t('agentContext.newFileTitle') }}</h2>
           <button class="modal-close" @click="showNewFileDialog = false">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
@@ -181,14 +181,14 @@
         </div>
         <div class="modal-body">
           <div class="form-group">
-            <label class="form-label">{{ t('workspace.newFileTitle') }}</label>
+            <label class="form-label">{{ t('agentContext.newFileTitle') }}</label>
             <input
               v-model="newFilename"
               class="form-input"
-              :placeholder="t('workspace.newFilePlaceholder')"
+              :placeholder="t('agentContext.newFilePlaceholder')"
               @keyup.enter="createNewFile"
             />
-            <p class="field-hint">{{ t('workspace.newFileHint') }}</p>
+            <p class="field-hint">{{ t('agentContext.newFileHint') }}</p>
           </div>
         </div>
         <div class="modal-footer">
@@ -204,7 +204,7 @@
 import { ref, computed, onMounted, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { agentApi, workspaceApi } from '@/api/index'
+import { agentApi, agentContextApi } from '@/api/index'
 import type { Agent, WorkspaceFile } from '@/types/index'
 import { useMarkdownRenderer } from '@/composables/useMarkdownRenderer'
 
@@ -280,7 +280,7 @@ async function loadAgents() {
       selectedAgentId.value = agents.value[0].id
     }
   } catch {
-    ElMessage.error(t('workspace.loadFailed'))
+    ElMessage.error(t('agentContext.loadFailed'))
   }
 }
 
@@ -291,17 +291,17 @@ function onAgentChange() {
 async function fetchFiles() {
   if (!selectedAgentId.value) return
   try {
-    const res: any = await workspaceApi.listFiles(selectedAgentId.value)
+    const res: any = await agentContextApi.listFiles(selectedAgentId.value)
     files.value = res.data || []
   } catch {
-    ElMessage.error(t('workspace.loadFailed'))
+    ElMessage.error(t('agentContext.loadFailed'))
   }
 }
 
 async function fetchPromptFiles() {
   if (!selectedAgentId.value) return
   try {
-    const res: any = await workspaceApi.getPromptFiles(selectedAgentId.value)
+    const res: any = await agentContextApi.getPromptFiles(selectedAgentId.value)
     enabledFiles.value = res.data || []
   } catch {
     enabledFiles.value = []
@@ -328,12 +328,12 @@ function handlePreviewClick(e: MouseEvent) {
 async function onFileClick(file: WorkspaceFile) {
   selectedFile.value = file
   try {
-    const res: any = await workspaceApi.getFile(selectedAgentId.value, file.filename)
+    const res: any = await agentContextApi.getFile(selectedAgentId.value, file.filename)
     const data = res.data
     fileContent.value = data?.content || ''
     originalContent.value = fileContent.value
   } catch {
-    ElMessage.error(t('workspace.loadFileFailed'))
+    ElMessage.error(t('agentContext.loadFileFailed'))
   }
 }
 
@@ -341,12 +341,12 @@ async function saveContent() {
   if (!selectedFile.value || !selectedAgentId.value) return
   saving.value = true
   try {
-    await workspaceApi.saveFile(selectedAgentId.value, selectedFile.value.filename, fileContent.value)
+    await agentContextApi.saveFile(selectedAgentId.value, selectedFile.value.filename, fileContent.value)
     originalContent.value = fileContent.value
-    ElMessage.success(t('workspace.saveSuccess'))
+    ElMessage.success(t('agentContext.saveSuccess'))
     await fetchFiles()
   } catch {
-    ElMessage.error(t('workspace.saveFailed'))
+    ElMessage.error(t('agentContext.saveFailed'))
   } finally {
     saving.value = false
   }
@@ -363,14 +363,14 @@ async function toggleFileEnabled(file: WorkspaceFile) {
     : enabledFiles.value.filter(f => f !== file.filename)
 
   try {
-    await workspaceApi.setPromptFiles(selectedAgentId.value, newList)
+    await agentContextApi.setPromptFiles(selectedAgentId.value, newList)
     enabledFiles.value = newList
     // 同步本地 file 状态
     const f = files.value.find(x => x.filename === file.filename)
     if (f) f.enabled = isEnabling
-    ElMessage.success(t('workspace.promptUpdated'))
+    ElMessage.success(t('agentContext.promptUpdated'))
   } catch {
-    ElMessage.error(t('workspace.promptUpdateFailed'))
+    ElMessage.error(t('agentContext.promptUpdateFailed'))
   }
 }
 
@@ -379,33 +379,33 @@ async function confirmDeleteFile() {
   const name = selectedFile.value.filename
   try {
     await ElMessageBox.confirm(
-      t('workspace.deleteConfirm', { name }),
+      t('agentContext.deleteConfirm', { name }),
       t('common.delete'),
       { type: 'warning' }
     )
   } catch { return }
 
   try {
-    await workspaceApi.deleteFile(selectedAgentId.value, name)
-    ElMessage.success(t('workspace.deleteSuccess'))
+    await agentContextApi.deleteFile(selectedAgentId.value, name)
+    ElMessage.success(t('agentContext.deleteSuccess'))
     selectedFile.value = null
     fileContent.value = ''
     originalContent.value = ''
     await fetchFiles()
     await fetchPromptFiles()
   } catch {
-    ElMessage.error(t('workspace.deleteFailed'))
+    ElMessage.error(t('agentContext.deleteFailed'))
   }
 }
 
 async function createNewFile() {
   const name = newFilename.value.trim()
   if (!isValidFilename.value) {
-    ElMessage.warning(t('workspace.invalidFilename'))
+    ElMessage.warning(t('agentContext.invalidFilename'))
     return
   }
   try {
-    await workspaceApi.saveFile(selectedAgentId.value, name, '')
+    await agentContextApi.saveFile(selectedAgentId.value, name, '')
     showNewFileDialog.value = false
     newFilename.value = ''
     await fetchFiles()
@@ -415,7 +415,7 @@ async function createNewFile() {
       onFileClick(newFile)
     }
   } catch {
-    ElMessage.error(t('workspace.saveFailed'))
+    ElMessage.error(t('agentContext.saveFailed'))
   }
 }
 
