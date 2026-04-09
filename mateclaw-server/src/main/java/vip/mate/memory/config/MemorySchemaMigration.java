@@ -35,6 +35,9 @@ public class MemorySchemaMigration implements ApplicationRunner {
             log.info("[MemorySchemaMigration] MySQL FULLTEXT index on mate_message.content created (or already exists)");
         }
 
+        // max_iterations 升级：旧版默认 10，新版 25。确保已有 agent 也更新
+        safeExecute("UPDATE mate_agent SET max_iterations = 25 WHERE max_iterations = 10 AND deleted = 0");
+
         log.debug("[MemorySchemaMigration] Incremental migration completed");
     }
 

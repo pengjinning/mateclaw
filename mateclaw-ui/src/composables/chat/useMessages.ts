@@ -21,6 +21,10 @@ export interface UseMessagesReturn {
   messages: import('vue').Ref<Message[]>
   /** 是否正在生成 */
   isGenerating: import('vue').ComputedRef<boolean>
+  /** 是否还有更早的消息可加载 */
+  hasMore: import('vue').Ref<boolean>
+  /** 是否正在加载更早消息 */
+  loadingOlder: import('vue').Ref<boolean>
   /** 最后一条消息 */
   lastMessage: import('vue').ComputedRef<Message | undefined>
   /** 最后一条用户消息 */
@@ -45,6 +49,10 @@ export interface UseMessagesReturn {
   createUserMessage: (content: string, contentParts?: MessageContentPart[]) => Message
   /** 创建助手消息 */
   createAssistantMessage: (content?: string) => Message
+  /** 在消息列表头部插入更早的消息（分页加载） */
+  prependMessages: (olderMessages: Message[]) => void
+  /** 设置 hasMore 状态 */
+  setHasMore: (value: boolean) => void
 }
 
 // 生成唯一 ID
@@ -54,6 +62,8 @@ export function useMessages(options: UseMessagesOptions = {}): UseMessagesReturn
   const { initialMessages = [], onUpdate, onComplete } = options
 
   const messages = ref<Message[]>([...initialMessages])
+  const hasMore = ref(false)
+  const loadingOlder = ref(false)
 
   // 是否正在生成
   const isGenerating = computed(() => {
@@ -207,9 +217,22 @@ export function useMessages(options: UseMessagesOptions = {}): UseMessagesReturn
     })
   }
 
+  // 在消息列表头部插入更早的消息（分页加载用）
+  const prependMessages = (olderMessages: Message[]) => {
+    messages.value = [...olderMessages, ...messages.value]
+    onUpdate?.(messages.value)
+  }
+
+  // 设置是否有更多消息
+  const setHasMore = (value: boolean) => {
+    hasMore.value = value
+  }
+
   return {
     messages,
     isGenerating,
+    hasMore,
+    loadingOlder,
     lastMessage,
     lastUserMessage,
     lastAssistantMessage,
@@ -222,6 +245,8 @@ export function useMessages(options: UseMessagesOptions = {}): UseMessagesReturn
     getMessage,
     createUserMessage,
     createAssistantMessage,
+    prependMessages,
+    setHasMore,
   }
 }
 

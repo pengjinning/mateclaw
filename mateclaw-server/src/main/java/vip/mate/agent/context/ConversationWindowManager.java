@@ -16,6 +16,7 @@ import org.springframework.stereotype.Component;
 import vip.mate.agent.prompt.PromptLoader;
 import vip.mate.config.ConversationWindowProperties;
 import vip.mate.memory.spi.MemoryManager;
+import vip.mate.workspace.conversation.ConversationService;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -80,6 +81,7 @@ public class ConversationWindowManager {
 
     private final ConversationWindowProperties properties;
     private final MemoryManager memoryManager;
+    private final ConversationService conversationService;
 
     // ==================== 状态 ====================
 
@@ -242,6 +244,16 @@ public class ConversationWindowManager {
                 int count = compressionCounts.merge(conversationId, 1, Integer::sum);
                 log.info("[ConversationWindow] 生成结构化摘要 ({} 字符, 第 {} 次压缩), 压缩 {} 条旧消息, conv={}",
                         summary.length(), count, oldMessages.size(), conversationId);
+
+                // 持久化摘要到 DB：下次加载历史时可直接从摘要位置开始，跳过重复压缩
+                if (conversationService != null) {
+                    try {
+                        conversationService.saveCompressionSummary(
+                                conversationId, SUMMARY_PREFIX + summary, oldMessages.size());
+                    } catch (Exception e) {
+                        log.warn("[ConversationWindow] Failed to persist compression summary: {}", e.getMessage());
+                    }
+                }
             }
         }
 

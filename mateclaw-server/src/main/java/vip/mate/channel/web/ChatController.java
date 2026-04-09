@@ -1219,6 +1219,9 @@ public class ChatController {
         private final StringBuilder content = new StringBuilder();
         private final StringBuilder thinking = new StringBuilder();
         private final List<Map<String, Object>> toolCalls = new ArrayList<>();
+        /** 实时分段列表（与前端 currentSegments 对齐） */
+        private final List<Map<String, Object>> segments = new ArrayList<>();
+        private int segCounter = 0;
         private int promptTokens = 0;
         private int completionTokens = 0;
         private String runtimeModelName = "";
@@ -1262,12 +1265,16 @@ public class ChatController {
                 if (!delta.persistenceOnly()) {
                     broadcastEvent(conversationId, "content_delta", Map.of("delta", delta.content()));
                 }
+                // 分段：追加到当前 content segment 或创建新的
+                appendToContentSegment(delta.content());
             }
             if (delta.thinking() != null && !delta.thinking().isBlank()) {
                 thinking.append(delta.thinking());
                 if (!delta.persistenceOnly()) {
                     broadcastEvent(conversationId, "thinking_delta", Map.of("delta", delta.thinking()));
                 }
+                // 分段：追加到当前 thinking segment 或创建新的
+                appendToThinkingSegment(delta.thinking());
             }
         }
 
@@ -1283,6 +1290,15 @@ public class ChatController {
                 tc.put("arguments", data.getOrDefault("arguments", ""));
                 tc.put("status", "running");
                 toolCalls.add(tc);
+                // 分段：关闭 running 的 thinking/content，创建新 tool_call segment
+                closeRunningSegments("thinking", "content");
+                Map<String, Object> seg = new LinkedHashMap<>();
+                seg.put("id", "tc-" + segCounter++);
+                seg.put("type", "tool_call");
+                seg.put("status", "running");
+                seg.put("toolName", data.getOrDefault("toolName", ""));
+                seg.put("toolArgs", data.getOrDefault("arguments", ""));
+                segments.add(seg);
             } else if ("tool_call_completed".equals(eventType)) {
                 String toolName = String.valueOf(data.getOrDefault("toolName", ""));
                 for (int i = toolCalls.size() - 1; i >= 0; i--) {
@@ -1293,6 +1309,65 @@ public class ChatController {
                         tc.put("status", "completed");
                         break;
                     }
+                }
+                // 分段：标记对应 tool_call segment 完成
+                for (int i = segments.size() - 1; i >= 0; i--) {
+                    Map<String, Object> seg = segments.get(i);
+                    if ("tool_call".equals(seg.get("type")) && "running".equals(seg.get("status"))
+                            && toolName.equals(seg.get("toolName"))) {
+                        seg.put("status", "completed");
+                        seg.put("toolResult", data.getOrDefault("result", ""));
+                        seg.put("toolSuccess", data.getOrDefault("success", true));
+                        break;
+                    }
+                }
+            }
+        }
+
+        // ==================== 分段构建辅助方法 ====================
+
+        private void appendToThinkingSegment(String text) {
+            // 查找最后一个 running thinking segment
+            for (int i = segments.size() - 1; i >= 0; i--) {
+                Map<String, Object> seg = segments.get(i);
+                if ("thinking".equals(seg.get("type")) && "running".equals(seg.get("status"))) {
+                    seg.put("thinkingText", seg.getOrDefault("thinkingText", "") + text);
+                    return;
+                }
+            }
+            // 没找到，创建新的
+            Map<String, Object> seg = new LinkedHashMap<>();
+            seg.put("id", "th-" + segCounter++);
+            seg.put("type", "thinking");
+            seg.put("status", "running");
+            seg.put("thinkingText", text);
+            segments.add(seg);
+        }
+
+        private void appendToContentSegment(String text) {
+            // 查找最后一个 running content segment
+            for (int i = segments.size() - 1; i >= 0; i--) {
+                Map<String, Object> seg = segments.get(i);
+                if ("content".equals(seg.get("type")) && "running".equals(seg.get("status"))) {
+                    seg.put("text", seg.getOrDefault("text", "") + text);
+                    return;
+                }
+            }
+            // 没找到，关闭 thinking，创建新 content segment
+            closeRunningSegments("thinking");
+            Map<String, Object> seg = new LinkedHashMap<>();
+            seg.put("id", "ct-" + segCounter++);
+            seg.put("type", "content");
+            seg.put("status", "running");
+            seg.put("text", text);
+            segments.add(seg);
+        }
+
+        private void closeRunningSegments(String... types) {
+            java.util.Set<String> typeSet = java.util.Set.of(types);
+            for (Map<String, Object> seg : segments) {
+                if ("running".equals(seg.get("status")) && typeSet.contains(seg.get("type"))) {
+                    seg.put("status", "completed");
                 }
             }
         }
@@ -1350,12 +1425,17 @@ public class ChatController {
          * 生成 metadata JSON：包含 toolCalls 及其他元数据
          */
         synchronized String toMetadataJson() {
-            // 确保所有 tool calls 都不是 running 状态
+            // 确保所有 tool calls 和 segments 都不是 running 状态
             finalizeToolCalls();
+            closeRunningSegments("thinking", "content", "tool_call");
             try {
                 Map<String, Object> metadata = new LinkedHashMap<>();
                 if (!toolCalls.isEmpty()) {
                     metadata.put("toolCalls", toolCalls);
+                }
+                // 使用实时构建的 segments（精确保留事件顺序，包含中间步骤）
+                if (!segments.isEmpty()) {
+                    metadata.put("segments", segments);
                 }
                 return objectMapper.writeValueAsString(metadata);
             } catch (Exception e) {

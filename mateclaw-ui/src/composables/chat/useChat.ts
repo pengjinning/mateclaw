@@ -12,7 +12,7 @@ import { ref, computed } from 'vue'
 import { useMessages } from './useMessages'
 import { useStream } from './useStream'
 import { useMessageQueue } from './useMessageQueue'
-import type { Message, MessageContentPart, StreamPhase, HeartbeatData, QueuedMessage, PhaseEventData } from '@/types'
+import type { Message, MessageContentPart, MessageSegment, StreamPhase, HeartbeatData, QueuedMessage, PhaseEventData } from '@/types'
 import { classifyBackendError, type ChatErrorInfo } from '@/types/chatError'
 import { http } from '@/api'
 
@@ -109,6 +109,23 @@ export function useChat(options: UseChatOptions): UseChatReturn {
   let stopFallbackTimer: ReturnType<typeof setTimeout> | null = null
   const streamPhase = ref<StreamPhase>('idle')
   const phaseInfo = ref<PhaseEventData | null>(null)
+
+  /** 分段式展示数据：当前助手消息的所有分段 */
+  const currentSegments = ref<MessageSegment[]>([])
+  const segIdCounter = { value: 0 }
+  const genSegId = () => `seg-${Date.now()}-${segIdCounter.value++}`
+
+  /** 将当前 segments 同步到助手消息的 metadata 中（实时渲染用） */
+  const flushSegmentsToMessage = () => {
+    if (!currentAssistantId.value || currentSegments.value.length === 0) return
+    const msg = getMessage(currentAssistantId.value)
+    if (!msg) return
+    const metadata = parseMetadata((msg as any).metadata)
+    updateMessage(currentAssistantId.value, {
+      ...msg,
+      metadata: { ...metadata, segments: [...currentSegments.value] }
+    } as any)
+  }
   const heartbeat = ref<HeartbeatData | null>(null)
   /** Track which conversation the current stream belongs to */
   let streamConversationId = ''
@@ -174,6 +191,18 @@ export function useChat(options: UseChatOptions): UseChatReturn {
       if (['thinking', 'reasoning', 'drafting_answer', 'preparing_context'].includes(streamPhase.value)) {
         streamPhase.value = 'streaming'
       }
+      // 分段：追加到当前 content segment 或创建新的
+      const segs = currentSegments.value
+      let contentSeg = segs.findLast((s: MessageSegment) => s.type === 'content' && s.status === 'running')
+      if (!contentSeg) {
+        // 关闭之前的 thinking segment
+        const thinkingSeg = segs.findLast((s: MessageSegment) => s.type === 'thinking' && s.status === 'running')
+        if (thinkingSeg) thinkingSeg.status = 'completed'
+        contentSeg = { id: genSegId(), type: 'content', status: 'running', text: '', timestamp: Date.now() }
+        segs.push(contentSeg)
+        flushSegmentsToMessage() // 新 content segment 创建时同步一次
+      }
+      contentSeg.text = (contentSeg.text || '') + (data.delta || '')
     }
   })
 
@@ -183,6 +212,15 @@ export function useChat(options: UseChatOptions): UseChatReturn {
       if (streamPhase.value !== 'summarizing_observations') {
         streamPhase.value = 'thinking'
       }
+      // 分段：追加到当前 thinking segment 或创建新的
+      const segs = currentSegments.value
+      let thinkSeg = segs.findLast((s: MessageSegment) => s.type === 'thinking' && s.status === 'running')
+      if (!thinkSeg) {
+        thinkSeg = { id: genSegId(), type: 'thinking', status: 'running', thinkingText: '', timestamp: Date.now() }
+        segs.push(thinkSeg)
+        flushSegmentsToMessage() // 新 thinking segment 创建时同步一次
+      }
+      thinkSeg.thinkingText = (thinkSeg.thinkingText || '') + (data.delta || '')
     }
   })
 
@@ -195,6 +233,10 @@ export function useChat(options: UseChatOptions): UseChatReturn {
       }
       return
     }
+
+    // 重置分段列表
+    currentSegments.value = []
+    segIdCounter.value = 0
 
     const assistantMessage = createAssistantMessage('')
     if (streamConversationId) {
@@ -250,6 +292,19 @@ export function useChat(options: UseChatOptions): UseChatReturn {
       }
       setMessageStatus(currentAssistantId.value, data.status || 'completed')
       // 关键修复：不在这里清除 currentAssistantId
+    }
+
+    // 分段：标记所有 running segments 为 completed，并持久化到 message metadata
+    if (currentAssistantId.value && currentSegments.value.length > 0) {
+      currentSegments.value.forEach((s: MessageSegment) => { if (s.status === 'running') s.status = 'completed' })
+      const msg = getMessage(currentAssistantId.value)
+      if (msg) {
+        const metadata = parseMetadata((msg as any).metadata)
+        updateMessage(currentAssistantId.value, {
+          ...msg,
+          metadata: { ...metadata, segments: [...currentSegments.value] }
+        } as any)
+      }
     }
 
     // === 自动 TTS：message_complete 且 status=completed 时触发 ===
@@ -367,6 +422,16 @@ export function useChat(options: UseChatOptions): UseChatReturn {
           metadata: { ...metadata, toolCalls, currentPhase: 'executing_tool', runningToolName: data.toolName }
         } as any)
       }
+      // 分段：关闭之前的 thinking/content segment，创建新的 tool_call segment
+      const segs = currentSegments.value
+      const runningSeg = segs.findLast((s: MessageSegment) => s.status === 'running' && (s.type === 'thinking' || s.type === 'content'))
+      if (runningSeg) runningSeg.status = 'completed'
+      segs.push({
+        id: genSegId(), type: 'tool_call', status: 'running',
+        toolName: data.toolName, toolArgs: data.arguments,
+        timestamp: data.timestamp || Date.now(),
+      })
+      flushSegmentsToMessage()
     }
   })
 
@@ -390,6 +455,16 @@ export function useChat(options: UseChatOptions): UseChatReturn {
           metadata: { ...metadata, toolCalls, runningToolName: undefined }
         } as any)
       }
+      // 分段：找到对应的 running tool_call segment 并标记完成
+      const segs = currentSegments.value
+      const toolSeg = segs.findLast((s: MessageSegment) =>
+        s.type === 'tool_call' && s.status === 'running' && s.toolName === data.toolName)
+      if (toolSeg) {
+        toolSeg.status = data.success !== false ? 'completed' : 'error'
+        toolSeg.toolResult = data.result
+        toolSeg.toolSuccess = data.success
+      }
+      flushSegmentsToMessage()
     }
   })
 

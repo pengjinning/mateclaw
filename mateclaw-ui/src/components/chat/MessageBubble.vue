@@ -18,6 +18,20 @@
     <!-- 消息体 -->
     <div class="msg-body" :class="`${role}-body`">
       <div class="msg-bubble" :class="`${role}-bubble`">
+        <!-- ===== 分段式渲染模式（Claude Code 风格）===== -->
+        <template v-if="useSegmentedView">
+          <div class="segments-view">
+            <template v-for="seg in segments" :key="seg.id">
+              <ThinkingSegment v-if="seg.type === 'thinking'" :segment="seg" />
+              <ToolCallSegment v-if="seg.type === 'tool_call'" :segment="seg" />
+              <ContentSegment v-if="seg.type === 'content'" :segment="seg" :show-cursor="showCursor && seg.status === 'running'" />
+            </template>
+          </div>
+        </template>
+
+        <!-- ===== 传统合并渲染模式（降级兼容）===== -->
+        <template v-else>
+
         <!-- 思考面板 -->
         <div v-if="showThinkingPanel" class="thinking-section">
           <button class="thinking-toggle" type="button" @click="toggleThinking">
@@ -178,6 +192,8 @@
           </div>
         </div>
 
+        </template><!-- /传统合并渲染模式 -->
+
         <!-- 附件列表 -->
         <div v-if="attachments?.length" class="message-attachments">
           <div
@@ -292,8 +308,11 @@ import { useAuthenticatedAttachment } from '@/composables/useAuthenticatedAttach
 import { http } from '@/api'
 import TypingCursor from './TypingCursor.vue'
 import BrowserTimeline from './BrowserTimeline.vue'
+import ToolCallSegment from './ToolCallSegment.vue'
+import ThinkingSegment from './ThinkingSegment.vue'
+import ContentSegment from './ContentSegment.vue'
 import type { BrowserAction } from './BrowserTimeline.vue'
-import type { Message, ChatAttachment, ToolCallMeta, PlanMeta } from '@/types'
+import type { Message, MessageSegment, ChatAttachment, ToolCallMeta, PlanMeta } from '@/types'
 import type { ChatErrorInfo } from '@/types/chatError'
 
 const { renderMarkdown } = useMarkdownRenderer()
@@ -554,6 +573,56 @@ const formatFileSize = (size: number) => {
 // --- 执行过程面板 ---
 const executionExpanded = ref(false)
 
+// --- 分段式渲染（Claude Code 风格） ---
+const parsedMetadata = computed(() => {
+  const raw = props.message.metadata
+  if (!raw) return {} as any
+  if (typeof raw === 'string') {
+    try { return JSON.parse(raw) } catch { return {} }
+  }
+  return raw
+})
+
+const segments = computed<MessageSegment[]>(() => {
+  const meta = parsedMetadata.value
+  if (props.message.role !== 'assistant') return []
+
+  // 从 contentParts 中提取 thinking（适用于所有来源：流式/历史/DB）
+  const thinkingPart = props.message.contentParts?.find(p => p.type === 'thinking')
+
+  // 优先使用后端持久化的 segments
+  if (meta?.segments && meta.segments.length > 0) {
+    const segs = [...meta.segments] as MessageSegment[]
+    // 补充：如果后端 segments 没有 thinking 但 contentParts 有（非原生 thinking 模型）
+    const hasThinking = segs.some(s => s.type === 'thinking')
+    if (!hasThinking && thinkingPart?.text) {
+      segs.unshift({ id: 'th-0', type: 'thinking', status: 'completed', thinkingText: thinkingPart.text })
+    }
+    return segs
+  }
+
+  // 降级：从 toolCalls + contentParts 重建 segments
+  const segs: MessageSegment[] = []
+  if (thinkingPart?.text) {
+    segs.push({ id: 'th-0', type: 'thinking', status: 'completed', thinkingText: thinkingPart.text })
+  }
+  const toolCalls = meta?.toolCalls || []
+  toolCalls.forEach((tc: ToolCallMeta, i: number) => {
+    segs.push({
+      id: `tc-${i}`, type: 'tool_call', status: 'completed',
+      toolName: tc.name, toolArgs: tc.arguments,
+      toolResult: tc.result, toolSuccess: tc.success,
+    })
+  })
+  if (props.message.content) {
+    segs.push({ id: 'ct-0', type: 'content', status: 'completed', text: props.message.content })
+  }
+  return segs
+})
+
+/** 是否使用分段模式渲染（有 segments 数据且包含多个分段） */
+const useSegmentedView = computed(() => segments.value.length > 1)
+
 const toolCallsMeta = computed<ToolCallMeta[]>(() => {
   return props.message.metadata?.toolCalls || []
 })
@@ -646,6 +715,14 @@ watch(isGenerating, (generating) => {
 </script>
 
 <style scoped>
+/* 分段式渲染容器 */
+.segments-view {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 0;
+}
+
 .message-wrapper {
   display: flex;
   gap: 12px;

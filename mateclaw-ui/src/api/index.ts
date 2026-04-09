@@ -128,8 +128,8 @@ export const chatApi = {
 // ==================== Conversation ====================
 export const conversationApi = {
   list: () => http.get('/conversations'),
-  listMessages: (conversationId: string) =>
-    http.get(`/conversations/${conversationId}/messages`),
+  listMessages: (conversationId: string, params?: { beforeId?: number; limit?: number }) =>
+    http.get(`/conversations/${conversationId}/messages`, { params }),
   getStatus: (conversationId: string) =>
     http.get(`/conversations/${conversationId}/status`),
   delete: (conversationId: string) =>

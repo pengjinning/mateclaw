@@ -131,6 +131,30 @@ export interface PendingApprovalMeta {
   summary?: string
 }
 
+/** 单个展示分段（Claude Code 风格分段式渲染） */
+export interface MessageSegment {
+  id: string
+  type: 'thinking' | 'tool_call' | 'content' | 'phase' | 'approval' | 'plan'
+  status: 'running' | 'completed' | 'error'
+  /** type=thinking */
+  thinkingText?: string
+  /** type=tool_call */
+  toolName?: string
+  toolArgs?: string
+  toolResult?: string
+  toolSuccess?: boolean
+  /** type=content */
+  text?: string
+  /** type=phase */
+  phaseName?: string
+  /** type=approval */
+  approval?: PendingApprovalMeta
+  /** type=plan */
+  plan?: PlanMeta
+  /** 时间戳 */
+  timestamp?: number
+}
+
 export interface MessageMetadata {
   currentPhase?: string
   toolCalls?: ToolCallMeta[]
@@ -140,6 +164,8 @@ export interface MessageMetadata {
   runningToolName?: string
   /** 服务端警告列表 */
   warnings?: string[]
+  /** 分段式展示数据（新版渲染用） */
+  segments?: MessageSegment[]
   /** 浏览器执行操作记录 */
   browserActions?: Array<{
     action: string

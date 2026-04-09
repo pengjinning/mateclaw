@@ -169,11 +169,37 @@ public abstract class BaseAgent {
     }
 
     protected List<Message> buildConversationHistory(String conversationId, String currentUserMessage) {
-        List<MessageEntity> history = conversationService.listMessages(conversationId);
-        if (history.isEmpty()) {
+        // ===== 两阶段加载：短对话全量，长对话分页（递进式） =====
+        long totalCount = conversationService.countMessages(conversationId);
+        if (totalCount <= 0) {
             return List.of();
         }
 
+        int windowSize = getEffectiveWindowSize();
+        List<MessageEntity> history;
+
+        if (totalCount <= windowSize) {
+            // 短对话：全量加载（与旧逻辑一致）
+            history = conversationService.listMessages(conversationId);
+        } else {
+            // 长对话：只加载最近 windowSize 条
+            history = conversationService.listRecentMessages(conversationId, windowSize);
+            log.info("[{}] Progressive load: {} of {} messages (window={})",
+                    agentName, history.size(), totalCount, windowSize);
+        }
+
+        // ===== 识别持久化的压缩摘要：从摘要位置开始，跳过更早消息 =====
+        for (int i = 0; i < history.size(); i++) {
+            MessageEntity msg = history.get(i);
+            if ("system".equals(msg.getRole()) && isCompressionSummary(msg)) {
+                history = new ArrayList<>(history.subList(i, history.size()));
+                log.info("[{}] Found compression summary, loading from index {} ({} messages)",
+                        agentName, i, history.size());
+                break;
+            }
+        }
+
+        // ===== 转换为 Spring AI Message 对象 =====
         int limit = history.size();
         if (limit > 0) {
             MessageEntity last = history.get(limit - 1);
@@ -200,6 +226,24 @@ public abstract class BaseAgent {
             }
         }
         return messages;
+    }
+
+    /**
+     * 判断消息是否为持久化的压缩摘要。
+     */
+    private boolean isCompressionSummary(MessageEntity msg) {
+        return msg.getMetadata() != null && msg.getMetadata().contains("compression_summary");
+    }
+
+    /**
+     * 动态计算窗口大小：基于模型上下文长度估算能容纳多少条消息。
+     * 保守估算：每条消息平均 200 token，预留 30% 给系统提示词和当前消息。
+     */
+    private int getEffectiveWindowSize() {
+        int contextTokens = maxInputTokens != null && maxInputTokens > 0
+                ? maxInputTokens : 128000;
+        int window = (int) (contextTokens * 0.7) / 200;
+        return Math.max(20, Math.min(window, 500));
     }
 
     /**

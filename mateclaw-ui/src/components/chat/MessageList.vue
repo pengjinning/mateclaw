@@ -38,19 +38,37 @@
 
       <!-- 消息列表 -->
       <template v-else>
-        <MessageBubble
-          v-for="(msg, index) in messages"
-          :key="msg.id || index"
-          :message="msg"
-          :is-last="index === messages.length - 1"
-          :assistant-icon="assistantIcon"
-          :user-icon="userIcon"
-          :show-cursor="showCursorForMessage(msg)"
-          @regenerate="$emit('regenerate', msg)"
-          @toggle-thinking="(expanded) => $emit('toggle-thinking', msg, expanded)"
-          @approve="(pendingId) => $emit('approve', pendingId)"
-          @deny="(pendingId) => $emit('deny', pendingId)"
-        />
+        <!-- 上拉加载更早消息触发器 -->
+        <div v-if="hasMore" ref="loadMoreRef" class="load-more-trigger text-center py-3">
+          <div v-if="loadingOlder" class="text-gray-400 dark:text-gray-500 text-sm flex items-center justify-center gap-2">
+            <span class="animate-spin inline-block w-4 h-4 border-2 border-gray-300 border-t-gray-500 rounded-full"></span>
+            加载更早的消息...
+          </div>
+          <button v-else class="text-gray-400 dark:text-gray-500 text-sm hover:text-gray-600 dark:hover:text-gray-300 transition-colors" @click="$emit('load-more')">
+            点击加载更早的消息
+          </button>
+        </div>
+
+        <template v-for="(msg, index) in messages" :key="msg.id || index">
+          <!-- 压缩摘要消息特殊渲染 -->
+          <CompressionSummary
+            v-if="isCompressionSummary(msg)"
+            :message="msg"
+          />
+          <!-- 普通消息气泡 -->
+          <MessageBubble
+            v-else
+            :message="msg"
+            :is-last="index === messages.length - 1"
+            :assistant-icon="assistantIcon"
+            :user-icon="userIcon"
+            :show-cursor="showCursorForMessage(msg)"
+            @regenerate="$emit('regenerate', msg)"
+            @toggle-thinking="(expanded) => $emit('toggle-thinking', msg, expanded)"
+            @approve="(pendingId) => $emit('approve', pendingId)"
+            @deny="(pendingId) => $emit('deny', pendingId)"
+          />
+        </template>
       </template>
 
       <!-- 加载指示器：只在无消息时显示（有消息时由输入框显示停止按钮） -->
@@ -69,6 +87,7 @@
 import { computed, watch, nextTick } from 'vue'
 import { ChatDotRound, DataLine, EditPen, Monitor, Right } from '@element-plus/icons-vue'
 import MessageBubble from './MessageBubble.vue'
+import CompressionSummary from './CompressionSummary.vue'
 import { useStickToBottom } from '@/composables/chat/useStickToBottom'
 import type { Message } from '@/types'
 
@@ -89,6 +108,10 @@ interface Props {
   suggestions?: string[]
   /** 是否自动滚动到底部 */
   autoScroll?: boolean
+  /** 是否还有更早的消息可加载 */
+  hasMore?: boolean
+  /** 是否正在加载更早消息 */
+  loadingOlder?: boolean
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -99,6 +122,8 @@ const props = withDefaults(defineProps<Props>(), {
   subtitle: '',
   suggestions: () => [],
   autoScroll: true,
+  hasMore: false,
+  loadingOlder: false,
 })
 
 const emit = defineEmits<{
@@ -108,7 +133,19 @@ const emit = defineEmits<{
   scroll: [event: Event]
   approve: [pendingId: string]
   deny: [pendingId: string]
+  'load-more': []
 }>()
+
+// 判断消息是否为压缩摘要
+const isCompressionSummary = (msg: Message) => {
+  if (msg.role !== 'system') return false
+  try {
+    const metadata = typeof msg.metadata === 'string' ? JSON.parse(msg.metadata) : msg.metadata
+    return metadata?.type === 'compression_summary'
+  } catch {
+    return false
+  }
+}
 
 // 智能滚动
 const { scrollRef, contentRef, isAtBottom, scrollToBottom } = useStickToBottom({

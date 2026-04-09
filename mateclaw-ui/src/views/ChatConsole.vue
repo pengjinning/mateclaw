@@ -1173,6 +1173,11 @@ function buildOutgoingParts(text: string, attachments: ChatAttachment[]): Messag
 function normalizeMessage(raw: Message): Message {
   const msg: Message = { ...raw, contentParts: raw.contentParts ? [...raw.contentParts] : [] }
 
+  // 统一解析 metadata：确保是对象而非 JSON 字符串（后端 API 返回字符串）
+  if (typeof msg.metadata === 'string') {
+    try { msg.metadata = JSON.parse(msg.metadata) } catch { msg.metadata = {} as any }
+  }
+
   // 保留后端返回的 token 字段（MessageVO 新增）
   if ((raw as any).promptTokens) msg.promptTokens = (raw as any).promptTokens
   if ((raw as any).completionTokens) msg.completionTokens = (raw as any).completionTokens

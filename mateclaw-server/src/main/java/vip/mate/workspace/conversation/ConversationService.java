@@ -23,6 +23,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
@@ -313,6 +315,61 @@ public class ConversationService {
                 .eq(MessageEntity::getConversationId, conversationId)
                 .orderByAsc(MessageEntity::getCreateTime)
                 .orderByAsc(MessageEntity::getId));
+    }
+
+    /**
+     * 加载最近 N 条消息（倒序取出后翻转为正序）。
+     * 利用复合索引 (conversation_id, create_time) 高效分页。
+     */
+    public List<MessageEntity> listRecentMessages(String conversationId, int lastN) {
+        List<MessageEntity> recent = messageMapper.selectList(
+                new LambdaQueryWrapper<MessageEntity>()
+                        .eq(MessageEntity::getConversationId, conversationId)
+                        .orderByDesc(MessageEntity::getCreateTime)
+                        .orderByDesc(MessageEntity::getId)
+                        .last("LIMIT " + lastN));
+        Collections.reverse(recent);
+        return recent;
+    }
+
+    /**
+     * 分页加载指定 ID 之前的消息（用于前端上拉加载更早消息）。
+     * 返回倒序结果，调用方需自行 reverse。
+     */
+    public List<MessageEntity> listMessagesBefore(String conversationId, Long beforeId, int limit) {
+        List<MessageEntity> results = messageMapper.selectList(
+                new LambdaQueryWrapper<MessageEntity>()
+                        .eq(MessageEntity::getConversationId, conversationId)
+                        .lt(MessageEntity::getId, beforeId)
+                        .orderByDesc(MessageEntity::getCreateTime)
+                        .orderByDesc(MessageEntity::getId)
+                        .last("LIMIT " + limit));
+        Collections.reverse(results);
+        return results;
+    }
+
+    /**
+     * 查询会话消息总数。
+     */
+    public long countMessages(String conversationId) {
+        return messageMapper.selectCount(
+                new LambdaQueryWrapper<MessageEntity>()
+                        .eq(MessageEntity::getConversationId, conversationId));
+    }
+
+    /**
+     * 将压缩摘要持久化为 role=system 的特殊消息。
+     * 下次加载历史时识别此消息，跳过它之前的已压缩消息。
+     */
+    public void saveCompressionSummary(String conversationId, String summary, int compressedCount) {
+        MessageEntity entity = new MessageEntity();
+        entity.setConversationId(conversationId);
+        entity.setRole("system");
+        entity.setContent(summary);
+        entity.setStatus("completed");
+        entity.setMetadata("{\"type\":\"compression_summary\",\"compressedCount\":" + compressedCount + "}");
+        messageMapper.insert(entity);
+        log.info("[Conversation] Saved compression summary for conv={}, compressedCount={}", conversationId, compressedCount);
     }
 
     public List<MessageVO> listMessageViews(String conversationId) {
