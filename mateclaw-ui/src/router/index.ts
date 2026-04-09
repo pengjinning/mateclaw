@@ -100,6 +100,25 @@ const router = createRouter({
               component: () => import('@/views/Settings/Video/index.vue'),
               meta: { title: 'Settings - Video' },
             },
+            // Workspace management
+            {
+              path: 'workspaces',
+              name: 'SettingsWorkspaces',
+              component: () => import('@/views/Security/Workspaces/index.vue'),
+              meta: { title: 'Settings - Workspaces' },
+            },
+            {
+              path: 'members',
+              name: 'SettingsMembers',
+              component: () => import('@/views/Security/Members/index.vue'),
+              meta: { title: 'Settings - Members' },
+            },
+            {
+              path: 'activity',
+              name: 'SettingsActivity',
+              component: () => import('@/views/Security/Activity/index.vue'),
+              meta: { title: 'Settings - Activity' },
+            },
             // Advanced (absorbed from top-level nav)
             {
               path: 'agent-context',
@@ -163,29 +182,14 @@ const router = createRouter({
               component: () => import('@/views/Security/AuditLogs/index.vue'),
               meta: { title: 'Security - Audit Logs' },
             },
-            {
-              path: 'members',
-              name: 'SecurityMembers',
-              component: () => import('@/views/Security/Members/index.vue'),
-              meta: { title: 'Security - Members' },
-            },
-            {
-              path: 'workspaces',
-              name: 'SecurityWorkspaces',
-              component: () => import('@/views/Security/Workspaces/index.vue'),
-              meta: { title: 'Security - Workspaces' },
-            },
-            {
-              path: 'activity',
-              name: 'SecurityActivity',
-              component: () => import('@/views/Security/Activity/index.vue'),
-              meta: { title: 'Security - Activity' },
-            },
           ],
         },
         // ==================== Redirects (backward compatibility) ====================
         { path: 'sessions', redirect: '/chat' },
         { path: 'workspace', redirect: '/settings/agent-context' },
+        { path: 'security/workspaces', redirect: '/settings/workspaces' },
+        { path: 'security/members', redirect: '/settings/members' },
+        { path: 'security/activity', redirect: '/settings/activity' },
         { path: 'cron-jobs', redirect: '/settings/cron-jobs' },
         { path: 'datasources', redirect: '/settings/datasources' },
         { path: 'mcp-servers', redirect: '/settings/mcp-servers' },

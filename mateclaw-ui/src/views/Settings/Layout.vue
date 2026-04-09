@@ -83,6 +83,26 @@ const sections = computed(() => [
     label: t('settings.sections.video'),
     icon: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>',
   },
+  // Divider: Workspace
+  { id: 'divider-workspace', path: '', label: t('settings.sections.workspace', 'Workspace'), icon: '', isDivider: true },
+  {
+    id: 'workspaces',
+    path: '/settings/workspaces',
+    label: t('security.sections.workspaces', 'Workspaces'),
+    icon: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="7" width="20" height="14" rx="2" ry="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/></svg>',
+  },
+  {
+    id: 'members',
+    path: '/settings/members',
+    label: t('security.sections.members', 'Members'),
+    icon: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>',
+  },
+  {
+    id: 'activity',
+    path: '/settings/activity',
+    label: t('security.sections.activity', 'Activity'),
+    icon: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>',
+  },
   // Divider: Advanced
   { id: 'divider-advanced', path: '', label: t('settings.sections.advanced'), icon: '', isDivider: true },
   {

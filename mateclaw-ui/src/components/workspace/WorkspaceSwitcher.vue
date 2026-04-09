@@ -70,7 +70,7 @@ onMounted(() => {
 
 function onSwitch(id: number | string) {
   if (id === '__manage__') {
-    router.push('/security/workspaces')
+    router.push('/settings/workspaces')
     return
   }
   store.switchWorkspace(id as number)
