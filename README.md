@@ -36,7 +36,28 @@ Three things make it different:
 
 1. **Agents do work, not just talk** — ReAct loops and Plan-and-Execute for real task completion
 2. **Knowledge is shaped, not just stored** — An LLM-powered Wiki that digests raw material into structured, linked pages
-3. **The whole widget** — One team, one deployment, hardware-to-software vertical integration from desktop app to IM channels
+3. **The whole widget** — One team, one deployment, from desktop app to IM channels — end-to-end
+
+---
+
+## Why MateClaw
+
+Most open-source AI tools do one thing well. MateClaw does the whole thing.
+
+| Capability | MateClaw | [Dify](https://github.com/langgenius/dify) | [LobeChat](https://github.com/lobehub/lobe-chat) | [FastGPT](https://github.com/labring/FastGPT) | [NextChat](https://github.com/ChatGPTNextWeb/NextChat) | [MaxKB](https://github.com/1Panel-dev/MaxKB) | [Open WebUI](https://github.com/open-webui/open-webui) |
+|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| Agent (ReAct + Plan-Execute) | **Yes** | ReAct only | Partial | No | No | No | No |
+| LLM Wiki Knowledge Base | **Yes** | RAG only | RAG only | RAG only | No | RAG only | RAG only |
+| Compound Memory System | **Yes** | No | No | No | No | No | No |
+| MCP Protocol | **Yes** | Plugin | Yes | Yes | No | Yes | No |
+| Tool Guard & Approval | **Yes** | No | No | No | No | No | No |
+| Skill Marketplace | **Yes** | Plugin Market | Plugin Store | No | No | No | No |
+| Multi-Channel IM | **7 channels** | Webhook only | 2 channels | No | No | No | No |
+| Desktop App | **Electron + JRE** | No | PWA only | No | Yes | No | No |
+| Multimodal Creation | **TTS/STT/Img/Music/Video** | No | TTS/Img | No | No | I/O only | No |
+| Tech Stack | Java + Vue 3 | Python + Next.js | TypeScript + Next.js | TypeScript + Next.js | TypeScript + Next.js | Python + Vue | Python + Svelte |
+
+> **The difference**: Others give you a chat UI or a workflow builder. MateClaw gives you an AI operating system — agents that reason, remember, use tools with guardrails, and show up everywhere your work happens.
 
 ---
 

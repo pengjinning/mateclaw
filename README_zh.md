@@ -40,6 +40,27 @@ MateClaw 是一个基于 **Java + Vue 3** 构建的个人 AI 操作系统，由 
 
 ---
 
+## 为什么选 MateClaw
+
+大多数开源 AI 工具只做好一件事。MateClaw 做好整件事。
+
+| 能力 | MateClaw | [Dify](https://github.com/langgenius/dify) | [LobeChat](https://github.com/lobehub/lobe-chat) | [FastGPT](https://github.com/labring/FastGPT) | [NextChat](https://github.com/ChatGPTNextWeb/NextChat) | [MaxKB](https://github.com/1Panel-dev/MaxKB) | [Open WebUI](https://github.com/open-webui/open-webui) |
+|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| 智能体 (ReAct + 计划执行) | **完整支持** | 仅 ReAct | 部分 | 无 | 无 | 无 | 无 |
+| LLM Wiki 知识库 | **原创** | 仅 RAG | 仅 RAG | 仅 RAG | 无 | 仅 RAG | 仅 RAG |
+| 复合记忆系统 | **完整支持** | 无 | 无 | 无 | 无 | 无 | 无 |
+| MCP 协议 | **完整支持** | 插件 | 支持 | 支持 | 无 | 支持 | 无 |
+| 工具防护与审批 | **完整支持** | 无 | 无 | 无 | 无 | 无 | 无 |
+| 技能市场 | **ClawHub** | 插件市场 | 插件商店 | 无 | 无 | 无 | 无 |
+| 多渠道 IM | **7 个渠道** | 仅 Webhook | 2 个 | 无 | 无 | 无 | 无 |
+| 桌面端 | **Electron + JRE** | 无 | 仅 PWA | 无 | 有 | 无 | 无 |
+| 多模态创作 | **TTS/STT/图/音乐/视频** | 无 | TTS/图片 | 无 | 无 | 仅 I/O | 无 |
+| 技术栈 | Java + Vue 3 | Python + Next.js | TypeScript + Next.js | TypeScript + Next.js | TypeScript + Next.js | Python + Vue | Python + Svelte |
+
+> **差异在哪？** 别人给你一个聊天界面或工作流编排器。MateClaw 给你一个 AI 操作系统——智能体能推理、能记忆、用工具有防护、出现在你工作发生的每一个地方。
+
+---
+
 ## 架构全景
 
 <p align="center">
