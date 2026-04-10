@@ -22,6 +22,10 @@
 
 </div>
 
+<p align="center">
+  <img src="assets/images/preview.png" alt="MateClaw Preview" width="800">
+</p>
+
 ---
 
 MateClaw is a personal AI operating system built with **Java + Vue 3**, powered by [Spring AI Alibaba](https://github.com/alibaba/spring-ai-alibaba).

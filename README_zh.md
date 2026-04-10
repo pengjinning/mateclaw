@@ -22,6 +22,10 @@
 
 </div>
 
+<p align="center">
+  <img src="assets/images/preview.png" alt="MateClaw 预览" width="800">
+</p>
+
 ---
 
 MateClaw 是一个基于 **Java + Vue 3** 构建的个人 AI 操作系统，由 [Spring AI Alibaba](https://github.com/alibaba/spring-ai-alibaba) 驱动。
