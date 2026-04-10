@@ -222,8 +222,15 @@ export function useChat(options: UseChatOptions): UseChatReturn {
       let thinkSeg = segs.findLast((s: MessageSegment) => s.type === 'thinking' && s.status === 'running')
       if (!thinkSeg) {
         thinkSeg = { id: genSegId(), type: 'thinking', status: 'running', thinkingText: '', timestamp: Date.now() }
-        segs.push(thinkSeg)
-        flushSegmentsToMessage() // 新 thinking segment 创建时同步一次
+        // 修复：如果前面已有 content segment（模型先发 content 后发 thinking），
+        // 把 thinking 插入到第一个 content 之前，确保 thinking 在上方显示
+        const firstContentIdx = segs.findIndex((s: MessageSegment) => s.type === 'content')
+        if (firstContentIdx >= 0 && !segs.some((s: MessageSegment) => s.type === 'tool_call')) {
+          segs.splice(firstContentIdx, 0, thinkSeg)
+        } else {
+          segs.push(thinkSeg)
+        }
+        flushSegmentsToMessage()
       }
       thinkSeg.thinkingText = (thinkSeg.thinkingText || '') + (data.delta || '')
     }
