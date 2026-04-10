@@ -13,7 +13,7 @@
           <img src="/logo/mateclaw_logo_s.png" alt="MateClaw" class="logo-img" />
         </div>
         <transition name="fade">
-          <div v-if="!sidebarCollapsed" class="logo-text">
+          <div v-if="!effectiveCollapsed" class="logo-text">
             <span class="logo-name">Mate<span class="logo-name-highlight">Claw</span></span>
             <span class="logo-version">v{{ appVersion }}</span>
           </div>
@@ -24,7 +24,7 @@
           :aria-label="sidebarToggleLabel"
           @click="toggleSidebar"
         >
-          <svg v-if="!sidebarCollapsed" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <svg v-if="!effectiveCollapsed" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <polyline points="15 18 9 12 15 6"/>
           </svg>
           <svg v-else width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -34,24 +34,24 @@
       </div>
 
       <!-- 工作区切换 -->
-      <WorkspaceSwitcher :collapsed="sidebarCollapsed" />
+      <WorkspaceSwitcher :collapsed="effectiveCollapsed" />
 
       <!-- 导航菜单 -->
       <nav class="sidebar-nav">
         <template v-for="group in navGroups" :key="group.key">
           <div class="nav-group">
-            <div v-if="!sidebarCollapsed" class="nav-group-title">{{ group.label }}</div>
+            <div v-if="!effectiveCollapsed" class="nav-group-title">{{ group.label }}</div>
             <router-link
               v-for="item in group.items"
               :key="item.path"
               :to="item.path"
               class="nav-item"
               :class="{ active: isNavItemActive(item) }"
-              :title="sidebarCollapsed ? item.label : ''"
+              :title="effectiveCollapsed ? item.label : ''"
               @click="onNavClick"
             >
               <span class="nav-icon" v-html="item.icon"></span>
-              <span v-if="!sidebarCollapsed" class="nav-label">{{ item.label }}</span>
+              <span v-if="!effectiveCollapsed" class="nav-label">{{ item.label }}</span>
             </router-link>
           </div>
         </template>
@@ -246,6 +246,9 @@ async function fetchHealthStatus() {
 const isMobile = ref(false)
 const mobileMenuOpen = ref(false)
 let mobileQuery: MediaQueryList | null = null
+// 中等屏幕自动折叠（≤1024px）
+let mediumQuery: MediaQueryList | null = null
+const userExplicitCollapse = ref(localStorage.getItem('mc-sidebar-collapsed') === 'true')
 
 function handleMobileChange(e: MediaQueryListEvent | MediaQueryList) {
   isMobile.value = e.matches
@@ -253,10 +256,22 @@ function handleMobileChange(e: MediaQueryListEvent | MediaQueryList) {
   if (e.matches) footerPanelOpen.value = false
 }
 
+function handleMediumChange(e: MediaQueryListEvent | MediaQueryList) {
+  if (e.matches && !userExplicitCollapse.value) {
+    sidebarCollapsed.value = true
+  } else if (!e.matches && !userExplicitCollapse.value) {
+    sidebarCollapsed.value = false
+  }
+}
+
 onMounted(async () => {
   mobileQuery = window.matchMedia('(max-width: 768px)')
   handleMobileChange(mobileQuery)
   mobileQuery.addEventListener('change', handleMobileChange)
+
+  mediumQuery = window.matchMedia('(max-width: 1024px)')
+  handleMediumChange(mediumQuery)
+  mediumQuery.addEventListener('change', handleMediumChange)
 
   // Check onboarding status
   if (!localStorage.getItem('mc-onboarding-done')) {
@@ -276,6 +291,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   mobileQuery?.removeEventListener('change', handleMobileChange)
+  mediumQuery?.removeEventListener('change', handleMediumChange)
 })
 
 function onNavClick() {
@@ -286,6 +302,7 @@ const username = computed(() => localStorage.getItem('username') || 'User')
 const role = computed(() => localStorage.getItem('role') || 'user')
 const userInitial = computed(() => username.value.charAt(0).toUpperCase())
 const roleLabel = computed(() => role.value === 'admin' ? t('nav.roleAdmin') : t('nav.roleUser'))
+const effectiveCollapsed = computed(() => sidebarCollapsed.value && !isMobile.value)
 const sidebarToggleLabel = computed(() => sidebarCollapsed.value ? t('common.expandSidebar') : t('common.collapseSidebar'))
 const currentLocaleValue = computed(() => currentLocale.value)
 
@@ -380,6 +397,7 @@ const navGroups = computed(() => [
 
 function toggleSidebar() {
   sidebarCollapsed.value = !sidebarCollapsed.value
+  userExplicitCollapse.value = sidebarCollapsed.value
   localStorage.setItem('mc-sidebar-collapsed', String(sidebarCollapsed.value))
   if (!sidebarCollapsed.value) {
     footerPanelOpen.value = false
@@ -1119,6 +1137,28 @@ watch(() => workspaceStore.currentWorkspaceId, () => {
   .sidebar-footer {
     background: transparent;
     backdrop-filter: none;
+  }
+}
+
+@media (max-width: 480px) {
+  .mobile-topbar {
+    padding: 8px 10px;
+    margin: 0 0 8px;
+    border-radius: 12px;
+    gap: 8px;
+  }
+
+  .mobile-topbar-title {
+    font-size: 14px;
+  }
+
+  .mobile-menu-btn {
+    width: 32px;
+    height: 32px;
+  }
+
+  .main-content {
+    padding: 8px;
   }
 }
 </style>

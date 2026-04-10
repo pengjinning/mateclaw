@@ -8,9 +8,9 @@
         </Transition>
 
     <!-- 会话侧边栏 -->
-    <div class="conversation-panel" :class="{ 'mobile-open': convPanelOpen }">
+    <div class="conversation-panel" :class="{ 'mobile-open': convPanelOpen, 'conv-collapsed': convPanelCollapsed && !isMobile }">
       <div class="panel-header">
-        <div class="panel-header-copy">
+        <div v-if="!convPanelCollapsed || isMobile" class="panel-header-copy">
           <div class="panel-kicker">{{ $t('nav.chat') }}</div>
           <h2 class="panel-title">{{ $t('chat.conversations') }}</h2>
         </div>
@@ -18,12 +18,17 @@
           <el-icon><Plus /></el-icon>
         </button>
       </div>
+      <!-- 折叠切换按钮 -->
+      <button v-if="!isMobile" class="conv-collapse-btn" @click="toggleConvPanel" :title="convPanelCollapsed ? $t('common.expandSidebar') : $t('common.collapseSidebar')">
+        <svg v-if="!convPanelCollapsed" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>
+        <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+      </button>
 
       <div class="agent-selector">
         <button class="agent-select-trigger" @click="agentDropdownOpen = !agentDropdownOpen" :title="`${$t('chat.selectAgent')} (⌘K)`">
           <span class="agent-select-trigger__icon">{{ currentAgent?.icon || '🤖' }}</span>
-          <span class="agent-select-trigger__name">{{ currentAgent?.name || $t('chat.selectAgent') }}</span>
-          <svg class="agent-select-trigger__arrow" :class="{ open: agentDropdownOpen }" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+          <span v-if="!convPanelCollapsed || isMobile" class="agent-select-trigger__name">{{ currentAgent?.name || $t('chat.selectAgent') }}</span>
+          <svg v-if="!convPanelCollapsed || isMobile" class="agent-select-trigger__arrow" :class="{ open: agentDropdownOpen }" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
         </button>
         <Transition name="fade">
           <div v-if="agentDropdownOpen" class="agent-dropdown-backdrop" @click="agentDropdownOpen = false"></div>
@@ -53,7 +58,7 @@
 
       <div class="conversation-list">
         <template v-for="group in groupedConversations" :key="group.label">
-          <div class="conv-group-title">{{ group.label }}</div>
+          <div v-if="!convPanelCollapsed || isMobile" class="conv-group-title">{{ group.label }}</div>
           <div
             v-for="conv in group.items"
             :key="conv.conversationId"
@@ -64,7 +69,7 @@
             <div class="conv-icon">
               <img :src="channelIconUrl(conv.source)" width="14" height="14" alt="" />
             </div>
-            <div class="conv-info">
+            <div v-if="!convPanelCollapsed || isMobile" class="conv-info">
               <input
                 v-if="renamingConvId === conv.conversationId"
                 v-model="renameText"
@@ -82,7 +87,7 @@
                 <span>{{ formatConversationTime(conv.lastActiveTime) }}</span>
               </div>
             </div>
-            <button class="conv-delete" @click.stop="confirmDeleteConversation(conv.conversationId)" :title="$t('common.delete')">
+            <button v-if="!convPanelCollapsed || isMobile" class="conv-delete" @click.stop="confirmDeleteConversation(conv.conversationId)" :title="$t('common.delete')">
               <el-icon><Delete /></el-icon>
             </button>
           </div>
@@ -284,14 +289,31 @@ import { useEChartsRenderer } from '@/composables/useEChartsRenderer'
 // ============ Talk Mode ============
 const showTalkMode = ref(false)
 
-// ============ 移动端状态 ============
+// ============ 移动端 & 响应式状态 ============
 const isMobile = ref(false)
 const convPanelOpen = ref(false)
+const convPanelCollapsed = ref(localStorage.getItem('mc-conv-collapsed') === 'true')
 let mobileQuery: MediaQueryList | null = null
+let mediumQuery: MediaQueryList | null = null
+const userExplicitConvCollapse = ref(localStorage.getItem('mc-conv-collapsed') === 'true')
 
 function handleMobileChange(e: MediaQueryListEvent | MediaQueryList) {
   isMobile.value = e.matches
   if (!e.matches) convPanelOpen.value = false
+}
+
+function handleConvMediumChange(e: MediaQueryListEvent | MediaQueryList) {
+  if (e.matches && !userExplicitConvCollapse.value) {
+    convPanelCollapsed.value = true
+  } else if (!e.matches && !userExplicitConvCollapse.value) {
+    convPanelCollapsed.value = false
+  }
+}
+
+function toggleConvPanel() {
+  convPanelCollapsed.value = !convPanelCollapsed.value
+  userExplicitConvCollapse.value = convPanelCollapsed.value
+  localStorage.setItem('mc-conv-collapsed', String(convPanelCollapsed.value))
 }
 
 // ============ 配置和常量 ============
@@ -674,6 +696,9 @@ onMounted(async () => {
   mobileQuery = window.matchMedia('(max-width: 768px)')
   handleMobileChange(mobileQuery)
   mobileQuery.addEventListener('change', handleMobileChange)
+  mediumQuery = window.matchMedia('(max-width: 1200px)')
+  handleConvMediumChange(mediumQuery)
+  mediumQuery.addEventListener('change', handleConvMediumChange)
   await Promise.all([loadAgents(), loadModelState(), loadConversations()])
   await hydrateStateFromRoute()
 })
@@ -683,6 +708,7 @@ onBeforeUnmount(() => {
   document.removeEventListener('click', handleCodeCopy)
   disposeECharts()
   mobileQuery?.removeEventListener('change', handleMobileChange)
+  mediumQuery?.removeEventListener('change', handleConvMediumChange)
   stopChatGeneration()
   // 释放所有附件的 ObjectURL，防止内存泄漏
   revokeAllPreviewUrls()
@@ -1344,6 +1370,55 @@ function handleCodeCopy(e: MouseEvent) {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  transition: width 0.25s ease, min-width 0.25s ease;
+}
+
+.conversation-panel.conv-collapsed {
+  width: 54px;
+  min-width: 54px;
+}
+
+.conversation-panel.conv-collapsed .panel-header {
+  justify-content: center;
+  padding: 14px 8px 12px;
+}
+
+.conversation-panel.conv-collapsed .agent-selector {
+  padding: 10px 6px 12px;
+}
+
+.conversation-panel.conv-collapsed .agent-select-trigger {
+  justify-content: center;
+  padding: 8px;
+}
+
+.conversation-panel.conv-collapsed .conv-item {
+  justify-content: center;
+  padding: 10px 6px;
+}
+
+.conversation-panel.conv-collapsed .conv-icon {
+  margin: 0;
+}
+
+.conv-collapse-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 28px;
+  border: none;
+  border-bottom: 1px solid var(--mc-border-light);
+  background: transparent;
+  color: var(--mc-text-tertiary);
+  cursor: pointer;
+  transition: all 0.15s;
+  flex-shrink: 0;
+}
+
+.conv-collapse-btn:hover {
+  background: var(--mc-bg-muted);
+  color: var(--mc-text-primary);
 }
 
 .panel-header {
@@ -2003,9 +2078,20 @@ function handleCodeCopy(e: MouseEvent) {
 
 /* ===== 移动端适配 ===== */
 @media (max-width: 768px) {
+  .chat-console-shell {
+    padding: 0 !important;
+    height: 100dvh !important;
+    height: 100vh !important;
+    overflow: hidden !important;
+    min-height: 0 !important;
+  }
+
   .chat-console-frame {
-    height: 100%;
-    min-height: calc(100vh - 28px);
+    height: 100% !important;
+    min-height: 0 !important;
+    overflow: hidden !important;
+    border-radius: 0;
+    border: none;
   }
 
   .conversation-panel {
@@ -2086,5 +2172,27 @@ function handleCodeCopy(e: MouseEvent) {
   }
 }
 
+@media (max-width: 480px) {
+  .chat-header {
+    padding: 6px 8px;
+    min-height: 44px;
+  }
+
+  .chat-header-right {
+    gap: 4px;
+  }
+
+  .model-select-trigger {
+    max-width: 120px;
+    height: 30px;
+    padding: 0 8px;
+    font-size: 12px;
+  }
+
+  .header-btn {
+    width: 28px;
+    height: 28px;
+  }
+}
 
 </style>

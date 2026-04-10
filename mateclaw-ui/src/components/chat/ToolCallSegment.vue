@@ -75,13 +75,15 @@ const isRunning = computed(() => props.segment.status === 'running')
 
 <style scoped>
 .seg-tool {
-  margin: 1px 0;
+  margin: 2px 0;
   border-left: 3px solid var(--mc-border-light);
-  border-radius: 0 6px 6px 0;
-  transition: all 0.15s;
+  border-radius: 0 var(--mc-radius-sm, 6px) var(--mc-radius-sm, 6px) 0;
+  transition: all 0.25s cubic-bezier(0.25, 0.46, 0.45, 0.94);
 }
 .seg-tool:hover {
   background: var(--mc-bg-muted);
+  transform: translateX(2px);
+  box-shadow: 0 2px 8px rgba(217, 109, 70, 0.08);
 }
 .seg-tool.is-running {
   border-left-color: var(--mc-primary);
@@ -136,12 +138,15 @@ const isRunning = computed(() => props.segment.status === 'running')
 .seg-tool__args {
   flex: 1;
   min-width: 0;
-  font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;
+  font-family: var(--mc-font-mono, 'SF Mono', 'Menlo', 'Consolas', monospace);
   font-size: 12px;
   color: var(--mc-text-tertiary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  background: rgba(217, 109, 70, 0.06);
+  padding: 1px 5px;
+  border-radius: 3px;
 }
 
 .seg-tool__arrow {

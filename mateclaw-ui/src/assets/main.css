@@ -4,6 +4,28 @@
    CSS Variables — Light / Dark theme
    ================================================================ */
 :root {
+  /* font system */
+  --mc-font-body: 'Inter', 'Avenir Next', 'SF Pro Display', 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  --mc-font-mono: 'JetBrains Mono', 'Fira Code', 'SF Mono', Consolas, monospace;
+
+  /* type scale */
+  --mc-text-xs: 11px;
+  --mc-text-sm: 13px;
+  --mc-text-base: 15px;
+  --mc-text-lg: 18px;
+  --mc-text-xl: 24px;
+  --mc-text-2xl: 32px;
+  --mc-leading-tight: 1.25;
+  --mc-leading-normal: 1.5;
+  --mc-leading-relaxed: 1.75;
+
+  /* radius system */
+  --mc-radius-sm: 6px;
+  --mc-radius-md: 12px;
+  --mc-radius-lg: 16px;
+  --mc-radius-xl: 20px;
+  --mc-radius-full: 9999px;
+
   /* brand */
   --mc-primary: #d96d46;
   --mc-primary-light: #ebb08f;
@@ -108,6 +130,7 @@
 
   /* Element Plus light override */
   --el-color-primary: #D97757;
+  --el-font-family: var(--mc-font-body);
 
   color-scheme: light;
 }
@@ -228,10 +251,12 @@ html, body, #app {
 }
 
 body {
-  font-family: 'Avenir Next', 'SF Pro Display', 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  font-family: var(--mc-font-body);
   background-color: var(--mc-bg);
   color: var(--mc-text-primary);
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-feature-settings: "kern" on;
   transition: background-color 0.2s ease, color 0.2s ease;
   background-image:
     radial-gradient(circle at top left, rgba(217, 109, 70, 0.1), transparent 26%),
@@ -299,7 +324,7 @@ html.dark body::before {
 
 /* inline code */
 .markdown-body code {
-  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+  font-family: var(--mc-font-mono);
   font-size: 0.875rem;
 }
 .markdown-body :not(pre) > code {
@@ -403,7 +428,7 @@ html.dark body::before {
   position: relative;
   border: 1px solid var(--mc-border);
   background: var(--mc-surface-overlay);
-  backdrop-filter: blur(18px);
+  backdrop-filter: blur(12px) saturate(1.1);
   border-radius: 28px;
   box-shadow: var(--mc-shadow-soft);
 }
@@ -467,12 +492,32 @@ html.dark body::before {
 .mc-surface-card {
   border: 1px solid var(--mc-border-light);
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.7), rgba(255, 255, 255, 0.92));
-  border-radius: 22px;
+  border-radius: var(--mc-radius-xl);
   box-shadow: var(--mc-shadow-soft);
+  transition: box-shadow 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94);
 }
 
 html.dark .mc-surface-card {
   background: linear-gradient(180deg, rgba(42, 32, 26, 0.86), rgba(34, 26, 22, 0.96));
+}
+
+@media (max-width: 768px) {
+  .mc-page-shell {
+    overflow-y: auto !important;
+    height: auto !important;
+    min-height: 100%;
+  }
+
+  .mc-page-frame {
+    overflow: visible !important;
+    height: auto !important;
+    min-height: auto;
+  }
+
+  .mc-page-inner {
+    height: auto !important;
+    min-height: auto;
+  }
 }
 
 @media (max-width: 900px) {
@@ -484,9 +529,44 @@ html.dark .mc-surface-card {
     padding: 18px;
   }
 
+  .mc-page-frame {
+    border-radius: 20px;
+  }
+
   .mc-page-header {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .mc-surface-card {
+    border-radius: 16px;
+  }
+}
+
+@media (max-width: 480px) {
+  .mc-page-shell {
+    padding: 8px;
+  }
+
+  .mc-page-inner {
+    padding: 12px;
+  }
+
+  .mc-page-frame {
+    border-radius: 14px;
+  }
+
+  .mc-page-title {
+    font-size: clamp(20px, 5vw, 28px);
+  }
+
+  .mc-surface-card {
+    border-radius: 12px;
+  }
+
+  .mc-page-header {
+    gap: 12px;
+    margin-bottom: 16px;
   }
 }
 

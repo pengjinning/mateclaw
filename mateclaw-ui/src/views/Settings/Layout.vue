@@ -2,24 +2,34 @@
   <div class="mc-page-shell settings-shell">
     <div class="mc-page-frame settings-frame">
       <div class="mc-page-inner settings-layout">
-        <div class="settings-nav mc-surface-card">
-          <div class="settings-nav__intro">
+        <div class="settings-nav mc-surface-card" :class="{ 'nav-collapsed': navCollapsed }">
+          <div v-if="!navCollapsed" class="settings-nav__intro">
             <div class="mc-page-kicker">{{ t('settings.kicker') }}</div>
             <h2 class="nav-title">{{ t('settings.title') }}</h2>
-            <p class="nav-desc">{{ t('settings.layoutDesc') }}</p>
           </div>
           <template v-for="section in sections" :key="section.id">
-            <div v-if="section.isDivider" class="nav-divider">{{ section.label }}</div>
-            <router-link
-              v-else
-              :to="section.path"
-              class="nav-item"
-              :class="{ active: isActive(section.path) }"
+            <div v-if="section.isDivider && !navCollapsed" class="nav-divider">{{ section.label }}</div>
+            <el-tooltip
+              v-else-if="!section.isDivider"
+              :content="section.label"
+              placement="right"
+              :disabled="!navCollapsed"
             >
-              <span class="nav-icon" v-html="section.icon"></span>
-              {{ section.label }}
-            </router-link>
+              <router-link
+                :to="section.path"
+                class="nav-item"
+                :class="{ active: isActive(section.path) }"
+              >
+                <span class="nav-icon" v-html="section.icon"></span>
+                <span v-if="!navCollapsed" class="nav-label">{{ section.label }}</span>
+              </router-link>
+            </el-tooltip>
           </template>
+          <!-- 折叠切换按钮 -->
+          <button class="nav-collapse-btn" @click="toggleNav" :title="navCollapsed ? t('common.expandSidebar') : t('common.collapseSidebar')">
+            <svg v-if="!navCollapsed" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>
+            <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </button>
         </div>
 
         <div class="settings-content mc-surface-card">
@@ -33,12 +43,41 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 
 const route = useRoute()
 const { t } = useI18n()
+
+// 折叠状态
+const navCollapsed = ref(localStorage.getItem('mc-settings-nav-collapsed') === 'true')
+const userExplicit = ref(localStorage.getItem('mc-settings-nav-collapsed') === 'true')
+let mediumQuery: MediaQueryList | null = null
+
+function toggleNav() {
+  navCollapsed.value = !navCollapsed.value
+  userExplicit.value = navCollapsed.value
+  localStorage.setItem('mc-settings-nav-collapsed', String(navCollapsed.value))
+}
+
+function handleMediumChange(e: MediaQueryListEvent | MediaQueryList) {
+  if (e.matches && !userExplicit.value) {
+    navCollapsed.value = true
+  } else if (!e.matches && !userExplicit.value) {
+    navCollapsed.value = false
+  }
+}
+
+onMounted(() => {
+  mediumQuery = window.matchMedia('(max-width: 1200px)')
+  handleMediumChange(mediumQuery)
+  mediumQuery.addEventListener('change', handleMediumChange)
+})
+
+onBeforeUnmount(() => {
+  mediumQuery?.removeEventListener('change', handleMediumChange)
+})
 
 const sections = computed(() => [
   {
@@ -92,6 +131,12 @@ const sections = computed(() => [
     icon: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="7" width="20" height="14" rx="2" ry="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/></svg>',
   },
   {
+    id: 'agent-context',
+    path: '/settings/agent-context',
+    label: t('nav.agentContext', '智能体上下文'),
+    icon: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg>',
+  },
+  {
     id: 'members',
     path: '/settings/members',
     label: t('security.sections.members', 'Members'),
@@ -105,12 +150,6 @@ const sections = computed(() => [
   },
   // Divider: Advanced
   { id: 'divider-advanced', path: '', label: t('settings.sections.advanced'), icon: '', isDivider: true },
-  {
-    id: 'agent-context',
-    path: '/settings/agent-context',
-    label: t('nav.agentContext', 'Agent Context'),
-    icon: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg>',
-  },
   {
     id: 'cron-jobs',
     path: '/settings/cron-jobs',
@@ -170,28 +209,65 @@ function isActive(path: string) {
 }
 
 .settings-nav {
-  width: 286px;
-  min-width: 286px;
-  padding: 18px 14px;
+  width: 210px;
+  min-width: 210px;
+  padding: 14px 10px;
   overflow-y: auto;
   align-self: stretch;
+  transition: width 0.25s ease, min-width 0.25s ease;
+  display: flex;
+  flex-direction: column;
+}
+
+.settings-nav.nav-collapsed {
+  width: 56px;
+  min-width: 56px;
+  padding: 12px 8px;
 }
 
 .settings-nav__intro {
-  padding: 6px 8px 16px;
+  padding: 4px 8px 10px;
   border-bottom: 1px solid var(--mc-border-light);
-  margin-bottom: 8px;
+  margin-bottom: 6px;
 }
 
-.nav-title { font-size: 28px; font-weight: 800; color: var(--mc-text-primary); letter-spacing: -0.04em; margin: 0 0 6px; }
-.nav-desc { color: var(--mc-text-secondary); font-size: 13px; line-height: 1.65; margin: 0; }
-.nav-item { display: flex; align-items: center; gap: 10px; width: 100%; padding: 10px 12px; border: none; background: none; border-radius: 14px; font-size: 14px; font-weight: 500; color: var(--mc-text-secondary); cursor: pointer; transition: all 0.15s; text-align: left; text-decoration: none; }
+.nav-title { font-size: 20px; font-weight: 700; color: var(--mc-text-primary); letter-spacing: -0.03em; margin: 0 0 4px; }
+.nav-desc { color: var(--mc-text-secondary); font-size: 12px; line-height: 1.5; margin: 0; }
+.nav-item { display: flex; align-items: center; gap: 8px; width: 100%; padding: 8px 10px; border: none; background: none; border-radius: 10px; font-size: 13px; font-weight: 500; color: var(--mc-text-secondary); cursor: pointer; transition: all 0.15s; text-align: left; text-decoration: none; }
 .nav-item:hover { background: var(--mc-bg-muted); color: var(--mc-text-primary); }
 .nav-item.active { background: var(--mc-primary-bg); color: var(--mc-primary); font-weight: 600; box-shadow: inset 0 0 0 1px rgba(217, 109, 70, 0.08); }
 .nav-item + .nav-item { margin-top: 2px; }
+
+.nav-collapsed .nav-item {
+  justify-content: center;
+  padding: 10px 8px;
+}
+
 .nav-icon { width: 18px; height: 18px; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
 .nav-icon :deep(svg) { width: 18px; height: 18px; display: block; }
-.nav-divider { font-size: 11px; font-weight: 700; color: var(--mc-text-tertiary); text-transform: uppercase; letter-spacing: 0.1em; padding: 18px 8px 8px; margin-top: 4px; }
+.nav-divider { font-size: 10px; font-weight: 700; color: var(--mc-text-tertiary); text-transform: uppercase; letter-spacing: 0.1em; padding: 12px 8px 4px; margin-top: 2px; }
+
+.nav-collapse-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 32px;
+  margin-top: auto;
+  border: none;
+  border-top: 1px solid var(--mc-border-light);
+  background: transparent;
+  color: var(--mc-text-tertiary);
+  cursor: pointer;
+  transition: all 0.15s;
+  flex-shrink: 0;
+}
+
+.nav-collapse-btn:hover {
+  background: var(--mc-bg-muted);
+  color: var(--mc-text-primary);
+}
+
 .settings-content {
   flex: 1;
   min-width: 0;
@@ -215,8 +291,13 @@ function isActive(path: string) {
     overflow: visible;
   }
 
-  .settings-layout { flex-direction: column; height: auto; }
-  .settings-nav { width: 100%; min-width: 100%; max-height: none; align-self: auto; }
+  .settings-layout { flex-direction: row; height: auto; }
+  .settings-nav { width: 56px; min-width: 56px; max-height: none; align-self: auto; padding: 12px 8px; }
+  .settings-nav .settings-nav__intro { display: none; }
+  .settings-nav .nav-divider { display: none; }
+  .settings-nav .nav-item { justify-content: center; padding: 10px 8px; }
+  .settings-nav .nav-label { display: none; }
+  .nav-collapse-btn { display: none; }
   .settings-content { min-height: 0; overflow: visible; }
   .settings-content__inner { overflow: visible; padding-right: 0; }
 }

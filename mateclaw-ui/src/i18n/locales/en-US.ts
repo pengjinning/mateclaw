@@ -553,7 +553,7 @@ export default {
   agentContext: {
     kicker: 'Context Studio',
     title: 'Agent Context',
-    desc: 'Manage prompt files and memory for your agents',
+    desc: 'Manage prompt files and memory for agents',
     selectAgent: 'Select Agent',
     noAgent: 'Please select an agent first',
     files: 'Files',

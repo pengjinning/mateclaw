@@ -3,12 +3,8 @@
     <div class="mc-page-frame agent-context-frame">
       <div class="mc-page-inner agent-context-container">
     <!-- 顶部栏 -->
-    <div class="workspace-header">
-      <div class="workspace-header-copy">
-        <div class="mc-page-kicker">{{ t('agentContext.kicker') }}</div>
-        <h1 class="page-title">{{ t('agentContext.title') }}</h1>
-        <p class="page-desc">{{ t('agentContext.desc') }}</p>
-      </div>
+    <div class="workspace-header workspace-header--compact">
+      <h1 class="page-title page-title--compact">{{ t('agentContext.title') }}</h1>
       <div class="header-actions mc-surface-card">
         <select v-model="selectedAgentId" class="agent-select" @change="onAgentChange">
           <option value="" disabled>{{ t('agentContext.selectAgent') }}</option>
@@ -471,8 +467,10 @@ function formatTime(time?: string): string {
 }
 
 .workspace-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding-bottom: 14px; flex-shrink: 0; border-bottom: 1px solid var(--mc-border-light); }
+.workspace-header--compact { align-items: center; padding-bottom: 10px; }
 .workspace-header-copy { min-width: 0; }
 .page-title { font-size: clamp(28px, 3vw, 40px); font-weight: 800; color: var(--mc-text-primary); letter-spacing: -0.04em; margin: 0 0 8px; }
+.page-title--compact { font-size: clamp(24px, 2.5vw, 32px); font-weight: 800; letter-spacing: -0.03em; margin: 0; }
 .page-desc { font-size: 15px; color: var(--mc-text-secondary); margin: 0; line-height: 1.7; max-width: 720px; }
 .header-actions { display: flex; gap: 8px; align-items: center; padding: 12px; border-radius: 18px; flex-shrink: 0; }
 .agent-select { padding: 10px 14px; border: 1px solid var(--mc-border); border-radius: 12px; background: var(--mc-bg-elevated); color: var(--mc-text-primary); font-size: 14px; outline: none; min-width: 240px; cursor: pointer; }
