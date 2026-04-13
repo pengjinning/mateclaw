@@ -171,6 +171,16 @@
                 <p class="weixin-auth-hint">
                   {{ t('channels.weixin.authHint') }}
                 </p>
+                <!-- 编辑模式：提示扫码会替换当前账号，引导添加新渠道 -->
+                <div v-if="editingChannel && channelConfig.bot_token" class="weixin-multi-account-hint">
+                  <p class="hint-warning">⚠️ {{ t('channels.weixin.replaceWarning') }}</p>
+                  <button type="button" class="weixin-add-account-btn" @click="addNewWeixinChannel">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/>
+                    </svg>
+                    {{ t('channels.weixin.addNewAccount') }}
+                  </button>
+                </div>
                 <button type="button" class="weixin-auth-btn" @click="handleWeixinQrcode" :disabled="weixinQrcodeLoading">
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/>
@@ -178,7 +188,10 @@
                     <line x1="21" y1="14" x2="21" y2="17"/><line x1="14" y1="21" x2="17" y2="21"/>
                     <line x1="21" y1="21" x2="21" y2="21"/>
                   </svg>
-                  {{ weixinQrcodeLoading ? t('channels.weixin.qrcodeLoading') : t('channels.weixin.qrcodeButton') }}
+                  {{ editingChannel && channelConfig.bot_token
+                    ? t('channels.weixin.rescanButton')
+                    : (weixinQrcodeLoading ? t('channels.weixin.qrcodeLoading') : t('channels.weixin.qrcodeButton'))
+                  }}
                 </button>
                 <!-- 二维码展示区 -->
                 <div v-if="weixinQrcodeImg || weixinPollStatus === 'confirmed'" class="weixin-qrcode-area">
@@ -771,6 +784,14 @@ async function handleWeixinQrcode() {
             if (s.base_url) {
               channelConfig.value.base_url = s.base_url
             }
+            // 新建模式且名称为默认值时，自动追加 token 后缀便于区分多账号
+            if (!editingChannel.value) {
+              const suffix = s.bot_token.slice(-6)
+              const currentName = form.value.name || ''
+              if (!currentName || currentName === t('channels.weixin.newAccountName') || currentName === t('channels.types.weixin')) {
+                form.value.name = t('channels.weixin.newAccountName') + ' (' + suffix + ')'
+              }
+            }
             weixinQrcodeImg.value = ''
             weixinPollStatus.value = 'confirmed'
             ElMessage.success(t('channels.weixin.loginSuccess'))
@@ -1016,6 +1037,21 @@ function openEditModal(channel: Channel) {
 function closeModal() {
   showModal.value = false
   editingChannel.value = null
+}
+
+/** 绑定新微信账号：关闭当前编辑弹窗，以新建模式打开微信渠道 */
+function addNewWeixinChannel() {
+  closeModal()
+  // 计算已有微信渠道数量，用于自动递增命名
+  const existingCount = channels.value.filter(c => c.channelType === 'weixin').length
+  const newName = t('channels.weixin.newAccountName') + ' ' + (existingCount + 1)
+  // 延迟打开新建弹窗，确保关闭动画完成
+  setTimeout(() => {
+    openCreateModal()
+    form.value.channelType = 'weixin'
+    form.value.name = newName
+    onChannelTypeChange()
+  }, 200)
 }
 
 /** 渠道类型变更时重置配置字段 */
@@ -1298,6 +1334,10 @@ function getChannelIconPath(type: string) {
 .weixin-auth-btn:hover:not(:disabled) { background: #06AD56; transform: translateY(-1px); box-shadow: 0 2px 8px rgba(7,193,96,0.3); }
 .weixin-auth-btn:active:not(:disabled) { transform: translateY(0); }
 .weixin-auth-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+.weixin-multi-account-hint { margin-bottom: 12px; padding: 12px; background: #FFF7E6; border: 1px solid #FFD666; border-radius: 8px; }
+.weixin-multi-account-hint .hint-warning { font-size: 13px; color: #D48806; margin: 0 0 10px 0; line-height: 1.5; }
+.weixin-add-account-btn { display: flex; align-items: center; justify-content: center; gap: 6px; width: 100%; padding: 8px 14px; background: var(--mc-primary); color: #fff; border: none; border-radius: 6px; font-size: 13px; font-weight: 500; cursor: pointer; transition: all 0.2s; }
+.weixin-add-account-btn:hover { opacity: 0.9; transform: translateY(-1px); }
 .weixin-qrcode-area { display: flex; flex-direction: column; align-items: center; margin-top: 16px; padding: 16px; background: #fff; border-radius: 8px; border: 1px solid var(--mc-border); }
 .weixin-qrcode-img { width: 200px; height: 200px; border-radius: 4px; }
 .weixin-scan-hint { font-size: 13px; color: var(--mc-text-secondary); margin-top: 10px; transition: color 0.2s; }

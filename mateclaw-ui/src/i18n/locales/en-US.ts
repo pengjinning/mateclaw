@@ -1307,6 +1307,7 @@ export default {
     weixin: {
       authHint: 'Click the button below to get a WeChat login QR code. After scanning with WeChat, the Bot Token will be automatically filled in. Requires iLink Bot beta access.',
       qrcodeButton: 'Get Login QR Code',
+      rescanButton: 'Re-scan (replaces current account)',
       qrcodeLoading: 'Fetching...',
       qrcodeFailed: 'Failed to get QR code. Please check your network.',
       qrcodeExpired: 'QR code expired. Please get a new one.',
@@ -1316,6 +1317,9 @@ export default {
       confirmed: 'Login successful',
       expired: 'QR code expired',
       loginSuccess: 'WeChat login successful, token has been filled in',
+      replaceWarning: 'Re-scanning will replace the currently bound WeChat account. To bind an additional account, click the button below to add a new channel.',
+      addNewAccount: 'Bind New WeChat Account (Add Channel)',
+      newAccountName: 'WeChat',
     },
     wecom: {
       authHint: 'Click the button to open a WeChat Work QR code window. After scanning, the Bot ID and Secret will be automatically filled in.',

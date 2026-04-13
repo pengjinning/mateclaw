@@ -69,6 +69,10 @@ public class ChannelController {
             @RequestBody ChannelEntity channel) {
         channel.setWorkspaceId(workspaceId != null ? workspaceId : 1L);
         ChannelEntity created = channelService.createChannel(channel);
+        // 创建后如果渠道已启用，自动启动（与 toggle 行为对齐）
+        if (Boolean.TRUE.equals(created.getEnabled())) {
+            channelManager.startChannel(created);
+        }
         auditEventService.record("CREATE", "CHANNEL", String.valueOf(created.getId()), created.getName(), null);
         return R.ok(created);
     }

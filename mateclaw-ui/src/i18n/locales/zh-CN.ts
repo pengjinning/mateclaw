@@ -1317,6 +1317,7 @@ export default {
     weixin: {
       authHint: '点击下方按钮获取微信登录二维码，使用微信扫一扫确认后 Bot Token 将自动填入。需要 iLink Bot 内测资格。',
       qrcodeButton: '获取登录二维码',
+      rescanButton: '重新扫码（将替换当前账号）',
       qrcodeLoading: '正在获取...',
       qrcodeFailed: '获取二维码失败，请检查网络连接',
       qrcodeExpired: '二维码已过期，请重新获取',
@@ -1326,6 +1327,9 @@ export default {
       confirmed: '登录成功',
       expired: '二维码已过期',
       loginSuccess: '微信扫码登录成功，Token 已自动填入',
+      replaceWarning: '重新扫码将替换当前绑定的微信账号。如需绑定额外的微信账号，请点击下方按钮添加新渠道。',
+      addNewAccount: '绑定新微信账号（添加新渠道）',
+      newAccountName: '微信',
     },
     wecom: {
       authHint: '点击按钮后会弹出企业微信二维码窗口，使用企业微信扫码确认后 Bot ID 与 Secret 将自动填入。',
