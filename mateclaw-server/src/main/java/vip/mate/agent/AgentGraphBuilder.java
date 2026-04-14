@@ -33,8 +33,9 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.util.LinkedMultiValueMap;
 import org.springframework.util.MultiValueMap;
 import org.springframework.util.StringUtils;
-import org.springframework.http.client.SimpleClientHttpRequestFactory;
+import org.springframework.http.client.JdkClientHttpRequestFactory;
 import org.springframework.web.client.RestClient;
+import java.net.http.HttpClient;
 import java.time.Duration;
 import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.reactive.function.client.WebClientResponseException;
@@ -1282,12 +1283,23 @@ public class AgentGraphBuilder {
     /**
      * RFC-012 M1：给 LLM 调用走的 RestClient 显式配置超时，避免 socket 永久挂起等待。
      * <p>
+     * 使用 {@link JdkClientHttpRequestFactory}（基于 Java 11+ {@link HttpClient}），原因：
+     * <ul>
+     *   <li>原生支持 HTTP/2 / ALPN 协商（Kimi 等现代 LLM provider 默认 HTTP/2）</li>
+     *   <li>自动处理 {@code Content-Encoding: gzip} 解压（{@code SimpleClientHttpRequestFactory}
+     *       基于旧的 {@code HttpURLConnection}，不会自动解压，会把 gzip 流误标为
+     *       {@code application/octet-stream} 导致 RestClient 抛 "Error extracting response"）</li>
+     *   <li>对 chunked transfer + 非标准 content-type 的回退处理符合现代 spec</li>
+     * </ul>
+     * <p>
      * connectTimeout=10s（任何 LLM 提供方都不该超过这个建立连接时间）；
      * readTimeout=180s（覆盖 nginx 60s 网关超时 + 留足真实长响应余量；超时后由上层 retry 接管）。
      */
     private RestClient.Builder applyHttpTimeouts(RestClient.Builder builder) {
-        SimpleClientHttpRequestFactory rf = new SimpleClientHttpRequestFactory();
-        rf.setConnectTimeout(Duration.ofSeconds(10));
+        HttpClient httpClient = HttpClient.newBuilder()
+                .connectTimeout(Duration.ofSeconds(10))
+                .build();
+        JdkClientHttpRequestFactory rf = new JdkClientHttpRequestFactory(httpClient);
         rf.setReadTimeout(Duration.ofSeconds(180));
         return builder.requestFactory(rf);
     }
