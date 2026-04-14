@@ -392,32 +392,20 @@ public class WikiProcessingService {
             return 0;
         }
 
-        String sourceRawIds = "[" + rawId + "]";
         int created = 0;
         int updated = 0;
 
-        // 应用 create 列表（直接落库，无需第二轮 LLM）
+        // ─── 收集 route 输出（仅 metadata，无 content） ───
+        List<JsonNode> createMetas = new ArrayList<>();
         JsonNode createNode = routeJson.path("create");
         if (createNode.isArray()) {
-            for (JsonNode pageNode : createNode) {
-                String slug = pageNode.path("slug").asText("");
-                String title = pageNode.path("title").asText("");
-                String content = pageNode.path("content").asText("");
-                String summary = pageNode.path("summary").asText("");
+            for (JsonNode metaNode : createNode) {
+                String slug = metaNode.path("slug").asText("");
+                String title = metaNode.path("title").asText("");
                 if (slug.isBlank() || title.isBlank()) continue;
-                WikiPageEntity existing = pageService.getBySlug(kbId, slug);
-                if (existing != null) {
-                    // LLM 误把已存在 slug 放进 create —— 走 update 路径兜底
-                    pageService.updatePageByAi(kbId, slug, content, summary, rawId);
-                    updated++;
-                } else {
-                    pageService.createPage(kbId, slug, title, content, summary, sourceRawIds);
-                    created++;
-                }
+                createMetas.add(metaNode);
             }
         }
-
-        // 收集 update 列表（仅 slug）
         List<String> updateSlugs = new ArrayList<>();
         JsonNode updateNode = routeJson.path("update");
         if (updateNode.isArray()) {
@@ -427,58 +415,146 @@ public class WikiProcessingService {
             }
         }
         log.info("[Wiki] Route phase: kbId={}, rawId={}, planned create={}, planned update={}",
-                kbId, rawId, createNode.isArray() ? createNode.size() : 0, updateSlugs.size());
+                kbId, rawId, createMetas.size(), updateSlugs.size());
 
-        // ─── 阶段 B：逐页 merge ───
-        if (!updateSlugs.isEmpty()) {
-            String mergeSystem = PromptLoader.loadPrompt("wiki/merge-page-system");
-            String mergeUserTemplate = PromptLoader.loadPrompt("wiki/merge-page-user");
-            for (String slug : updateSlugs) {
-                WikiPageEntity existing = pageService.getBySlug(kbId, slug);
-                if (existing == null) {
-                    log.warn("[Wiki] Merge phase: slug '{}' planned for update but not found in DB, skipping", slug);
-                    continue;
+        // ─── 阶段 B-1：逐页 create（每页一次单独 LLM call，输入/输出都是单页规模） ───
+        for (JsonNode meta : createMetas) {
+            try {
+                if (createOnePage(kb, raw, textContent, existingPagesIndex, meta)) {
+                    created++;
                 }
-                String mergeUser = mergeUserTemplate
-                        .replace("{config}", configContent)
-                        .replace("{page_slug}", existing.getSlug() != null ? existing.getSlug() : slug)
-                        .replace("{page_title}", existing.getTitle() != null ? existing.getTitle() : "")
-                        .replace("{page_last_updated_by}", existing.getLastUpdatedBy() != null ? existing.getLastUpdatedBy() : "ai")
-                        .replace("{page_content}", existing.getContent() != null ? existing.getContent() : "")
-                        .replace("{raw_title}", rawTitle)
-                        .replace("{raw_content}", textContent);
-                Prompt mergePrompt = new Prompt(List.of(
-                        new SystemMessage(mergeSystem),
-                        new UserMessage(mergeUser)
-                ));
-                String mergeResponse;
-                try {
-                    mergeResponse = callLlmWithResilientRetry(mergePrompt,
-                            "merge page slug=" + slug + " of raw=" + rawId);
-                } catch (RuntimeException e) {
-                    // 单页 merge 失败不影响其他页面，整 chunk 继续
-                    log.warn("[Wiki] Merge phase: slug '{}' failed: {}", slug, e.getMessage());
-                    continue;
+            } catch (RuntimeException e) {
+                log.warn("[Wiki] Phase B create page slug='{}' failed: {}",
+                        meta.path("slug").asText(""), e.getMessage());
+            }
+        }
+
+        // ─── 阶段 B-2：逐页 merge（每页一次单独 LLM call） ───
+        for (String slug : updateSlugs) {
+            try {
+                if (mergeOnePage(kb, raw, textContent, slug)) {
+                    updated++;
                 }
-                JsonNode mergeJson = parseJsonResponse(mergeResponse);
-                if (mergeJson == null) {
-                    log.warn("[Wiki] Merge phase: slug '{}' returned unparseable JSON, skipping", slug);
-                    continue;
-                }
-                String content = mergeJson.path("content").asText("");
-                String summary = mergeJson.path("summary").asText("");
-                if (content.isBlank()) {
-                    log.warn("[Wiki] Merge phase: slug '{}' returned blank content, skipping", slug);
-                    continue;
-                }
-                pageService.updatePageByAi(kbId, slug, content, summary, rawId);
-                updated++;
+            } catch (RuntimeException e) {
+                log.warn("[Wiki] Phase B merge page slug='{}' failed: {}", slug, e.getMessage());
             }
         }
 
         log.info("[Wiki] Two-phase digest applied: kbId={}, rawId={}, created={}, updated={}",
                 kbId, rawId, created, updated);
         return created + updated;
+    }
+
+    /**
+     * RFC-012 M2 v2 — 阶段 B 单页生成：用 chunk 文本 + 该页 metadata 让 LLM 写出完整页面。
+     * <p>
+     * 输入仅几 KB（chunk 主题片段 + metadata + 已有页索引），输出仅一页 markdown，
+     * 单次调用稳稳 ≤ 60 秒，避免 nginx 60s 网关。
+     * <p>
+     * 兜底：如果 slug 已存在（route 误判），改走 update 路径。
+     *
+     * @return true 表示成功 create 一页（或兜底 update 一页时返回 false 以让上层归到 update 计数）
+     */
+    private boolean createOnePage(WikiKnowledgeBaseEntity kb, WikiRawMaterialEntity raw,
+                                    String chunkText, String existingPagesIndex, JsonNode meta) {
+        Long kbId = kb.getId();
+        Long rawId = raw.getId();
+        String slug = meta.path("slug").asText("");
+        String title = meta.path("title").asText("");
+        String summary = meta.path("summary").asText("");
+        if (slug.isBlank() || title.isBlank()) return false;
+
+        String configContent = kb.getConfigContent() != null ? kb.getConfigContent() : "";
+        String createSystem = PromptLoader.loadPrompt("wiki/create-page-system");
+        String createUserTemplate = PromptLoader.loadPrompt("wiki/create-page-user");
+        String createUser = createUserTemplate
+                .replace("{config}", configContent)
+                .replace("{existing_pages}", existingPagesIndex)
+                .replace("{page_slug}", slug)
+                .replace("{page_title}", title)
+                .replace("{page_summary}", summary)
+                .replace("{raw_title}", raw.getTitle())
+                .replace("{raw_content}", chunkText);
+        Prompt prompt = new Prompt(List.of(
+                new SystemMessage(createSystem),
+                new UserMessage(createUser)
+        ));
+        String response = callLlmWithResilientRetry(prompt,
+                "create page slug=" + slug + " of raw=" + rawId);
+        JsonNode pageJson = parseJsonResponse(response);
+        if (pageJson == null) {
+            log.warn("[Wiki] Phase B create page slug='{}' returned unparseable JSON, skipping", slug);
+            return false;
+        }
+        String content = pageJson.path("content").asText("");
+        String pageSummary = pageJson.path("summary").asText("");
+        if (pageSummary.isBlank()) pageSummary = summary;
+        if (content.isBlank()) {
+            log.warn("[Wiki] Phase B create page slug='{}' returned blank content, skipping", slug);
+            return false;
+        }
+
+        // 兜底：如果 slug 已存在（route 误判 / 并发），走 update 而不是 create
+        WikiPageEntity existing = pageService.getBySlug(kbId, slug);
+        if (existing != null) {
+            pageService.updatePageByAi(kbId, slug, content, pageSummary, rawId);
+            log.info("[Wiki] Phase B create page slug='{}' done (updated existing)", slug);
+            return false; // 不计入 created
+        }
+        String sourceRawIds = "[" + rawId + "]";
+        pageService.createPage(kbId, slug, title, content, pageSummary, sourceRawIds);
+        log.info("[Wiki] Phase B create page slug='{}' done (created)", slug);
+        return true;
+    }
+
+    /**
+     * RFC-012 M2 v2 — 阶段 B 单页 merge：把 chunk 文本合并进一个已有页面。
+     * <p>
+     * 输入仅几 KB（该页现有 content + chunk 主题片段），输出仅一页 markdown。
+     *
+     * @return true 表示成功 update 一页
+     */
+    private boolean mergeOnePage(WikiKnowledgeBaseEntity kb, WikiRawMaterialEntity raw,
+                                   String chunkText, String slug) {
+        Long kbId = kb.getId();
+        Long rawId = raw.getId();
+        WikiPageEntity existing = pageService.getBySlug(kbId, slug);
+        if (existing == null) {
+            log.warn("[Wiki] Phase B merge page slug='{}' planned for update but not found in DB, skipping", slug);
+            return false;
+        }
+
+        String configContent = kb.getConfigContent() != null ? kb.getConfigContent() : "";
+        String mergeSystem = PromptLoader.loadPrompt("wiki/merge-page-system");
+        String mergeUserTemplate = PromptLoader.loadPrompt("wiki/merge-page-user");
+        String mergeUser = mergeUserTemplate
+                .replace("{config}", configContent)
+                .replace("{page_slug}", existing.getSlug() != null ? existing.getSlug() : slug)
+                .replace("{page_title}", existing.getTitle() != null ? existing.getTitle() : "")
+                .replace("{page_last_updated_by}", existing.getLastUpdatedBy() != null ? existing.getLastUpdatedBy() : "ai")
+                .replace("{page_content}", existing.getContent() != null ? existing.getContent() : "")
+                .replace("{raw_title}", raw.getTitle())
+                .replace("{raw_content}", chunkText);
+        Prompt prompt = new Prompt(List.of(
+                new SystemMessage(mergeSystem),
+                new UserMessage(mergeUser)
+        ));
+        String response = callLlmWithResilientRetry(prompt,
+                "merge page slug=" + slug + " of raw=" + rawId);
+        JsonNode mergeJson = parseJsonResponse(response);
+        if (mergeJson == null) {
+            log.warn("[Wiki] Phase B merge page slug='{}' returned unparseable JSON, skipping", slug);
+            return false;
+        }
+        String content = mergeJson.path("content").asText("");
+        String summary = mergeJson.path("summary").asText("");
+        if (content.isBlank()) {
+            log.warn("[Wiki] Phase B merge page slug='{}' returned blank content, skipping", slug);
+            return false;
+        }
+        pageService.updatePageByAi(kbId, slug, content, summary, rawId);
+        log.info("[Wiki] Phase B merge page slug='{}' done", slug);
+        return true;
     }
 
     /**
