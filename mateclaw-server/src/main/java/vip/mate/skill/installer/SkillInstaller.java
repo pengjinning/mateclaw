@@ -151,7 +151,8 @@ public class SkillInstaller {
             if (exists) {
                 workspaceManager.cleanWorkspaceDataDirs(skillName);
             }
-            workspaceManager.initWorkspace(skillName, bundle.content());
+            // 重装时 (exists=true) 覆写 SKILL.md；否则保留已有内容（向后兼容首次创建语义）
+            workspaceManager.initWorkspace(skillName, bundle.content(), exists);
 
             // 写入 references/
             if (bundle.references() != null) {

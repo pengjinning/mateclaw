@@ -9,6 +9,12 @@ import java.time.format.DateTimeFormatter;
  * <p>
  * 参考 Claude Code 的 prependUserContext 模式：将时间信息作为首条 meta UserMessage 注入，
  * 而非修改 System Prompt，以保持 prompt cache 命中率。
+ * <p>
+ * <b>RFC-014 协同要点</b>：本类返回的内容必须始终包装为 {@code UserMessage} 注入，
+ * 严禁拼接进 SystemMessage —— 否则每次时间变化都会击穿 spring-ai 的
+ * {@code AnthropicCacheStrategy.SYSTEM_AND_TOOLS / CONVERSATION_HISTORY} system cache。
+ * 内容长度（约 70 字符）远小于 spring-ai 的 USER min-content-length 阈值（≥1024 字符），
+ * 因此不会被错误纳入对话 cache 块。新增调用点时请保持此约束。
  */
 public final class RuntimeContextInjector {
 

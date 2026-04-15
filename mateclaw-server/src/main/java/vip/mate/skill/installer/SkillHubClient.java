@@ -93,6 +93,11 @@ public class SkillHubClient {
 
     /**
      * 获取 skill bundle 详情
+     * <p>
+     * 与 {@link #search} 共享同一套重试策略：408/429/5xx 状态码或 IO 异常时按
+     * 指数退避（800/1600/3200ms）重试，最多 {@code httpRetries} 次。
+     * 此外当 bundle 内容（{@code content}）为空时直接返回 null —— 空 bundle
+     * 重装会清空用户的 SKILL.md，是不可接受的"成功"。
      */
     public SkillBundle fetchBundle(String slug, String version) {
         String path = version != null && !version.isBlank()
@@ -100,27 +105,54 @@ public class SkillHubClient {
                 : "/api/v1/skills/" + slug;
         String url = properties.getBaseUrl() + path;
 
-        try {
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(url))
-                    .timeout(Duration.ofSeconds(properties.getHttpTimeout()))
-                    .GET()
-                    .header("Accept", "application/json")
-                    .header("User-Agent", "MateClaw/1.0")
-                    .build();
+        for (int attempt = 0; attempt <= properties.getHttpRetries(); attempt++) {
+            try {
+                HttpRequest request = HttpRequest.newBuilder()
+                        .uri(URI.create(url))
+                        .timeout(Duration.ofSeconds(properties.getHttpTimeout()))
+                        .GET()
+                        .header("Accept", "application/json")
+                        .header("User-Agent", "MateClaw/1.0")
+                        .build();
 
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+                HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+                int status = response.statusCode();
 
-            if (response.statusCode() == 200) {
-                return parseBundleResponse(response.body(), slug);
+                if (status == 200) {
+                    SkillBundle bundle = parseBundleResponse(response.body(), slug);
+                    if (bundle == null || bundle.content() == null || bundle.content().isBlank()) {
+                        log.warn("Hub fetchBundle returned empty content for '{}'; treat as failure to avoid wiping local SKILL.md", slug);
+                        return null;
+                    }
+                    return bundle;
+                }
+
+                if (isRetryable(status) && attempt < properties.getHttpRetries()) {
+                    log.warn("Hub fetchBundle attempt {} for '{}' failed with status {}, retrying...", attempt + 1, slug, status);
+                    Thread.sleep(backoffMs(attempt));
+                    continue;
+                }
+
+                log.warn("Hub fetchBundle failed for '{}': status {}", slug, status);
+                return null;
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return null;
+            } catch (Exception e) {
+                if (attempt < properties.getHttpRetries()) {
+                    log.warn("Hub fetchBundle attempt {} for '{}' error: {}, retrying...", attempt + 1, slug, e.getMessage());
+                    try {
+                        Thread.sleep(backoffMs(attempt));
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        return null;
+                    }
+                } else {
+                    log.error("Hub fetchBundle failed after {} attempts for '{}': {}", properties.getHttpRetries() + 1, slug, e.getMessage());
+                }
             }
-
-            log.warn("Hub fetchBundle failed for '{}': status {}", slug, response.statusCode());
-            return null;
-        } catch (Exception e) {
-            log.error("Hub fetchBundle error for '{}': {}", slug, e.getMessage());
-            return null;
         }
+        return null;
     }
 
     // ==================== 内部方法 ====================

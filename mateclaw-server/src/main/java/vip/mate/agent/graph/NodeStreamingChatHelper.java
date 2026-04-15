@@ -272,6 +272,9 @@ public class NodeStreamingChatHelper {
         AtomicReference<Throwable> errorRef = new AtomicReference<>();
         AtomicInteger promptTokens = new AtomicInteger(0);
         AtomicInteger completionTokens = new AtomicInteger(0);
+        // RFC-014: Anthropic prompt cache 计数（其它 provider 永远为 0）
+        AtomicInteger cacheReadTokens = new AtomicInteger(0);
+        AtomicInteger cacheWriteTokens = new AtomicInteger(0);
 
         // 重复检测器：检测 LLM 退化输出（如不断重复同一句话）
         RepetitionDetector contentRepDetector = new RepetitionDetector();
@@ -342,6 +345,10 @@ public class NodeStreamingChatHelper {
                         if (usage.getCompletionTokens() != null && usage.getCompletionTokens() > 0) {
                             completionTokens.set(usage.getCompletionTokens().intValue());
                         }
+                        // RFC-014: 反射抽取 Anthropic prompt cache 字段（DashScope/OpenAI 自然返回 0）
+                        var cache = vip.mate.llm.cache.CacheUsageExtractor.extract(usage);
+                        if (cache.cacheReadTokens() > 0)  cacheReadTokens.set(cache.cacheReadTokens());
+                        if (cache.cacheWriteTokens() > 0) cacheWriteTokens.set(cache.cacheWriteTokens());
                     }
                 })
                 .subscribe(
@@ -378,7 +385,8 @@ public class NodeStreamingChatHelper {
                                 phase, contentAccum.length(), thinkingAccum.length(),
                                 toolCallAccumulators.size(), conversationId);
                         return assembleStoppedResult(contentAccum, thinkingAccum, toolCallAccumulators,
-                                promptTokens.get(), completionTokens.get(), phase);
+                                promptTokens.get(), completionTokens.get(),
+                                cacheReadTokens.get(), cacheWriteTokens.get(), phase);
                     }
                     log.info("[{}] Stop requested during LLM call, no content accumulated, aborting: conversationId={}",
                             phase, conversationId);
@@ -410,7 +418,9 @@ public class NodeStreamingChatHelper {
                             buildDeltaJson("LLM 响应中断，使用已生成的部分内容继续"));
                 }
                 return assembleResult(contentAccum, thinkingAccum, toolCallAccumulators,
-                        promptTokens.get(), completionTokens.get(), phase, true, error.getMessage());
+                        promptTokens.get(), completionTokens.get(),
+                        cacheReadTokens.get(), cacheWriteTokens.get(),
+                        phase, true, error.getMessage());
             }
 
             // ===== 无内容：分类错误并决定是否重试 =====
@@ -460,14 +470,16 @@ public class NodeStreamingChatHelper {
             // warning 已在 dispose 时广播，无需重复
         }
         return assembleResult(contentAccum, thinkingAccum, toolCallAccumulators,
-                promptTokens.get(), completionTokens.get(), phase,
+                promptTokens.get(), completionTokens.get(),
+                cacheReadTokens.get(), cacheWriteTokens.get(), phase,
                 truncatedByRepetition, truncatedByRepetition ? "output_truncated_repetition" : null);
     }
 
     /** 组装 stopped partial 结果（用户主动停止，有已累积内容） */
     private StreamResult assembleStoppedResult(StringBuilder contentAccum, StringBuilder thinkingAccum,
                                                 List<ToolCallAccumulator> toolCallAccumulators,
-                                                int promptTok, int completionTok, String phase) {
+                                                int promptTok, int completionTok,
+                                                int cacheReadTok, int cacheWriteTok, String phase) {
         List<AssistantMessage.ToolCall> finalToolCalls = buildFinalToolCalls(toolCallAccumulators);
         String fullContent = contentAccum.toString();
         String fullThinking = thinkingAccum.toString();
@@ -487,13 +499,14 @@ public class NodeStreamingChatHelper {
 
         return new StreamResult(fullContent, fullThinking, assembledMessage,
                 finalToolCalls, !finalToolCalls.isEmpty(), promptTok, completionTok,
-                true, null, ErrorType.NONE, true);
+                true, null, ErrorType.NONE, true, cacheReadTok, cacheWriteTok);
     }
 
     /** 组装最终 StreamResult（成功或 partial） */
     private StreamResult assembleResult(StringBuilder contentAccum, StringBuilder thinkingAccum,
                                          List<ToolCallAccumulator> toolCallAccumulators,
                                          int promptTok, int completionTok,
+                                         int cacheReadTok, int cacheWriteTok,
                                          String phase, boolean partial, String errorMsg) {
         List<AssistantMessage.ToolCall> finalToolCalls = buildFinalToolCalls(toolCallAccumulators);
         String fullContent = contentAccum.toString();
@@ -522,7 +535,7 @@ public class NodeStreamingChatHelper {
 
         return new StreamResult(fullContent, fullThinking, assembledMessage,
                 finalToolCalls, !finalToolCalls.isEmpty(), promptTok, completionTok,
-                partial, errorMsg, ErrorType.NONE);
+                partial, errorMsg, ErrorType.NONE, false, cacheReadTok, cacheWriteTok);
     }
 
     /** 构建纯错误 StreamResult（无任何内容） */
@@ -685,14 +698,18 @@ public class NodeStreamingChatHelper {
             /** 错误类型分类 */
             ErrorType errorType,
             /** 用户主动停止（stopRequested）导致的提前返回 */
-            boolean stopped
+            boolean stopped,
+            /** RFC-014: Anthropic prompt cache 命中字节数（其它 provider 为 0） */
+            int cacheReadTokens,
+            /** RFC-014: Anthropic prompt cache 写入字节数（其它 provider 为 0） */
+            int cacheWriteTokens
     ) {
         /** 兼容旧调用方 — 无 partial/error/stopped 的正常结果 */
         public StreamResult(String text, String thinking, AssistantMessage assistantMessage,
                             List<AssistantMessage.ToolCall> toolCalls, boolean hasToolCalls,
                             int promptTokens, int completionTokens) {
             this(text, thinking, assistantMessage, toolCalls, hasToolCalls,
-                    promptTokens, completionTokens, false, null, ErrorType.NONE, false);
+                    promptTokens, completionTokens, false, null, ErrorType.NONE, false, 0, 0);
         }
 
         /** 兼容 10-arg 调用点 */
@@ -701,7 +718,17 @@ public class NodeStreamingChatHelper {
                             int promptTokens, int completionTokens,
                             boolean partial, String errorMessage, ErrorType errorType) {
             this(text, thinking, assistantMessage, toolCalls, hasToolCalls,
-                    promptTokens, completionTokens, partial, errorMessage, errorType, false);
+                    promptTokens, completionTokens, partial, errorMessage, errorType, false, 0, 0);
+        }
+
+        /** 兼容 12-arg 调用点（pre-RFC-014） */
+        public StreamResult(String text, String thinking, AssistantMessage assistantMessage,
+                            List<AssistantMessage.ToolCall> toolCalls, boolean hasToolCalls,
+                            int promptTokens, int completionTokens,
+                            boolean partial, String errorMessage, ErrorType errorType,
+                            boolean stopped) {
+            this(text, thinking, assistantMessage, toolCalls, hasToolCalls,
+                    promptTokens, completionTokens, partial, errorMessage, errorType, stopped, 0, 0);
         }
 
         /** 是否有不可忽略的错误（无内容 + 有错误） */

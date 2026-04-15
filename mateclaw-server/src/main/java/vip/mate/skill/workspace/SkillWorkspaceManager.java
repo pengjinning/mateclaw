@@ -93,13 +93,26 @@ public class SkillWorkspaceManager {
     // ==================== 生命周期操作 ====================
 
     /**
-     * 初始化 skill 工作区目录
+     * 初始化 skill 工作区目录（兼容旧调用：overwrite=false）
      *
      * @param skillName      skill 名称
      * @param initialContent SKILL.md 初始内容（可为 null）
      * @return 创建的工作区路径
      */
     public Path initWorkspace(String skillName, String initialContent) {
+        return initWorkspace(skillName, initialContent, false);
+    }
+
+    /**
+     * 初始化 skill 工作区目录
+     *
+     * @param skillName      skill 名称
+     * @param initialContent SKILL.md 初始内容（可为 null）
+     * @param overwrite      true 时无条件覆写 SKILL.md（用于重装 / 导出场景），
+     *                       false 时仅在 SKILL.md 不存在时写入（用于首次创建）
+     * @return 创建的工作区路径
+     */
+    public Path initWorkspace(String skillName, String initialContent, boolean overwrite) {
         Path workspaceDir = resolveConventionPath(skillName);
         try {
             Files.createDirectories(workspaceDir);
@@ -107,14 +120,14 @@ public class SkillWorkspaceManager {
             Files.createDirectories(workspaceDir.resolve("scripts"));
 
             Path skillMd = workspaceDir.resolve("SKILL.md");
-            if (!Files.exists(skillMd)) {
+            if (overwrite || !Files.exists(skillMd)) {
                 String content = (initialContent != null && !initialContent.isBlank())
                         ? initialContent
                         : buildDefaultSkillMd(skillName);
                 Files.writeString(skillMd, content);
             }
 
-            log.info("Initialized skill workspace: {}", workspaceDir);
+            log.info("Initialized skill workspace: {} (overwrite={})", workspaceDir, overwrite);
             eventPublisher.publishEvent(new SkillWorkspaceEvent(skillName, SkillWorkspaceEvent.Type.CREATED, workspaceDir));
             return workspaceDir;
         } catch (IOException e) {
@@ -151,18 +164,11 @@ public class SkillWorkspaceManager {
      * 将数据库 skill 内容导出到工作区目录
      */
     public Path exportToWorkspace(String skillName, String skillContent) {
-        Path workspaceDir = initWorkspace(skillName, skillContent);
+        // 始终覆写 SKILL.md（initWorkspace 内部已写入），无需再做一次冗余 IO
+        Path workspaceDir = initWorkspace(skillName, skillContent, true);
         if (workspaceDir != null) {
-            try {
-                // 覆盖写入 SKILL.md
-                if (skillContent != null && !skillContent.isBlank()) {
-                    Files.writeString(workspaceDir.resolve("SKILL.md"), skillContent);
-                }
-                log.info("Exported skill '{}' to workspace: {}", skillName, workspaceDir);
-                eventPublisher.publishEvent(new SkillWorkspaceEvent(skillName, SkillWorkspaceEvent.Type.EXPORTED, workspaceDir));
-            } catch (IOException e) {
-                log.warn("Failed to export skill '{}': {}", skillName, e.getMessage());
-            }
+            log.info("Exported skill '{}' to workspace: {}", skillName, workspaceDir);
+            eventPublisher.publishEvent(new SkillWorkspaceEvent(skillName, SkillWorkspaceEvent.Type.EXPORTED, workspaceDir));
         }
         return workspaceDir;
     }

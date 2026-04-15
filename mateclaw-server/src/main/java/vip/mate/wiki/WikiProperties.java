@@ -40,6 +40,16 @@ public class WikiProperties {
      */
     private int maxParallelChunks = 5;
 
+    /**
+     * 单个 chunk 内 phase B 阶段的 page 并行处理数上限。
+     * <p>
+     * RFC-012 follow-up #3：原实现 phase B 的 create / merge 循环逐页串行调用 LLM，
+     * 单 chunk N 个 page 就要串行 N 次 LLM 调用——一个卡超时整条流水线停摆。
+     * 改为受此 Semaphore 控制的并行，默认 3。结合 maxParallelRawMaterials × maxParallelChunks
+     * × maxParallelPhaseBPages = 3 × 5 × 3 = 45 的理论最大并发，实际按 LLM 限流为准。
+     */
+    private int maxParallelPhaseBPages = 3;
+
     /** 注入 agent prompt 的最大字符数 */
     private int maxContextChars = 10000;
 

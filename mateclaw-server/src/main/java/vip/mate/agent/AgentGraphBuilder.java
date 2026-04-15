@@ -125,6 +125,7 @@ public class AgentGraphBuilder {
     private final vip.mate.llm.chatgpt.ChatGPTResponsesClient chatGPTResponsesClient;
     private final WikiContextService wikiContextService;
     private final vip.mate.workspace.core.service.WorkspaceService workspaceService;
+    private final vip.mate.llm.cache.AnthropicCacheOptionsFactory anthropicCacheOptionsFactory;
 
     /**
      * 根据 AgentEntity 构建完整的 Agent 实例
@@ -463,9 +464,24 @@ public class AgentGraphBuilder {
 
     /**
      * 构建运行时 ChatModel（不包装为 ChatClient）
-     * 用于 StateGraph 节点直接调用
+     * 用于 StateGraph 节点直接调用。使用注入的共享 {@link #retryTemplate} 作为 Spring AI
+     * 内层重试策略。
      */
     public ChatModel buildRuntimeChatModel(ModelConfigEntity runtimeModel) {
+        return buildRuntimeChatModel(runtimeModel, this.retryTemplate);
+    }
+
+    /**
+     * 构建运行时 ChatModel，并指定自定义的 Spring AI {@link RetryTemplate}。
+     * <p>
+     * 用于调用方（如 Wiki 消化管线）已经有自己的外层重试策略，
+     * 希望绕过 Spring AI 内层重试、独占重试控制权的场景：传入
+     * {@code RetryTemplate.builder().maxAttempts(1).build()} 即可把内层降级为"只跑一次"。
+     * <p>
+     * DashScope 和 OpenAI-ChatGPT 分支不走 Spring AI 的 RetryTemplate 接口，
+     * 本参数对它们无效（它们各自有内部重试或直通）。
+     */
+    public ChatModel buildRuntimeChatModel(ModelConfigEntity runtimeModel, RetryTemplate retryOverride) {
         ModelProviderEntity provider = modelProviderService.getProviderConfig(runtimeModel.getProvider());
         ModelProtocol protocol = ModelProtocol.fromChatModel(provider.getChatModel());
 
@@ -490,7 +506,7 @@ public class AgentGraphBuilder {
             return OpenAiChatModel.builder()
                     .openAiApi(api)
                     .defaultOptions(options)
-                    .retryTemplate(retryTemplate)
+                    .retryTemplate(retryOverride)
                     .observationRegistry(observationRegistryProvider.getIfAvailable(() -> ObservationRegistry.NOOP))
                     .build();
         }
@@ -501,7 +517,7 @@ public class AgentGraphBuilder {
             return AnthropicChatModel.builder()
                     .anthropicApi(api)
                     .defaultOptions(options)
-                    .retryTemplate(retryTemplate)
+                    .retryTemplate(retryOverride)
                     .observationRegistry(observationRegistryProvider.getIfAvailable(() -> ObservationRegistry.NOOP))
                     .build();
         }
@@ -981,6 +997,11 @@ public class AgentGraphBuilder {
                 builder.maxTokens(4096);
             }
         }
+        // RFC-014: 接入 Anthropic prompt caching（spring-ai 1.1.4 一等支持）
+        // 通过 cacheOptions 配置 system / tools / conversation history 自动打 cache_control，
+        // 多轮对话场景可节省 50–75% 输入 token 成本。
+        builder.cacheOptions(anthropicCacheOptionsFactory.build());
+
         return builder.internalToolExecutionEnabled(false).build();
     }
 

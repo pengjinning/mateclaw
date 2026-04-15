@@ -616,6 +616,8 @@ CREATE TABLE IF NOT EXISTS mate_usage_daily (
     total_tokens       BIGINT   DEFAULT 0,
     prompt_tokens      BIGINT   DEFAULT 0,
     completion_tokens  BIGINT   DEFAULT 0,
+    cache_read_tokens  BIGINT   DEFAULT 0,    -- RFC-014: anthropic cache_read_input_tokens
+    cache_write_tokens BIGINT   DEFAULT 0,    -- RFC-014: anthropic cache_creation_input_tokens
     tool_call_count    INT      DEFAULT 0,
     error_count        INT      DEFAULT 0,
     create_time        DATETIME NOT NULL

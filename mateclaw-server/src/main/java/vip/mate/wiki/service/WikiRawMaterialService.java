@@ -18,6 +18,8 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Wiki 原始材料服务
@@ -34,6 +36,17 @@ public class WikiRawMaterialService {
     private final WikiProperties properties;
     private final ApplicationEventPublisher eventPublisher;
     private final DocumentExtractTool documentExtractTool;
+
+    /**
+     * RFC-012 follow-up #3：从 partial 状态触发的 reprocess 会在此 set 中打标，
+     * 供 {@link vip.mate.wiki.service.WikiProcessingService#processRawMaterial(Long, boolean)}
+     * 在 claim 之前消费，从而决定是否保留已生成的 exclusive page（续传语义）。
+     * <p>
+     * 内存态：server 重启会丢，但原 raw 的 status 已被 reprocess 改为 pending，
+     * 重启后按正常 pending 流程跑（退化为「不删旧页的全量重跑」，功能不丢失只是
+     * 没有走 route 的 "update" 识别路径）。
+     */
+    private final Set<Long> partialResumeIds = ConcurrentHashMap.newKeySet();
 
     public List<WikiRawMaterialEntity> listByKbId(Long kbId) {
         List<WikiRawMaterialEntity> list = rawMapper.selectList(
@@ -227,7 +240,10 @@ public class WikiRawMaterialService {
     }
 
     /**
-     * 重新处理：重置状态为 pending 并发布事件
+     * 重新处理：重置状态为 pending 并发布事件。
+     * <p>
+     * 如果之前状态是 {@code partial}，把 rawId 加入 {@link #partialResumeIds}，
+     * 下游的 WikiProcessingService 会据此决定是否保留已生成的 exclusive page（续传语义）。
      */
     @Transactional
     public void reprocess(Long id) {
@@ -235,12 +251,28 @@ public class WikiRawMaterialService {
         if (entity == null) {
             throw new IllegalArgumentException("Raw material not found: " + id);
         }
+        boolean wasPartial = "partial".equals(entity.getProcessingStatus());
         entity.setProcessingStatus("pending");
         entity.setErrorMessage(null);
         rawMapper.updateById(entity);
 
+        if (wasPartial) {
+            partialResumeIds.add(id);
+            log.info("[Wiki] Raw material queued for PARTIAL RESUME: id={} (existing pages will be kept)", id);
+        } else {
+            log.info("[Wiki] Raw material queued for reprocessing: id={}", id);
+        }
         eventPublisher.publishEvent(new WikiProcessingEvent(this, entity.getId(), entity.getKbId()));
-        log.info("[Wiki] Raw material queued for reprocessing: id={}", id);
+    }
+
+    /**
+     * 消费 partial resume 标记：若存在则返回 true 并从 set 中移除（一次性）。
+     * <p>
+     * 必须在 {@link #claimForProcessing(Long)} 之前调用：claim 会把 status 改成 processing，
+     * 此时已无法区分 raw 原本是从 partial 还是从 failed/pending 过来的。
+     */
+    public boolean consumePartialResumeFlag(Long id) {
+        return partialResumeIds.remove(id);
     }
 
     @Transactional

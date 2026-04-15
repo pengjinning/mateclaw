@@ -18,6 +18,10 @@ public class UsageDailyEntity {
     private Long totalTokens;
     private Long promptTokens;
     private Long completionTokens;
+    /** RFC-014: Anthropic cache_read_input_tokens 累计 */
+    private Long cacheReadTokens;
+    /** RFC-014: Anthropic cache_creation_input_tokens 累计 */
+    private Long cacheWriteTokens;
     private Integer toolCallCount;
     private Integer errorCount;
     @TableField(fill = FieldFill.INSERT)

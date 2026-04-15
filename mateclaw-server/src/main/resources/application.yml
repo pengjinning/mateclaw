@@ -113,6 +113,18 @@ mateclaw:
   plugin:
     enabled: true
     user-dir: ${user.home}/.mateclaw/plugins
+  # RFC-014: Anthropic prompt cache 标记
+  llm:
+    cache:
+      enabled: true                # 总开关；false 时全部走 NoOp
+      min-prompt-tokens: 1024      # 累计 prompt token 低于此值则跳过缓存（避免 cache write 倒亏）
+      max-breakpoints: 4           # 单请求最多打几个 cache_control 断点（Anthropic 上限 4）
+      ttl: DEFAULT                 # DEFAULT(5min) | EXTENDED_1H（需要 anthropic-beta header）
+      include-tools-block: true    # 工具 schema 段是否独立打断点（CONVERSATION_HISTORY 策略）
+      adaptive:
+        enabled: true              # 自适应降级（连续 miss 后短路到 NoOp，冷却后恢复）
+        miss-threshold: 5
+        cool-down-ms: 60000
 
 # MateClaw Agent 配置
 mate:
@@ -145,6 +157,7 @@ mate:
     max-chunk-size: 30000               # LLM 单次处理最大字符数（超过则分块）
     max-context-chars: 10000            # 注入 Agent prompt 的 Wiki 摘要最大字符数
     max-pages-per-raw: 15               # 单个原始材料最多生成的 Wiki 页面数
+    max-parallel-phase-b-pages: 3       # RFC-012 follow-up #3：单 chunk 内 phase B 阶段并行处理的 page 数
     auto-process-on-upload: true        # 上传原始材料后是否自动触发 AI 消化
     upload-dir: ./data/wiki-uploads     # 上传文件存储目录
     max-scan-files: 500                 # 目录扫描最大文件数

@@ -132,6 +132,38 @@ public class WikiPageService {
                         .eq(WikiPageEntity::getSlug, slug));
     }
 
+    /**
+     * 把 slug 规范化为 canonical 形式：去掉所有连字符 / 下划线 + 转小写。
+     * <p>
+     * 用于跨拼写匹配：{@code "shennong-bencao-jing"} 和 {@code "shen-nong-ben-cao-jing"}
+     * 都规范化为 {@code "shennongbencaojing"}，被视为同一概念。LLM 在并行处理大文档时
+     * 经常对同一概念给出不同 slug 拼写（按词分组 vs 按字分隔），这是兜底归一逻辑的基础。
+     */
+    public static String canonicalSlug(String slug) {
+        if (slug == null) return "";
+        return slug.toLowerCase().replace("-", "").replace("_", "");
+    }
+
+    /**
+     * 按 canonical slug 在指定 KB 中查找已存在的 page。
+     * <p>
+     * 命中条件：现有 page 的 slug 经 {@link #canonicalSlug(String)} 后与给定 slug 的
+     * canonical 形式相等。复用 {@link #listSummaries(Long)} 的 5 分钟缓存，命中后再
+     * {@link #getBySlug(Long, String)} 拿完整 entity，避免额外全表扫描。
+     *
+     * @return 第一个 canonical 匹配的 page；找不到返回 {@code null}
+     */
+    public WikiPageEntity findByCanonicalSlug(Long kbId, String slug) {
+        String canonical = canonicalSlug(slug);
+        if (canonical.isEmpty()) return null;
+        for (WikiPageEntity p : listSummaries(kbId)) {
+            if (canonicalSlug(p.getSlug()).equals(canonical)) {
+                return getBySlug(kbId, p.getSlug());
+            }
+        }
+        return null;
+    }
+
     public WikiPageEntity getById(Long id) {
         return pageMapper.selectById(id);
     }

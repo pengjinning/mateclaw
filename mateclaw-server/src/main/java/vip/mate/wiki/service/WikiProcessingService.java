@@ -9,6 +9,7 @@ import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.prompt.Prompt;
+import org.springframework.retry.support.RetryTemplate;
 import org.springframework.stereotype.Service;
 import vip.mate.agent.AgentGraphBuilder;
 import vip.mate.agent.prompt.PromptLoader;
@@ -18,6 +19,7 @@ import vip.mate.wiki.WikiProperties;
 import vip.mate.wiki.model.WikiKnowledgeBaseEntity;
 import vip.mate.wiki.model.WikiPageEntity;
 import vip.mate.wiki.model.WikiRawMaterialEntity;
+import vip.mate.wiki.sse.WikiProgressBus;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -48,6 +50,7 @@ public class WikiProcessingService {
     private final ModelConfigService modelConfigService;
     private final AgentGraphBuilder agentGraphBuilder;
     private final ObjectMapper objectMapper;
+    private final WikiProgressBus progressBus;
 
     /** 并行 chunk / 材料处理执行器（JDK 21 虚拟线程）；Listener 跨包需要引用，故 public */
     public static final ExecutorService WIKI_EXECUTOR = Executors.newVirtualThreadPerTaskExecutor();
@@ -61,7 +64,19 @@ public class WikiProcessingService {
     private static final class ProgressCounter {
         final AtomicInteger total = new AtomicInteger(0);
         final AtomicInteger done = new AtomicInteger(0);
+        /** Page-level 失败计数（chunk 内单页 create / merge 抛异常）。
+         *  注：DuplicateKeyException 触发的 fallback-to-update 不算 failure，
+         *  内容仍合入了同 slug page。仅 LLM 调用爆炸、JSON 解析失败、内容为空等真失败才递增。 */
+        final AtomicInteger failed = new AtomicInteger(0);
         final AtomicBoolean phaseBStarted = new AtomicBoolean(false);
+        /**
+         * 跨 chunk slug 抢占表：canonical slug → 第一个声明该概念的实际 slug。
+         * <p>
+         * 解决 LLM 在并行 chunk 中给同一概念起不同 slug 拼写（按词分组 vs 按字分隔）的问题。
+         * 使用 {@link ConcurrentHashMap#computeIfAbsent} 实现原子抢占：先到的 chunk 把自己的
+         * slug 注册为 winner，后到的 chunk 看到 winner 后会把内容写入 winner 对应的 page。
+         */
+        final ConcurrentHashMap<String, String> slugClaims = new ConcurrentHashMap<>();
     }
 
     private final ConcurrentHashMap<Long, ProgressCounter> progressCounters = new ConcurrentHashMap<>();
@@ -80,6 +95,12 @@ public class WikiProcessingService {
      * @param force 为 true 时忽略 content_hash 短路（RFC-012 Change 5），用于模型/提示词变更后的强制重跑
      */
     public void processRawMaterial(Long rawId, boolean force) {
+        // RFC-012 follow-up #3：消费续传标志（reprocess() 把 partial 改回 pending 之前打的标）。
+        // 必须在 claimForProcessing 之前读，因为 claim 会把状态再改一次。
+        // flag 只在内存中，server 重启会丢 → 重启后仍按 pending 走正常流程（退化为全量重跑，
+        // 功能不丢失只是性能回退）。
+        boolean isPartialResume = rawService.consumePartialResumeFlag(rawId);
+
         // CAS 式抢占：防止并发重复处理
         if (!rawService.claimForProcessing(rawId)) {
             log.debug("[Wiki] Raw material {} already claimed or not pending, skipping", rawId);
@@ -113,6 +134,10 @@ public class WikiProcessingService {
         progressCounters.put(rawId, new ProgressCounter());
         rawService.updateProgress(rawId, "route", 0, 0); // UI 立即看到 indeterminate 滑条
 
+        // RFC-012 M3：广播 raw.started（前端切到 indeterminate 进度条）
+        progressBus.broadcast(kb.getId(), WikiProgressBus.EVENT_RAW_STARTED,
+                java.util.Map.of("rawId", rawId, "phase", "route"));
+
         try {
             // Phase 1: 获取文本内容
             String textContent = rawService.getTextContent(raw);
@@ -123,9 +148,19 @@ public class WikiProcessingService {
             }
 
             // Phase 2: 清除该材料之前生成的旧页面（仅独占+非手工页面）
-            int cleaned = pageService.deleteExclusiveBySourceRawId(kb.getId(), rawId);
-            if (cleaned > 0) {
-                log.info("[Wiki] Cleaned {} exclusive old pages for raw material {} before reprocessing", cleaned, rawId);
+            // RFC-012 follow-up #3：partial 状态走「续传」路径 —— 保留已生成的 page，让
+            // route 阶段通过 existingPagesIndex 把它们归到 update 列表（phase B merge 覆盖
+            // 当前 chunk 内容），失败的 slug 在 DB 里不存在，LLM 会放进 create 列表重跑。
+            // isPartialResume 标记在 rawService.reprocess() 中写入 in-memory 集合，由
+            // rawService.consumePartialResumeFlag() 在 claim 之前消费掉；无法通过
+            // raw.getProcessingStatus() 判断是因为 claimForProcessing 已经把它改成 "processing"。
+            if (isPartialResume) {
+                log.info("[Wiki] Partial resume for raw={}: keeping existing pages, LLM will merge new content into them via existingPagesIndex", rawId);
+            } else {
+                int cleaned = pageService.deleteExclusiveBySourceRawId(kb.getId(), rawId);
+                if (cleaned > 0) {
+                    log.info("[Wiki] Cleaned {} exclusive old pages for raw material {} before reprocessing", cleaned, rawId);
+                }
             }
 
             // Phase 3: 构建已有页面索引（一次构建，所有 chunk 共用）
@@ -146,16 +181,36 @@ public class WikiProcessingService {
             int totalChunks = result[2];
 
             // Phase 3: 更新状态和计数
+            // 读 page 级失败数（finally 之前读，finally 才 remove counter）
+            ProgressCounter pcFinal = progressCounters.get(rawId);
+            int failedPages = pcFinal != null ? pcFinal.failed.get() : 0;
+
+            String finalStatus;
+            String finalDetail = null;
             if (totalPages == 0) {
                 rawService.updateProcessingStatus(rawId, "failed", "No pages generated from LLM response");
-            } else if (failedChunks > 0) {
-                // 部分成功：有些 chunk 失败但有些产出了页面
-                rawService.updateProcessingStatus(rawId, "partial",
-                        failedChunks + " of " + totalChunks + " chunks failed, " + totalPages + " pages generated");
+                finalStatus = "failed";
+                finalDetail = "No pages generated from LLM response";
+            } else if (failedChunks > 0 || failedPages > 0) {
+                // 部分成功：chunk 整体失败 或 chunk 内有 page 失败
+                // （M2 v2 follow-up：page 级失败原本被计入 completed，现在正确归 partial）
+                StringBuilder detail = new StringBuilder();
+                if (failedChunks > 0) {
+                    detail.append(failedChunks).append(" of ").append(totalChunks).append(" chunks failed");
+                }
+                if (failedPages > 0) {
+                    if (detail.length() > 0) detail.append("; ");
+                    detail.append(failedPages).append(" page(s) failed");
+                }
+                detail.append(", ").append(totalPages).append(" pages generated");
+                finalDetail = detail.toString();
+                rawService.updateProcessingStatus(rawId, "partial", finalDetail);
+                finalStatus = "partial";
                 // 【Review Bug 1】partial 不写 lastProcessedHash：partial 的语义就是"还有失败、需要再跑"，
                 // 写了会导致下次用户点"重新处理"被 hash 短路直接跳过，永远没机会修失败的 chunk。
             } else {
                 rawService.updateProcessingStatus(rawId, "completed", null);
+                finalStatus = "completed";
                 // RFC-012 Change 5：记录本次成功处理时的 hash，供下次短路判断
                 if (raw.getContentHash() != null) {
                     rawService.setLastProcessedHash(rawId, raw.getContentHash());
@@ -165,6 +220,19 @@ public class WikiProcessingService {
             kbService.setPageCount(kb.getId(), pageCount);
             kbService.updateStatus(kb.getId(), "active");
 
+            // RFC-012 M3：广播终态
+            if ("failed".equals(finalStatus)) {
+                progressBus.broadcast(kb.getId(), WikiProgressBus.EVENT_RAW_FAILED,
+                        java.util.Map.of("rawId", rawId, "error", finalDetail == null ? "" : finalDetail));
+            } else {
+                progressBus.broadcast(kb.getId(), WikiProgressBus.EVENT_RAW_COMPLETED,
+                        java.util.Map.of(
+                                "rawId", rawId,
+                                "status", finalStatus,
+                                "totalPages", totalPages,
+                                "kbPageCount", pageCount));
+            }
+
             log.info("[Wiki] Processing completed for raw={}, kbId={}, generatedPages={}, totalPages={}",
                     rawId, kb.getId(), totalPages, pageCount);
 
@@ -172,6 +240,9 @@ public class WikiProcessingService {
             log.error("[Wiki] Processing failed for raw={}: {}", rawId, e.getMessage(), e);
             rawService.updateProcessingStatus(rawId, "failed", e.getMessage());
             kbService.updateStatus(kb.getId(), "active");
+            // RFC-012 M3：广播异常终态
+            progressBus.broadcast(kb.getId(), WikiProgressBus.EVENT_RAW_FAILED,
+                    java.util.Map.of("rawId", rawId, "error", e.getMessage() == null ? "unknown" : e.getMessage()));
         } finally {
             // RFC-012 M2 v2 UI v2：写入最终进度并清理共享计数器
             ProgressCounter pc = progressCounters.remove(rawId);
@@ -422,8 +493,9 @@ public class WikiProcessingService {
             return 0;
         }
 
-        int created = 0;
-        int updated = 0;
+        // RFC-012 follow-up #3：phase B 现在并行执行，计数必须是 atomic
+        AtomicInteger created = new AtomicInteger(0);
+        AtomicInteger updated = new AtomicInteger(0);
 
         // ─── 收集 route 输出（仅 metadata，无 content） ───
         List<JsonNode> createMetas = new ArrayList<>();
@@ -453,46 +525,113 @@ public class WikiProcessingService {
             pc.total.addAndGet(totalPlanned);
             if (pc.phaseBStarted.compareAndSet(false, true)) {
                 log.info("[Wiki] Progress: switching to phase-b for raw={}", rawId);
+                // RFC-012 M3：route 完成、phase-b 启动 → 通知前端确定进度（可显示 0/N）
+                progressBus.broadcast(kbId, WikiProgressBus.EVENT_ROUTE_DONE,
+                        java.util.Map.of(
+                                "rawId", rawId,
+                                "phase", "phase-b",
+                                "done", pc.done.get(),
+                                "total", pc.total.get()));
             }
             rawService.updateProgress(rawId, "phase-b", pc.done.get(), pc.total.get());
         }
 
-        // ─── 阶段 B-1：逐页 create（每页一次单独 LLM call，输入/输出都是单页规模） ───
+        // RFC-012 follow-up #3：阶段 B 页级并发。每个 page 是独立的 LLM 调用，相互无依赖，
+        // 串行跑会让一个卡超时的 page 阻塞整个 chunk。受 maxParallelPhaseBPages Semaphore 约束，
+        // 复用虚拟线程池 WIKI_EXECUTOR。
+        int parallelPages = Math.max(1, properties.getMaxParallelPhaseBPages());
+        Semaphore pageSem = new Semaphore(parallelPages);
+
+        // ─── 阶段 B-1：并行 create ───
+        List<CompletableFuture<Void>> createFutures = new ArrayList<>(createMetas.size());
         for (JsonNode meta : createMetas) {
-            try {
-                if (createOnePage(kb, raw, textContent, existingPagesIndex, meta)) {
-                    created++;
+            final JsonNode metaRef = meta;
+            createFutures.add(CompletableFuture.runAsync(() -> {
+                try {
+                    pageSem.acquire();
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    return;
                 }
-            } catch (RuntimeException e) {
-                log.warn("[Wiki] Phase B create page slug='{}' failed: {}",
-                        meta.path("slug").asText(""), e.getMessage());
-            }
-            // 无论成功失败都推进 done 计数，避免失败页卡死 UI 进度
-            if (pc != null) {
-                int d = pc.done.incrementAndGet();
-                rawService.updateProgress(rawId, "phase-b", d, pc.total.get());
-            }
+                boolean ok = false;
+                try {
+                    try {
+                        if (createOnePage(kb, raw, textContent, existingPagesIndex, metaRef)) {
+                            created.incrementAndGet();
+                        }
+                        // createOnePage 内部的 DuplicateKey / canonical / claim fallback 不抛异常 → ok=true。
+                        ok = true;
+                    } catch (RuntimeException e) {
+                        log.warn("[Wiki] Phase B create page slug='{}' failed: {}",
+                                metaRef.path("slug").asText(""), e.getMessage());
+                    }
+                    if (pc != null) {
+                        int d = pc.done.incrementAndGet();
+                        if (!ok) pc.failed.incrementAndGet();
+                        rawService.updateProgress(rawId, "phase-b", d, pc.total.get());
+                        progressBus.broadcast(kbId, WikiProgressBus.EVENT_CHUNK_DONE,
+                                java.util.Map.of(
+                                        "rawId", rawId,
+                                        "kind", "create",
+                                        "ok", ok,
+                                        "done", d,
+                                        "total", pc.total.get()));
+                    }
+                } finally {
+                    pageSem.release();
+                }
+            }, WIKI_EXECUTOR));
         }
 
-        // ─── 阶段 B-2：逐页 merge（每页一次单独 LLM call） ───
+        // ─── 阶段 B-2：并行 merge ───
+        List<CompletableFuture<Void>> mergeFutures = new ArrayList<>(updateSlugs.size());
         for (String slug : updateSlugs) {
-            try {
-                if (mergeOnePage(kb, raw, textContent, slug)) {
-                    updated++;
+            final String mergeSlug = slug;
+            mergeFutures.add(CompletableFuture.runAsync(() -> {
+                try {
+                    pageSem.acquire();
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    return;
                 }
-            } catch (RuntimeException e) {
-                log.warn("[Wiki] Phase B merge page slug='{}' failed: {}", slug, e.getMessage());
-            }
-            if (pc != null) {
-                int d = pc.done.incrementAndGet();
-                rawService.updateProgress(rawId, "phase-b", d, pc.total.get());
-            }
+                boolean ok = false;
+                try {
+                    try {
+                        if (mergeOnePage(kb, raw, textContent, mergeSlug)) {
+                            updated.incrementAndGet();
+                        }
+                        ok = true;
+                    } catch (RuntimeException e) {
+                        log.warn("[Wiki] Phase B merge page slug='{}' failed: {}", mergeSlug, e.getMessage());
+                    }
+                    if (pc != null) {
+                        int d = pc.done.incrementAndGet();
+                        if (!ok) pc.failed.incrementAndGet();
+                        rawService.updateProgress(rawId, "phase-b", d, pc.total.get());
+                        progressBus.broadcast(kbId, WikiProgressBus.EVENT_CHUNK_DONE,
+                                java.util.Map.of(
+                                        "rawId", rawId,
+                                        "kind", "merge",
+                                        "ok", ok,
+                                        "done", d,
+                                        "total", pc.total.get()));
+                    }
+                } finally {
+                    pageSem.release();
+                }
+            }, WIKI_EXECUTOR));
         }
+
+        // 等待本 chunk 的 create + merge 全部完成
+        List<CompletableFuture<Void>> allFutures = new ArrayList<>(createFutures.size() + mergeFutures.size());
+        allFutures.addAll(createFutures);
+        allFutures.addAll(mergeFutures);
+        CompletableFuture.allOf(allFutures.toArray(new CompletableFuture[0])).join();
         // 单 chunk 完成时不写"done"——多 chunk 还在跑；最终"done"由 processRawMaterial 的 finally 写入
 
         log.info("[Wiki] Two-phase digest applied: kbId={}, rawId={}, created={}, updated={}",
-                kbId, rawId, created, updated);
-        return created + updated;
+                kbId, rawId, created.get(), updated.get());
+        return created.get() + updated.get();
     }
 
     /**
@@ -544,7 +683,44 @@ public class WikiProcessingService {
             return false;
         }
 
-        // 兜底：如果 slug 已存在（route 误判 / 并发），走 update 而不是 create
+        // 兜底 0：跨拼写 canonical 匹配（DB 已有 page，但 slug 拼写不同）
+        //   覆盖场景：之前上传的 raw 已经创建了同概念 page，本次 LLM 给了不同拼写
+        WikiPageEntity existingByCanonical = pageService.findByCanonicalSlug(kbId, slug);
+        if (existingByCanonical != null && !existingByCanonical.getSlug().equals(slug)) {
+            String actualSlug = existingByCanonical.getSlug();
+            pageService.updatePageByAi(kbId, actualSlug, content, pageSummary, rawId);
+            log.info("[Wiki] Phase B create slug='{}' canonical-matches existing '{}', updated",
+                    slug, actualSlug);
+            return false;
+        }
+
+        // 兜底 0.5：跨 chunk in-flight slug 抢占（同一 raw 的另一并发 chunk 已声明同概念）
+        //   computeIfAbsent 是原子操作，先到的 chunk 把自己 slug 注册为 winner
+        ProgressCounter pcLocal = progressCounters.get(rawId);
+        String canonical = WikiPageService.canonicalSlug(slug);
+        if (pcLocal != null && !canonical.isEmpty()) {
+            // lambda 要求 effectively final，用 finalSlug 副本
+            final String routedSlug = slug;
+            String winnerSlug = pcLocal.slugClaims.computeIfAbsent(canonical, k -> routedSlug);
+            if (!winnerSlug.equals(slug)) {
+                // 另一 chunk 先 claim 了同 canonical，但用了不同 slug 拼写
+                WikiPageEntity winner = pageService.getBySlug(kbId, winnerSlug);
+                if (winner != null) {
+                    // winner 已 INSERT 进 DB → 直接 update
+                    pageService.updatePageByAi(kbId, winnerSlug, content, pageSummary, rawId);
+                    log.info("[Wiki] Phase B create slug='{}' lost slug-claim race to '{}', updated",
+                            slug, winnerSlug);
+                    return false;
+                }
+                // winner claim 早于 INSERT（claim 是 in-memory，INSERT 是 DB IO）
+                // → 用 winnerSlug 继续走下面的 INSERT 路径，DuplicateKey fallback 会兜住实际 race
+                log.info("[Wiki] Phase B create slug='{}' redirects to in-flight winner '{}'",
+                        slug, winnerSlug);
+                slug = winnerSlug;
+            }
+        }
+
+        // 兜底 1：如果 slug 已存在（route 误判 / 上一次成功 INSERT），走 update 而不是 create
         WikiPageEntity existing = pageService.getBySlug(kbId, slug);
         if (existing != null) {
             pageService.updatePageByAi(kbId, slug, content, pageSummary, rawId);
@@ -552,9 +728,19 @@ public class WikiProcessingService {
             return false; // 不计入 created
         }
         String sourceRawIds = "[" + rawId + "]";
-        pageService.createPage(kbId, slug, title, content, pageSummary, sourceRawIds);
-        log.info("[Wiki] Phase B create page slug='{}' done (created)", slug);
-        return true;
+        try {
+            pageService.createPage(kbId, slug, title, content, pageSummary, sourceRawIds);
+            log.info("[Wiki] Phase B create page slug='{}' done (created)", slug);
+            return true;
+        } catch (org.springframework.dao.DuplicateKeyException e) {
+            // 兜底 2：select-then-create 在并发下不是原子操作。当 N 个 chunk 同时
+            // route 出相同 slug，只有第一个 INSERT 能成功，其余都会触发 H2/MySQL
+            // unique key violation。本次 chunk 的 LLM 输出仍有价值——降级为 update，
+            // 把内容合并进已存在的 page，而不是丢弃。
+            pageService.updatePageByAi(kbId, slug, content, pageSummary, rawId);
+            log.info("[Wiki] Phase B create page slug='{}' lost INSERT race -> updated existing", slug);
+            return false; // 不计入 created
+        }
     }
 
     /**
@@ -700,9 +886,19 @@ public class WikiProcessingService {
         return sb.toString().trim();
     }
 
+    /**
+     * RFC-012 follow-up #3：Wiki 调用自带重试层（{@link #callLlmWithResilientRetry}），
+     * 所以用 maxAttempts=1 的 RetryTemplate 关掉 Spring AI 的内层重试，避免两层重试互相抵消
+     * （内层默认 2-3 次 × 180s readTimeout = 一次"外层 attempt"消耗 360-540s，
+     * 让 wiki 的 maxTotalDurationMs=240s 被穿越，maxAttempts=5 永远到不了）。
+     */
+    private static final RetryTemplate WIKI_NO_RETRY = RetryTemplate.builder()
+            .maxAttempts(1)
+            .build();
+
     private ChatModel buildChatModel() {
         ModelConfigEntity defaultModel = modelConfigService.getDefaultModel();
-        return agentGraphBuilder.buildRuntimeChatModel(defaultModel);
+        return agentGraphBuilder.buildRuntimeChatModel(defaultModel, WIKI_NO_RETRY);
     }
 
     /**

@@ -152,30 +152,114 @@ const { t } = useI18n()
 const store = useWikiStore()
 const fileInput = ref<HTMLInputElement | null>(null)
 
-// RFC-012 M2 v2 UI：当列表中存在 processing 的材料时，每 3s 轮询一次刷新进度
-// 处理完毕（无 processing 项）自动停止；组件卸载时也会清理 timer。
-let pollTimer: number | null = null
+// RFC-012 M3：当列表中存在 processing 的材料时，优先订阅后端 SSE 实时进度流，
+// 60s 兜底拉取 processingStatus / fetchRawMaterials 作为 SSE 断线降级（DB 是真源）。
+// 处理完毕（无 processing 项）自动断开 SSE + 停止兜底轮询；组件卸载时也会清理。
+let sse: EventSource | null = null
+let fallbackTimer: number | null = null
+let activeKbId: number | null = null
+
 const hasProcessing = computed(() =>
   store.rawMaterials.some(r => r.processingStatus === 'processing')
 )
+
+function applyProgressEvent(payload: any) {
+  if (!payload || payload.rawId == null) return
+  const raw = store.rawMaterials.find(r => r.id === payload.rawId)
+  if (!raw) return
+  if (typeof payload.done === 'number') raw.progressDone = payload.done
+  if (typeof payload.total === 'number') raw.progressTotal = payload.total
+}
+
+function openSse(kbId: number) {
+  closeSse()
+  activeKbId = kbId
+  // Vite 代理 /api → :18088；EventSource 走相对路径即可
+  const es = new EventSource(`/api/v1/wiki/knowledge-bases/${kbId}/progress`)
+  sse = es
+
+  es.addEventListener('raw.started', (ev: MessageEvent) => {
+    try {
+      const data = JSON.parse(ev.data)
+      const raw = store.rawMaterials.find(r => r.id === data.rawId)
+      if (raw) {
+        raw.processingStatus = 'processing'
+        raw.progressDone = 0
+        raw.progressTotal = 0
+      }
+    } catch { /* ignore */ }
+  })
+  es.addEventListener('route.done', (ev: MessageEvent) => {
+    try { applyProgressEvent(JSON.parse(ev.data)) } catch { /* ignore */ }
+  })
+  es.addEventListener('chunk.done', (ev: MessageEvent) => {
+    try { applyProgressEvent(JSON.parse(ev.data)) } catch { /* ignore */ }
+  })
+  es.addEventListener('raw.completed', (ev: MessageEvent) => {
+    try {
+      const data = JSON.parse(ev.data)
+      const raw = store.rawMaterials.find(r => r.id === data.rawId)
+      if (raw) {
+        raw.processingStatus = data.status === 'partial' ? 'partial' : 'completed'
+        if (typeof data.totalPages === 'number') {
+          raw.progressDone = data.totalPages
+          raw.progressTotal = data.totalPages
+        }
+      }
+      // 完成事件后，再做一次轻量 list 拉取确保其他字段（pageCount 等）同步
+      if (store.currentKB) store.fetchRawMaterials(store.currentKB.id)
+    } catch { /* ignore */ }
+  })
+  es.addEventListener('raw.failed', (ev: MessageEvent) => {
+    try {
+      const data = JSON.parse(ev.data)
+      const raw = store.rawMaterials.find(r => r.id === data.rawId)
+      if (raw) raw.processingStatus = 'failed'
+      if (store.currentKB) store.fetchRawMaterials(store.currentKB.id)
+    } catch { /* ignore */ }
+  })
+  es.onerror = () => {
+    // 浏览器 EventSource 会自动重连；这里仅 log
+    // console.debug('Wiki SSE error/reconnect', kbId)
+  }
+}
+
+function closeSse() {
+  if (sse) {
+    sse.close()
+    sse = null
+  }
+  activeKbId = null
+}
+
 watch(
-  hasProcessing,
-  (active) => {
-    if (active && pollTimer == null) {
-      pollTimer = window.setInterval(() => {
-        if (store.currentKB) store.fetchRawMaterials(store.currentKB.id)
-      }, 3000)
-    } else if (!active && pollTimer != null) {
-      clearInterval(pollTimer)
-      pollTimer = null
+  () => [hasProcessing.value, store.currentKB?.id] as const,
+  ([active, kbId]) => {
+    if (active && kbId != null) {
+      // SSE 主通道
+      if (activeKbId !== kbId) openSse(kbId)
+      // 60s 兜底拉取
+      if (fallbackTimer == null) {
+        fallbackTimer = window.setInterval(() => {
+          if (store.currentKB) store.fetchRawMaterials(store.currentKB.id)
+        }, 60000)
+      }
+    } else {
+      closeSse()
+      if (fallbackTimer != null) {
+        clearInterval(fallbackTimer)
+        fallbackTimer = null
+      }
     }
   },
   { immediate: true }
 )
+
 onBeforeUnmount(() => {
-  if (pollTimer != null) {
-    clearInterval(pollTimer)
-    pollTimer = null
+  closeSse()
+  if (fallbackTimer != null) {
+    clearInterval(fallbackTimer)
+    fallbackTimer = null
   }
 })
 

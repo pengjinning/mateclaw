@@ -3,9 +3,12 @@ package vip.mate.wiki.controller;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import vip.mate.common.result.R;
 import vip.mate.exception.MateClawException;
 import vip.mate.workspace.core.annotation.RequireWorkspaceRole;
@@ -19,6 +22,7 @@ import vip.mate.wiki.service.WikiKnowledgeBaseService;
 import vip.mate.wiki.service.WikiPageService;
 import vip.mate.wiki.service.WikiProcessingService;
 import vip.mate.wiki.service.WikiRawMaterialService;
+import vip.mate.wiki.sse.WikiProgressBus;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -34,6 +38,7 @@ import java.util.Map;
  *
  * @author MateClaw Team
  */
+@Slf4j
 @Tag(name = "Wiki 知识库")
 @RestController
 @RequestMapping("/api/v1/wiki")
@@ -47,6 +52,7 @@ public class WikiController {
     private final WikiDirectoryScanService scanService;
     private final WikiProperties properties;
     private final ApplicationEventPublisher eventPublisher;
+    private final WikiProgressBus progressBus;
 
     // ==================== Knowledge Base ====================
 
@@ -372,6 +378,59 @@ public class WikiController {
                 "totalRaw", rawList.size(),
                 "totalPages", kb.getPageCount()
         ));
+    }
+
+    /**
+     * RFC-012 M3：订阅指定 KB 的处理进度 SSE 流。
+     * <p>
+     * 客户端通过 {@code new EventSource('/api/v1/wiki/knowledge-bases/{kbId}/progress')} 订阅，
+     * 然后按事件名监听：
+     * <ul>
+     *   <li>{@code raw.started}    — 某个 raw material 进入处理</li>
+     *   <li>{@code route.done}     — phase A 完成、phase B 启动（此时 total 已确定）</li>
+     *   <li>{@code chunk.done}     — phase B 单页落地（带 done/total）</li>
+     *   <li>{@code raw.completed}  — raw material 处理完成（终态：completed/partial）</li>
+     *   <li>{@code raw.failed}     — raw material 处理失败</li>
+     * </ul>
+     * <p>
+     * SSE 是 best-effort：服务端断线、客户端断线、代理切流都可能丢事件，
+     * 因此前端仍需保留 60s 兜底轮询 {@code GET .../processing-status} 作为真源。
+     * <p>
+     * Emitter 默认 30 分钟超时，足以覆盖最长的 raw 处理时间；超时后客户端
+     * 自动重连（EventSource 默认行为）。
+     */
+    @RequireWorkspaceRole("viewer")
+    @Operation(summary = "订阅处理进度 SSE")
+    @GetMapping(value = "/knowledge-bases/{kbId}/progress", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public SseEmitter subscribeProgress(@PathVariable Long kbId,
+                                         @RequestHeader(value = "X-Workspace-Id", required = false) Long workspaceId) {
+        verifyKBWorkspace(kbId, workspaceId);
+        SseEmitter emitter = new SseEmitter(30L * 60 * 1000); // 30min
+        progressBus.subscribe(kbId, emitter);
+
+        emitter.onCompletion(() -> {
+            progressBus.unsubscribe(kbId, emitter);
+            log.debug("[Wiki SSE] emitter completed: kbId={}", kbId);
+        });
+        emitter.onTimeout(() -> {
+            progressBus.unsubscribe(kbId, emitter);
+            try { emitter.complete(); } catch (Exception ignore) { /* best-effort */ }
+            log.debug("[Wiki SSE] emitter timeout: kbId={}", kbId);
+        });
+        emitter.onError(e -> {
+            progressBus.unsubscribe(kbId, emitter);
+            log.debug("[Wiki SSE] emitter error: kbId={}, cause={}", kbId, e.getMessage());
+        });
+
+        // 立即发一个 hello 事件，确认连接已建立
+        try {
+            emitter.send(SseEmitter.event().name(WikiProgressBus.EVENT_HEARTBEAT)
+                    .data("{\"ts\":" + System.currentTimeMillis() + ",\"hello\":true}"));
+        } catch (Exception e) {
+            log.debug("[Wiki SSE] initial heartbeat send failed: {}", e.getMessage());
+        }
+
+        return emitter;
     }
 
     // ==================== Workspace Verification ====================
