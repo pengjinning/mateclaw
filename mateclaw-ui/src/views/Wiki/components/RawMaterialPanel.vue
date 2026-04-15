@@ -74,7 +74,7 @@
           </div>
           <div class="raw-item-actions">
             <button
-              v-if="raw.processingStatus === 'failed' || raw.processingStatus === 'completed'"
+              v-if="raw.processingStatus === 'failed' || raw.processingStatus === 'completed' || raw.processingStatus === 'partial'"
               class="btn-icon" :title="t('wiki.reprocess')"
               @click="reprocess(raw.id)"
             >
