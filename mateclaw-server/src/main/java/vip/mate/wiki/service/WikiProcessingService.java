@@ -756,8 +756,18 @@ public class WikiProcessingService {
         Long rawId = raw.getId();
         WikiPageEntity existing = pageService.getBySlug(kbId, slug);
         if (existing == null) {
-            log.warn("[Wiki] Phase B merge page slug='{}' planned for update but not found in DB, skipping", slug);
-            return false;
+            // 兜底：跨拼写 canonical 匹配——LLM 给的 slug 在 DB 里找不到，
+            // 但 canonical 形式（去连字符）对得上某个已有 page（典型场景：
+            // route 输出 `zhong-yao-qi-qing-pei-wu`，DB 存 `zhongyao-qiqing-peiwu`）
+            existing = pageService.findByCanonicalSlug(kbId, slug);
+            if (existing != null && !existing.getSlug().equals(slug)) {
+                log.info("[Wiki] Phase B merge slug='{}' canonical-matches existing '{}', using canonical slug for LLM call",
+                        slug, existing.getSlug());
+                slug = existing.getSlug();
+            } else {
+                log.warn("[Wiki] Phase B merge page slug='{}' planned for update but not found in DB (even by canonical), skipping", slug);
+                return false;
+            }
         }
 
         String configContent = kb.getConfigContent() != null ? kb.getConfigContent() : "";

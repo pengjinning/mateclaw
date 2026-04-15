@@ -224,9 +224,25 @@ public abstract class AbstractChannelAdapter implements ChannelAdapter {
         return running.get();
     }
 
+    /**
+     * RFC-024 Change 1：刷新"活跃时间"的标准入口。
+     *
+     * <p>任何代表"连接仍然有效"的事件都应调用本方法：
+     * <ul>
+     *   <li>收到真实消息（{@link #onMessage}）</li>
+     *   <li>长轮询成功返回（即使无消息）—— 例：WeixinChannelAdapter.pollLoop</li>
+     *   <li>心跳 ping 成功</li>
+     * </ul>
+     * 这样 {@code ChannelHealthMonitor} 才能准确区分"连接僵尸但用户没发消息" vs
+     * "连接真的死了"，不再依赖消息密度这个稀疏信号。</p>
+     */
+    protected void touchActivity() {
+        lastEventTimeMs.set(System.currentTimeMillis());
+    }
+
     @Override
     public void onMessage(ChannelMessage message) {
-        lastEventTimeMs.set(System.currentTimeMillis());
+        touchActivity();
 
         // Bot 前缀过滤
         if (!shouldProcess(message)) {

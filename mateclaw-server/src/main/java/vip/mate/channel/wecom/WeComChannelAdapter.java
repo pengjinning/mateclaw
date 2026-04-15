@@ -571,7 +571,7 @@ public class WeComChannelAdapter extends AbstractChannelAdapter {
                                 textBuilder.append(txt).append('\n');
                             }
                         } else if ("image".equals(itemType)) {
-                            // 与独立 image 消息对齐：下载 + AES 解密（对齐 CoPaw）
+                            // 与独立 image 消息对齐：下载 + AES 解密
                             Map<String, Object> img = (Map<String, Object>) item.getOrDefault("image", Map.of());
                             String url = (String) img.getOrDefault("url", "");
                             String aesKey = (String) img.getOrDefault("aeskey", "");
@@ -754,7 +754,7 @@ public class WeComChannelAdapter extends AbstractChannelAdapter {
 
         boolean first = true;
         for (String rawSegment : segments) {
-            // WeCom 专用：格式化 Markdown 表格（对齐 CoPaw format_markdown_tables）
+            // WeCom 专用：格式化 Markdown 表格，统一列宽后在企微渲染正确
             String segment = formatMarkdownTables(rawSegment);
             // 第一条分段用 processingStreamId 覆盖"思考中..."
             if (first && ctx != null && ctx.processingStreamId() != null
@@ -872,7 +872,7 @@ public class WeComChannelAdapter extends AbstractChannelAdapter {
      * <p>
      * WeCom 原生语音消息要求 AMR 格式。TTS 输出为 MP3，
      * Phase 1 以 file 类型发送（用户可点击播放），避免引入 AMR 转码依赖。
-     * 借鉴 CoPaw: 非 AMR 格式走 file 类型而非 voice 类型。
+     * 非 AMR 格式走 file 类型而非 voice 类型，避免企微语音播放兼容问题。
      */
     private void sendAudioPart(String targetId, MessageContentPart part, WeComReplyContext ctx) {
         byte[] audioBytes = resolveFileBytes(part);
@@ -1164,7 +1164,7 @@ public class WeComChannelAdapter extends AbstractChannelAdapter {
         }
     }
 
-    // ==================== Markdown 表格格式化（对齐 CoPaw format_markdown_tables）====================
+    // ==================== Markdown 表格格式化 ====================
 
     /**
      * 格式化 GFM Markdown 表格，使其在企业微信中对齐显示。
@@ -1172,8 +1172,6 @@ public class WeComChannelAdapter extends AbstractChannelAdapter {
      * 企业微信要求表格列宽一致才能正确渲染。此方法解析表格，
      * 计算每列最大宽度，统一填充空格对齐。
      * 代码块内的表格不做处理。
-     * <p>
-     * 移植自 CoPaw wecom/utils.py format_markdown_tables()
      */
     static String formatMarkdownTables(String text) {
         if (text == null || !text.contains("|")) return text;

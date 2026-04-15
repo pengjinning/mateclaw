@@ -667,3 +667,36 @@ CREATE TABLE IF NOT EXISTS mate_plugin (
     deleted       INT          NOT NULL DEFAULT 0
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uk_plugin_name ON mate_plugin(name);
+
+-- =============================================
+-- Hook 系统（RFC-017）
+-- =============================================
+CREATE TABLE IF NOT EXISTS mate_hook (
+    id                  BIGINT       NOT NULL PRIMARY KEY,
+    name                VARCHAR(128) NOT NULL,
+    description         VARCHAR(512),
+    enabled             TINYINT(1)   NOT NULL DEFAULT 1,
+    event_type          VARCHAR(64)  NOT NULL,
+    match_expression    TEXT,
+    action_kind         VARCHAR(32)  NOT NULL,
+    action_config       TEXT         NOT NULL,
+    rate_limit_per_min  INT          DEFAULT 60,
+    timeout_ms          INT          DEFAULT 3000,
+    source              VARCHAR(16)  DEFAULT 'db',
+    created_at          DATETIME     NOT NULL,
+    updated_at          DATETIME     NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_hook_event_type ON mate_hook(event_type);
+CREATE INDEX IF NOT EXISTS idx_hook_enabled    ON mate_hook(enabled);
+
+CREATE TABLE IF NOT EXISTS mate_hook_run (
+    id           BIGINT       NOT NULL PRIMARY KEY,
+    hook_id      BIGINT       NOT NULL,
+    event_type   VARCHAR(64)  NOT NULL,
+    status       VARCHAR(16)  NOT NULL,
+    duration_ms  INT          DEFAULT 0,
+    message      VARCHAR(512),
+    created_at   DATETIME     NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_hook_run_hook_id  ON mate_hook_run(hook_id);
+CREATE INDEX IF NOT EXISTS idx_hook_run_created  ON mate_hook_run(created_at);

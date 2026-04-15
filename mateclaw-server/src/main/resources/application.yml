@@ -113,6 +113,19 @@ mateclaw:
   plugin:
     enabled: true
     user-dir: ${user.home}/.mateclaw/plugins
+  # RFC-017: 声明式 Hook 系统
+  hooks:
+    enabled: true
+    global-rate-limit: 200       # 全局每秒最大派发数
+    global-concurrency: 32       # 同时活跃的派发任务上限
+    dispatch-deadline: 5s        # 单事件派发硬预算
+    trusted-domains: []          # HttpAction 允许调用的域名（精确或后缀匹配），留空禁用 HTTP
+    http:
+      connect-timeout: 2s
+      read-timeout: 3s
+    audit:
+      enabled: true              # 每次派发写 mate_hook_run
+      retain-days: 7
   # RFC-014: Anthropic prompt cache 标记
   llm:
     cache:

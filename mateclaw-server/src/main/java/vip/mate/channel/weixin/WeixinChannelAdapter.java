@@ -5,7 +5,9 @@ import lombok.extern.slf4j.Slf4j;
 import vip.mate.channel.AbstractChannelAdapter;
 import vip.mate.channel.ChannelMessage;
 import vip.mate.channel.ChannelMessageRouter;
+import vip.mate.channel.ExponentialBackoff;
 import vip.mate.channel.model.ChannelEntity;
+import vip.mate.channel.weixin.error.TokenExpiredException;
 import vip.mate.workspace.conversation.model.MessageContentPart;
 
 import java.io.IOException;
@@ -71,6 +73,29 @@ public class WeixinChannelAdapter extends AbstractChannelAdapter {
 
     /** 长轮询游标 */
     private volatile String cursor = "";
+
+    /**
+     * RFC-024 Change 5：pollLoop 错误重试专用退避器。
+     * 3s 起步、60s 上限、1.8 倍递增、±20% jitter、无限重试。
+     * 成功一次 getUpdates 即 reset()。
+     */
+    private final ExponentialBackoff pollBackoff =
+            new ExponentialBackoff(3000, 60000, 1.8, -1, 0.2);
+
+    /**
+     * RFC-024 Change 4：pollLoop watchdog。虚拟线程调度，每 30s 检查一次活跃度。
+     * 由 {@link #startWatchdog()} 启动，{@link #stopWatchdog()} 关闭。
+     */
+    private volatile ScheduledExecutorService watchdogScheduler;
+    private volatile ScheduledFuture<?> watchdogTask;
+
+    /**
+     * pollLoop 卡死判定阈值（毫秒）。getUpdates 最长 45s 就该回包一次；
+     * 超过此值说明客户端或代理层有问题，主动置 ERROR 让 HealthMonitor 重启。
+     * 默认 90s（45s × 2 缓冲）。
+     */
+    private static final long POLL_STUCK_THRESHOLD_MS = 90_000;
+    private static final long WATCHDOG_INTERVAL_MS = 30_000;
 
     /** 消息去重集合（LRU） */
     private final LinkedHashMap<String, Boolean> processedIds = new LinkedHashMap<>(256, 0.75f, true) {
@@ -171,9 +196,14 @@ public class WeixinChannelAdapter extends AbstractChannelAdapter {
         // 启动长轮询线程
         stopSignal.set(false);
         cursor = "";
+        pollBackoff.reset();                   // RFC-024 Change 5: 每次启动从 3s 起步
+        touchActivity();                       // RFC-024 Change 4: watchdog 基准点
         pollThread = new Thread(this::pollLoop, "weixin-poll-" + channelEntity.getId());
         pollThread.setDaemon(true);
         pollThread.start();
+
+        // RFC-024 Change 4: 启动 pollLoop watchdog
+        startWatchdog();
 
         log.info("[weixin] Channel started: {} (token={}..., cached_contexts={})",
                 channelEntity.getName(),
@@ -184,6 +214,9 @@ public class WeixinChannelAdapter extends AbstractChannelAdapter {
     @Override
     protected void doStop() {
         stopSignal.set(true);
+
+        // RFC-024 Change 4: 关闭 watchdog（在中断 pollThread 之前，避免最后一次 tick 误判）
+        stopWatchdog();
 
         // 持久化 context_tokens（重启后可恢复主动推送能力）
         saveContextTokens();
@@ -218,6 +251,12 @@ public class WeixinChannelAdapter extends AbstractChannelAdapter {
         while (!stopSignal.get() && !Thread.currentThread().isInterrupted()) {
             try {
                 Map<String, Object> data = client.getUpdates(cursor);
+
+                // RFC-024 Change 1: getUpdates 成功返回（哪怕没消息）= 连接活跃；
+                // 让 ChannelHealthMonitor 能准确识别"连接还在线"而非依赖用户发消息
+                touchActivity();
+                // RFC-024 Change 5: 成功即清零退避计数，下次故障仍从 3s 起步
+                pollBackoff.reset();
 
                 // 更新游标
                 Object newCursor = data.get("get_updates_buf");
@@ -254,11 +293,22 @@ public class WeixinChannelAdapter extends AbstractChannelAdapter {
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 break;
+            } catch (TokenExpiredException te) {
+                // RFC-024 Change 3: token 已过期 → 停止轮询、标记 ERROR，让 HealthMonitor 接手
+                // 不在 catch Exception 里被吞，避免"无限重试 + 日志淹没但用户不知道要重扫码"
+                log.error("[weixin] bot_token expired (HTTP {}) during {}; stopping poll loop — channel needs re-scan",
+                        te.getHttpStatus(), te.getOperation());
+                connectionState.set(ConnectionState.ERROR);
+                lastError = "bot_token expired, please re-scan QR code";
+                break;
             } catch (Exception e) {
                 if (!stopSignal.get()) {
-                    log.error("[weixin] Poll error, retry in 5s: {}", e.getMessage());
+                    // RFC-024 Change 5: 指数退避 + jitter（替代固定 5s），防止连锁故障时雷群效应
+                    long delay = pollBackoff.nextDelayMs();
+                    log.error("[weixin] Poll error (attempt {}), retry in {}ms: {}",
+                            pollBackoff.getAttempts(), delay, e.getMessage());
                     try {
-                        Thread.sleep(5000);
+                        Thread.sleep(delay);
                     } catch (InterruptedException ie) {
                         Thread.currentThread().interrupt();
                         break;
@@ -267,6 +317,59 @@ public class WeixinChannelAdapter extends AbstractChannelAdapter {
             }
         }
         log.info("[weixin] Poll thread stopped");
+    }
+
+    // ==================== RFC-024 Change 4: pollLoop watchdog ====================
+
+    /**
+     * 启动 pollLoop 监视器：每 30s 检查一次"距离上次活跃是否超过 {@value #POLL_STUCK_THRESHOLD_MS}ms"。
+     *
+     * <p>getUpdates 最多 45s 就会返回（服务端 hold 35s + 少量网络延迟）；若超过 90s 没有活动，
+     * 意味着 HTTP 客户端的长连接被代理 / NAT 静默 FIN 掉、pollLoop 卡在 read 上了。
+     * 此时主动把 state 置 ERROR，{@code ChannelHealthMonitor} 下一轮（1 分钟内）会重启本渠道，
+     * 缩短用户感知的"僵死时间"。</p>
+     *
+     * <p>用虚拟线程 ScheduledExecutorService，开销极小；与 pollLoop 完全独立，失败隔离。</p>
+     */
+    private void startWatchdog() {
+        watchdogScheduler = Executors.newSingleThreadScheduledExecutor(
+                Thread.ofVirtual().name("weixin-watchdog-" + channelEntity.getId()).factory());
+        watchdogTask = watchdogScheduler.scheduleAtFixedRate(
+                this::watchdogTick,
+                WATCHDOG_INTERVAL_MS, WATCHDOG_INTERVAL_MS, TimeUnit.MILLISECONDS);
+    }
+
+    private void watchdogTick() {
+        if (stopSignal.get()) return;
+        if (connectionState.get() != ConnectionState.CONNECTED) return;   // 已 ERROR，等 HealthMonitor
+        long sinceLast = System.currentTimeMillis() - lastEventTimeMs.get();
+        if (sinceLast > POLL_STUCK_THRESHOLD_MS) {
+            log.warn("[weixin] Watchdog: poll thread appears stuck ({}s since last activity); " +
+                    "setting ERROR state for HealthMonitor to restart", sinceLast / 1000);
+            connectionState.set(ConnectionState.ERROR);
+            lastError = "poll thread stuck, last activity " + (sinceLast / 1000) + "s ago";
+        }
+    }
+
+    private void stopWatchdog() {
+        if (watchdogTask != null) {
+            watchdogTask.cancel(false);
+            watchdogTask = null;
+        }
+        if (watchdogScheduler != null) {
+            watchdogScheduler.shutdownNow();
+            watchdogScheduler = null;
+        }
+    }
+
+    /**
+     * RFC-024 Change 2：微信是长轮询，代理/NAT 的 idle timeout 通常 2–5 分钟；
+     * 这里报告 5 分钟作为 stale 阈值，配合 {@code ChannelHealthMonitor} 1 分钟扫描，
+     * 断连后最多 5 分钟内被自动重启，而非原先的 60 分钟。
+     */
+    @Override
+    public Duration stalenessThreshold() {
+        return Duration.ofMinutes(5);
     }
 
     // ==================== 入站消息处理 ====================
@@ -309,7 +412,7 @@ public class WeixinChannelAdapter extends AbstractChannelAdapter {
 
             switch (itemType) {
                 case 1 -> {
-                    // Text — 过滤纯文件名文本（借鉴 CoPaw: 避免文件名误触发 Agent）
+                    // Text — 过滤纯文件名文本，避免文件名误触发 Agent
                     Map<String, Object> textItem = (Map<String, Object>) item.getOrDefault("text_item", Map.of());
                     String text = getStr(textItem, "text").strip();
                     if (!text.isEmpty() && !isFilenameOnly(text)) {
@@ -347,7 +450,7 @@ public class WeixinChannelAdapter extends AbstractChannelAdapter {
                 }
                 case 3 -> {
                     // Voice — 使用 ASR 语音识别文本
-                    // iLink API 的 ASR 文本可能在两个位置（参考 CoPaw 实现）：
+                    // iLink API 的 ASR 文本可能在两个位置：
                     //   路径1: voice_item.text_item.text（嵌套结构）
                     //   路径2: voice_item.text（直接结构）
                     hasVoice = true;
@@ -360,7 +463,7 @@ public class WeixinChannelAdapter extends AbstractChannelAdapter {
                         asrText = getStr((Map<String, Object>) textItemMap, "text").strip();
                     }
 
-                    // 路径2: voice_item → text（直接字段，CoPaw fallback）
+                    // 路径2: voice_item → text（直接字段，部分版本 API 的兜底结构）
                     if (asrText.isEmpty()) {
                         asrText = getStr(voiceItem, "text").strip();
                     }
@@ -920,7 +1023,7 @@ public class WeixinChannelAdapter extends AbstractChannelAdapter {
         return data;
     }
 
-    // ==================== Token 持久化（对齐 CoPaw）====================
+    // ==================== Token 持久化 ====================
 
     /**
      * 从文件加载 bot_token（启动时如果 config 中无 token，尝试从文件恢复）
@@ -990,12 +1093,11 @@ public class WeixinChannelAdapter extends AbstractChannelAdapter {
         }
     }
 
-    // ==================== 文件名过滤（对齐 CoPaw）====================
+    // ==================== 文件名过滤 ====================
 
     /**
      * 判断文本是否仅为文件名（如 "photo.jpg"、"report.pdf"）。
      * 微信发送文件时会同时发一条文本消息包含文件名，这不应触发 Agent 回复。
-     * 参考 CoPaw channel.py:538-566
      */
     private static boolean isFilenameOnly(String text) {
         if (text == null || text.isBlank()) return false;
