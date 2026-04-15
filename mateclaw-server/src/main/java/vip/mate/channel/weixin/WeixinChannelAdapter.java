@@ -8,6 +8,7 @@ import vip.mate.channel.ChannelMessageRouter;
 import vip.mate.channel.ExponentialBackoff;
 import vip.mate.channel.model.ChannelEntity;
 import vip.mate.channel.weixin.error.TokenExpiredException;
+import vip.mate.common.security.SecretEquals;
 import vip.mate.workspace.conversation.model.MessageContentPart;
 
 import java.io.IOException;
@@ -563,7 +564,8 @@ public class WeixinChannelAdapter extends AbstractChannelAdapter {
         if (!fromUserId.isBlank() && !contextToken.isBlank()) {
             String prev = userContextTokens.put(fromUserId, contextToken);
             // token 变更时才持久化（减少 I/O）
-            if (!contextToken.equals(prev)) {
+            // RFC-025 Change 2: 常数时间比较，作为秘钥类字符串比较的模板统一
+            if (!SecretEquals.equals(contextToken, prev)) {
                 saveContextTokens();
             }
         }

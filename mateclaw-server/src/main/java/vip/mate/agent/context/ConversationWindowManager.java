@@ -141,6 +141,16 @@ public class ConversationWindowManager {
 
         // 可用于历史的 token 预算 = max - system - currentMsg - 安全余量
         int reservedTokens = systemTokens + currentMsgTokens + (int) (effectiveMax * 0.05);
+        // RFC-025 Change 1: reserve 硬封顶到 effectiveMax 的 50%。
+        // 小上下文模型（Ollama 16K、本地 8K）下，systemTokens + currentMsgTokens 很容易
+        // 接近或超过 effectiveMax，不封顶会让 historyBudget 变负数导致死循环压缩
+        // （压缩目标比压缩前还大 → 压缩后又触发压缩）。
+        int reservedCap = Math.max(1024, effectiveMax / 2);
+        if (reservedTokens > reservedCap) {
+            log.warn("[ConversationWindow] 预留 token {} 超过上下文窗口 50% {}，封顶至 {}",
+                    reservedTokens, effectiveMax, reservedCap);
+            reservedTokens = reservedCap;
+        }
         int historyBudget = effectiveMax - reservedTokens;
 
         // 尾部保护 token 预算：阈值的 20%（与 Hermes 一致）

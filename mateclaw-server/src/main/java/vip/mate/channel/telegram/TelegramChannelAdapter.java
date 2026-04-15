@@ -393,7 +393,10 @@ public class TelegramChannelAdapter extends AbstractChannelAdapter {
         // 构建 contentParts
         List<MessageContentPart> contentParts = new ArrayList<>();
         String textContent = (String) message.get("text");
-        String caption = (String) message.get("caption");
+        // RFC-025 Change 4: caption 净化 — .epub / .mobi 等附件的二进制元数据会被
+        // 某些 Telegram Bot API 版本塞进 caption，非 UTF-8 字节序列直接进 LLM prompt
+        // 会让 token 数爆涨、成本不可控
+        String caption = sanitizeInboundText((String) message.get("caption"));
         boolean hasVoice = message.get("voice") != null;
 
         if (textContent != null && !textContent.isBlank()) {
@@ -715,5 +718,27 @@ public class TelegramChannelAdapter extends AbstractChannelAdapter {
     @Override
     public String getChannelType() {
         return CHANNEL_TYPE;
+    }
+
+    /** RFC-025 Change 4 入站文本净化上限（防止 caption 含超长二进制撑爆 prompt）。 */
+    private static final int INBOUND_TEXT_MAX = 4096;
+
+    /**
+     * 净化入站文本（caption / text 可选复用）：
+     * <ul>
+     *   <li>剥掉控制字符与非可打印字节，保留常见空白、中日韩文字</li>
+     *   <li>硬封顶 {@value #INBOUND_TEXT_MAX} 字符，超出追加 truncation 标记</li>
+     * </ul>
+     * <p>RFC-025 Change 4：应对 .epub / .mobi 等附件把二进制元数据塞到 caption 的场景。</p>
+     */
+    static String sanitizeInboundText(String raw) {
+        if (raw == null || raw.isEmpty()) return raw;
+        // 策略：剥掉控制字符（\p{Cc}）但保留 \t \r \n；再剥零宽/BIDI 等格式字符（\p{Cf}）。
+        // 其它所有 Unicode 可见字符（含 CJK 全角标点、emoji、西欧字母、阿拉伯数字等）均保留。
+        // 相比白名单法：对全角 / 异域文字 / 新 emoji 都零误杀；仅打掉真正会爆 token 的控制字节。
+        String cleaned = raw.replaceAll("[\\p{Cc}&&[^\\t\\r\\n]]", "")
+                .replaceAll("\\p{Cf}", "");
+        if (cleaned.length() <= INBOUND_TEXT_MAX) return cleaned;
+        return cleaned.substring(0, INBOUND_TEXT_MAX) + " ...[truncated]";
     }
 }

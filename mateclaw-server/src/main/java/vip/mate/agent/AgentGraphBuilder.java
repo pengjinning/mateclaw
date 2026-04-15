@@ -991,9 +991,16 @@ public class AgentGraphBuilder {
             } else if (runtimeModel.getTopP() != null) {
                 builder.topP(runtimeModel.getTopP());
             }
-            if (runtimeModel.getMaxTokens() != null) {
-                builder.maxTokens(runtimeModel.getMaxTokens());
+            // RFC-025 Change 5: 非正值 maxTokens 会被 Anthropic API 直接拒绝；本地提前拦截
+            // 并 fallback 到 4096，避免错误信息在运行时才暴露、也防止坏配置透传
+            Integer configuredMax = runtimeModel.getMaxTokens();
+            if (configuredMax != null && configuredMax > 0) {
+                builder.maxTokens(configuredMax);
             } else {
+                if (configuredMax != null) {
+                    log.warn("Ignoring non-positive Anthropic maxTokens={} for model {}; falling back to 4096",
+                            configuredMax, runtimeModel.getModelName());
+                }
                 builder.maxTokens(4096);
             }
         }
