@@ -36,8 +36,9 @@ public class ModelDiscoveryService {
     // Virtual-thread executor for parallel model probing (lightweight, short-lived)
     private static final ExecutorService PROBE_EXECUTOR = Executors.newVirtualThreadPerTaskExecutor();
 
-    // Probe concurrency cap — avoid flooding the provider with concurrent ping requests
-    private static final int MAX_PROBE_CONCURRENCY = 5;
+    // Probe concurrency cap — reduced from 5 to 3 because higher parallelism
+    // triggered 429 Throttling.RateQuota on DashScope during bulk refresh
+    private static final int MAX_PROBE_CONCURRENCY = 3;
 
     // Per-model probe timeout (short; we only need to know "yes/no usable")
     private static final long PROBE_TIMEOUT_SECONDS = 12;
@@ -61,18 +62,56 @@ public class ModelDiscoveryService {
             java.util.regex.Pattern.compile("^qwen\\d+\\.\\d+.*", java.util.regex.Pattern.CASE_INSENSITIVE);
 
     /**
+     * Parameter-size suffixes used by DashScope open-source base models (e.g.
+     * {@code qwen3-0.6b}, {@code qwen3-8b}, {@code qwen3-32b}, {@code qwen3-30b-a3b}).
+     * These are catalog entries, not DashScope-hosted chat endpoints, and the native
+     * protocol returns {@code InvalidParameter: parameter.enable_thinking ...} for
+     * any attempt to invoke them. Pre-filter them out of discovery.
+     */
+    private static final java.util.regex.Pattern DASHSCOPE_OPEN_SOURCE_SIZE_PATTERN =
+            java.util.regex.Pattern.compile("^qwen\\d+-\\d+(?:\\.\\d+)?b(?:-.*)?$", java.util.regex.Pattern.CASE_INSENSITIVE);
+
+    /**
+     * Prefixes that identify non-chat modalities (image generation, vision understanding,
+     * TTS, ASR, omni/multimodal bases, realtime speech, live translation, OCR, speech-to-
+     * speech, voice-clone). They are catalog-visible but have different endpoints than
+     * the native chat-generation API, so probing them via chat always fails with
+     * "url error". Blocking them up-front cuts discovery time and log noise dramatically.
+     */
+    private static final Set<String> DASHSCOPE_NON_CHAT_PREFIXES = Set.of(
+            // Vision understanding / OCR
+            "qwen-vl-",
+            "qwen3-vl-",
+            // Image generation / edit
+            "qwen-image-",
+            "qwen3-image-",
+            // TTS / ASR / speech-to-speech / voice
+            "qwen-tts-",
+            "qwen3-tts-",
+            "qwen-asr-",
+            "qwen3-asr-",
+            "qwen-s2s-",
+            "qwen3-s2s-",
+            // Omni multimodal bases
+            "qwen-omni-",
+            "qwen3-omni-",
+            // Audio understanding
+            "qwen-audio-",
+            // Live translation
+            "qwen-livetranslate-",
+            "qwen3-livetranslate-"
+    );
+
+    /**
      * Allow-list prefixes for DashScope models that are known to work on the native
-     * protocol. An empty set means "no prefix filter" (we still apply DENY).
-     * Extend conservatively as we verify additional families.
+     * chat protocol. An empty set means "no prefix filter" (we still apply DENY).
+     * Extend conservatively as new families are verified.
      */
     private static final Set<String> DASHSCOPE_NATIVE_ALLOW_PREFIXES = Set.of(
             "qwen-",          // qwen-max / qwen-plus / qwen-turbo / qwen-coder-* / qwen-long
             "qwen2-",         // qwen2 series
             "qwen3-",         // qwen3-max / qwen3-plus / qwen3-coder / qwen3-235b-*
-            "qwen-vl-",       // vision-language
-            "qwen-audio-",
-            "qwen-omni-",
-            "deepseek-",      // deepseek-v3.x
+            "deepseek-",      // deepseek-v3.x / deepseek-r1*
             "baichuan",
             "yi-",
             "llama"
@@ -139,15 +178,21 @@ public class ModelDiscoveryService {
     }
 
     /**
-     * Return true if a DashScope model id is allowed on the native protocol:
-     * not in the explicit DENY set, doesn't match the dot-version unsupported
-     * pattern, and matches at least one ALLOW prefix (or the allow list is empty).
+     * Return true if a DashScope model id is allowed on the native chat protocol.
+     * Rejection rules (in order):
+     *   1. Explicit DENY set (e.g. qwen3.5-max)
+     *   2. Dot-version family pattern (qwen3.5-*, qwen3.6-*, ...)
+     *   3. Non-chat modality prefix (vl, image, tts, asr, omni, audio, s2s, ocr, livetranslate)
+     *   4. Open-source parameter-size suffix (qwen3-8b, qwen3-32b, qwen3-30b-a3b, qwen3-0.6b ...)
+     *   5. Must start with a known ALLOW prefix (qwen-, qwen2-, qwen3-, deepseek-, ...)
      */
     private static boolean isDashScopeModelIdAcceptable(String modelId) {
         if (modelId == null || modelId.isBlank()) return false;
         String lower = modelId.toLowerCase();
         if (DASHSCOPE_NATIVE_DENY.contains(lower)) return false;
         if (DASHSCOPE_NATIVE_UNSUPPORTED_PATTERN.matcher(lower).matches()) return false;
+        if (DASHSCOPE_NON_CHAT_PREFIXES.stream().anyMatch(lower::startsWith)) return false;
+        if (DASHSCOPE_OPEN_SOURCE_SIZE_PATTERN.matcher(lower).matches()) return false;
         if (DASHSCOPE_NATIVE_ALLOW_PREFIXES.isEmpty()) return true;
         return DASHSCOPE_NATIVE_ALLOW_PREFIXES.stream().anyMatch(lower::startsWith);
     }
@@ -196,7 +241,12 @@ public class ModelDiscoveryService {
                 } catch (Exception e) {
                     dto.setProbeOk(false);
                     dto.setProbeError(shortError(e));
-                    log.info("[ModelDiscovery] Probe failed for model={}: {}", dto.getId(), dto.getProbeError());
+                    // DEBUG level — per-model probe failures are an expected part of bulk
+                    // discovery (DashScope lists many deprecated/restricted models). The
+                    // aggregate "Probe results: X passed, Y failed" summary below is
+                    // sufficient for normal operations. Enable DEBUG for ModelDiscovery
+                    // if you need to inspect individual reasons.
+                    log.debug("[ModelDiscovery] Probe failed for model={}: {}", dto.getId(), dto.getProbeError());
                 } finally {
                     sem.release();
                 }
