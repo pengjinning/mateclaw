@@ -45,6 +45,14 @@ public class WikiKnowledgeBaseEntity {
     /** 所属工作区 ID（默认 1 = default） */
     private Long workspaceId;
 
+    /**
+     * 绑定的 Embedding 模型 ID（mate_model_config.id，model_type='embedding'）。
+     * <p>
+     * NULL = 使用系统默认（mate_system_setting 的 embedding.default.model.id），
+     * 再无则取任意 enabled 的 embedding 模型，最终全无则语义搜索降级为不可用。
+     */
+    private Long embeddingModelId;
+
     @TableField(fill = FieldFill.INSERT)
     private LocalDateTime createTime;
 

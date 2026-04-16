@@ -6,10 +6,18 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.*;
 import vip.mate.common.result.R;
 import vip.mate.llm.model.*;
+import org.springframework.ai.embedding.EmbeddingModel;
+import org.springframework.ai.embedding.EmbeddingRequest;
+import org.springframework.ai.embedding.EmbeddingResponse;
+import vip.mate.llm.embedding.EmbeddingModelFactory;
 import vip.mate.llm.service.ModelConfigService;
 import vip.mate.llm.service.ModelDiscoveryService;
 import vip.mate.llm.service.ModelProviderService;
+import vip.mate.system.model.SystemSettingEntity;
+import vip.mate.system.repository.SystemSettingMapper;
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -22,6 +30,10 @@ public class ModelConfigController {
     private final ModelConfigService modelConfigService;
     private final ModelProviderService modelProviderService;
     private final ModelDiscoveryService modelDiscoveryService;
+    private final EmbeddingModelFactory embeddingModelFactory;
+    private final SystemSettingMapper systemSettingMapper;
+
+    private static final String SYSTEM_SETTING_DEFAULT_EMBEDDING_ID = "embedding.default.model.id";
 
     @Operation(summary = "获取 Provider 列表")
     @GetMapping
@@ -63,7 +75,10 @@ public class ModelConfigController {
     @PutMapping("/{providerId}/config")
     public R<ProviderInfoDTO> updateProviderConfig(@PathVariable String providerId,
                                                    @RequestBody ProviderConfigRequest request) {
-        return R.ok(modelProviderService.updateProviderConfig(providerId, request));
+        ProviderInfoDTO updated = modelProviderService.updateProviderConfig(providerId, request);
+        // Provider 的 apiKey/baseUrl 变化时，清空 embedding factory 的缓存，确保下次用新凭证
+        embeddingModelFactory.evictAll();
+        return R.ok(updated);
     }
 
     @Operation(summary = "创建自定义 Provider")
@@ -152,5 +167,76 @@ public class ModelConfigController {
     public R<TestResult> testModel(@PathVariable String providerId,
                                     @PathVariable String modelId) {
         return R.ok(modelDiscoveryService.testModel(providerId, modelId));
+    }
+
+    // ==================== Embedding 模型管理 ====================
+
+    @Operation(summary = "按类型筛选模型（chat / embedding）")
+    @GetMapping("/by-type")
+    public R<List<ModelConfigEntity>> listByType(@RequestParam(defaultValue = "chat") String modelType) {
+        return R.ok(modelConfigService.listByType(modelType));
+    }
+
+    @Operation(summary = "测试 Embedding 模型连通性（嵌入一个短文本验证 API key）")
+    @PostMapping("/embedding/{modelId}/test")
+    public R<Map<String, Object>> testEmbedding(@PathVariable Long modelId) {
+        Map<String, Object> result = new HashMap<>();
+        try {
+            ModelConfigEntity config = modelConfigService.getModel(modelId);
+            if (!"embedding".equals(config.getModelType())) {
+                result.put("success", false);
+                result.put("message", "模型类型不是 embedding: " + config.getModelType());
+                return R.ok(result);
+            }
+            // 清除缓存，确保本次测试用最新的 API key
+            embeddingModelFactory.evict(modelId);
+            EmbeddingModel model = embeddingModelFactory.build(config);
+            EmbeddingResponse resp = model.call(new EmbeddingRequest(List.of("test"), null));
+            float[] vec = resp.getResults().get(0).getOutput();
+            result.put("success", true);
+            result.put("dimensions", vec.length);
+            result.put("model", config.getModelName());
+            result.put("message", "连通性测试成功");
+        } catch (Exception e) {
+            result.put("success", false);
+            result.put("message", e.getMessage());
+        }
+        return R.ok(result);
+    }
+
+    @Operation(summary = "获取系统默认 Embedding 模型 ID")
+    @GetMapping("/embedding/default")
+    public R<Map<String, Object>> getDefaultEmbedding() {
+        SystemSettingEntity entity = systemSettingMapper.selectOne(
+                new LambdaQueryWrapper<SystemSettingEntity>()
+                        .eq(SystemSettingEntity::getSettingKey, SYSTEM_SETTING_DEFAULT_EMBEDDING_ID)
+                        .last("LIMIT 1"));
+        if (entity == null || entity.getSettingValue() == null || entity.getSettingValue().isBlank()) {
+            return R.ok(Map.of("defaultModelId", ""));
+        }
+        return R.ok(Map.of("defaultModelId", entity.getSettingValue()));
+    }
+
+    @Operation(summary = "设置系统默认 Embedding 模型")
+    @PostMapping("/embedding/default")
+    public R<Void> setDefaultEmbedding(@RequestBody Map<String, Object> body) {
+        Object v = body.get("modelId");
+        String value = v == null ? "" : v.toString();
+
+        SystemSettingEntity existing = systemSettingMapper.selectOne(
+                new LambdaQueryWrapper<SystemSettingEntity>()
+                        .eq(SystemSettingEntity::getSettingKey, SYSTEM_SETTING_DEFAULT_EMBEDDING_ID)
+                        .last("LIMIT 1"));
+        if (existing != null) {
+            existing.setSettingValue(value);
+            systemSettingMapper.updateById(existing);
+        } else {
+            SystemSettingEntity fresh = new SystemSettingEntity();
+            fresh.setSettingKey(SYSTEM_SETTING_DEFAULT_EMBEDDING_ID);
+            fresh.setSettingValue(value);
+            fresh.setDescription("Default embedding model id for wiki semantic search");
+            systemSettingMapper.insert(fresh);
+        }
+        return R.ok();
     }
 }

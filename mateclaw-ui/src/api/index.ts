@@ -269,6 +269,15 @@ export const modelApi = {
     http.post(`/models/${providerId}/test-connection`),
   testModel: (providerId: string, modelId: string) =>
     http.post(`/models/${providerId}/models/${encodeURIComponent(modelId)}/test`),
+
+  // ==================== Embedding Model (RFC Embedding UI) ====================
+  listByType: (modelType: 'chat' | 'embedding') =>
+    http.get('/models/by-type', { params: { modelType } }),
+  testEmbedding: (modelId: string | number) =>
+    http.post(`/models/embedding/${modelId}/test`),
+  getDefaultEmbedding: () => http.get('/models/embedding/default'),
+  setDefaultEmbedding: (modelId: string | number | '') =>
+    http.post('/models/embedding/default', { modelId }),
 }
 
 // ==================== OAuth ====================
@@ -355,7 +364,7 @@ export const wikiApi = {
   listKBsByAgent: (agentId: number) => http.get(`/wiki/knowledge-bases/agent/${agentId}`),
   createKB: (data: { name: string; description?: string; agentId?: number }) =>
     http.post('/wiki/knowledge-bases', data),
-  updateKB: (id: number, data: { name?: string; description?: string; agentId?: number }) =>
+  updateKB: (id: number, data: { name?: string; description?: string; agentId?: number; embeddingModelId?: string | number | null }) =>
     http.put(`/wiki/knowledge-bases/${id}`, data),
   deleteKB: (id: number) => http.delete(`/wiki/knowledge-bases/${id}`),
   getConfig: (id: number) => http.get(`/wiki/knowledge-bases/${id}/config`),

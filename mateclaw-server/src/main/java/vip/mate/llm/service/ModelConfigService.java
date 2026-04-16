@@ -33,6 +33,9 @@ public class ModelConfigService {
         return modelConfigMapper.selectList(new LambdaQueryWrapper<ModelConfigEntity>()
                 .eq(ModelConfigEntity::getEnabled, true)
                 .eq(ModelConfigEntity::getProvider, "dashscope")
+                // 仅 chat 类型（排除 embedding），NULL 兼容老数据
+                .and(w -> w.isNull(ModelConfigEntity::getModelType)
+                           .or().eq(ModelConfigEntity::getModelType, "chat"))
                 .orderByDesc(ModelConfigEntity::getIsDefault)
                 .orderByAsc(ModelConfigEntity::getName));
     }
@@ -44,6 +47,41 @@ public class ModelConfigService {
                 .orderByAsc(ModelConfigEntity::getName));
     }
 
+    /**
+     * 按模型类型筛选（RFC: embedding UI 配置）。
+     * <p>
+     * modelType 参数：
+     * <ul>
+     *   <li>{@code "chat"} — 对话模型（默认，包括老数据 modelType IS NULL）</li>
+     *   <li>{@code "embedding"} — 文本向量化模型</li>
+     * </ul>
+     */
+    public List<ModelConfigEntity> listByType(String modelType) {
+        if ("chat".equals(modelType)) {
+            return modelConfigMapper.selectList(new LambdaQueryWrapper<ModelConfigEntity>()
+                    .and(w -> w.isNull(ModelConfigEntity::getModelType)
+                               .or().eq(ModelConfigEntity::getModelType, "chat"))
+                    .orderByDesc(ModelConfigEntity::getIsDefault)
+                    .orderByAsc(ModelConfigEntity::getName));
+        }
+        return modelConfigMapper.selectList(new LambdaQueryWrapper<ModelConfigEntity>()
+                .eq(ModelConfigEntity::getModelType, modelType)
+                .orderByDesc(ModelConfigEntity::getIsDefault)
+                .orderByAsc(ModelConfigEntity::getName));
+    }
+
+    /**
+     * 查找第一个 enabled 的 embedding 模型（WikiEmbeddingService 的 fallback 路径）
+     */
+    public ModelConfigEntity findFirstEnabledEmbedding() {
+        return modelConfigMapper.selectOne(new LambdaQueryWrapper<ModelConfigEntity>()
+                .eq(ModelConfigEntity::getModelType, "embedding")
+                .eq(ModelConfigEntity::getEnabled, true)
+                .orderByDesc(ModelConfigEntity::getIsDefault)
+                .orderByAsc(ModelConfigEntity::getName)
+                .last("LIMIT 1"));
+    }
+
     public ModelConfigEntity getModel(Long id) {
         ModelConfigEntity entity = modelConfigMapper.selectById(id);
         if (entity == null) {
@@ -53,14 +91,19 @@ public class ModelConfigService {
     }
 
     public ModelConfigEntity getDefaultModel() {
+        // 默认 chat 模型：明确排除 embedding 类型
         ModelConfigEntity entity = modelConfigMapper.selectOne(new LambdaQueryWrapper<ModelConfigEntity>()
                 .eq(ModelConfigEntity::getIsDefault, true)
+                .and(w -> w.isNull(ModelConfigEntity::getModelType)
+                           .or().eq(ModelConfigEntity::getModelType, "chat"))
                 .last("LIMIT 1"));
         if (entity != null) {
             return entity;
         }
         entity = modelConfigMapper.selectOne(new LambdaQueryWrapper<ModelConfigEntity>()
                 .eq(ModelConfigEntity::getEnabled, true)
+                .and(w -> w.isNull(ModelConfigEntity::getModelType)
+                           .or().eq(ModelConfigEntity::getModelType, "chat"))
                 .orderByAsc(ModelConfigEntity::getName)
                 .last("LIMIT 1"));
         if (entity == null) {

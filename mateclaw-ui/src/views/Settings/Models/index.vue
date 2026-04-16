@@ -64,6 +64,9 @@
       </div>
     </div>
 
+    <!-- Embedding 模型（RFC Embedding UI） -->
+    <EmbeddingModelsSection />
+
     <div v-if="savedTip" class="save-tip">{{ savedTip }}</div>
 
     <!-- Provider Config Modal -->
@@ -119,6 +122,7 @@ import { ElMessage } from 'element-plus'
 import type { ProviderInfo, ProviderModelInfo } from '@/types'
 import { useProviders } from './useProviders'
 import ProviderCard from './ProviderCard.vue'
+import EmbeddingModelsSection from './EmbeddingModelsSection.vue'
 import ProviderConfigModal from './modals/ProviderConfigModal.vue'
 import ManageModelsModal from './modals/ManageModelsModal.vue'
 

@@ -94,7 +94,7 @@ public class HybridRetriever {
     public List<ChunkHit> searchChunks(Long kbId, String query, int topK) {
         if (!embeddingService.isAvailable()) return List.of();
 
-        float[] queryVec = embeddingService.embedQuery(query);
+        float[] queryVec = embeddingService.embedQuery(kbId, query);
         if (queryVec == null) return List.of();
 
         List<WikiChunkEntity> allChunks = chunkService.listByKbId(kbId);
@@ -118,7 +118,7 @@ public class HybridRetriever {
 
     /** 语义搜索：chunk cosine → 聚合到 page（同页多 chunk 取最高分） */
     private List<RankedItem> semanticSearch(Long kbId, String query, int limit) {
-        float[] queryVec = embeddingService.embedQuery(query);
+        float[] queryVec = embeddingService.embedQuery(kbId, query);
         if (queryVec == null) return List.of();
 
         List<WikiChunkEntity> allChunks = chunkService.listByKbId(kbId);

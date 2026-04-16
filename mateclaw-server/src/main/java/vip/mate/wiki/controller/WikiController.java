@@ -111,7 +111,17 @@ public class WikiController {
         String name = (String) body.get("name");
         String description = (String) body.get("description");
         Long agentId = body.get("agentId") != null ? Long.valueOf(body.get("agentId").toString()) : null;
-        return R.ok(kbService.update(id, name, description, agentId));
+        kbService.update(id, name, description, agentId);
+        // RFC Embedding UI: 允许通过此接口绑定 / 解绑 embedding 模型
+        if (body.containsKey("embeddingModelId")) {
+            Object v = body.get("embeddingModelId");
+            Long embeddingModelId = null;
+            if (v != null && !v.toString().isBlank()) {
+                embeddingModelId = Long.valueOf(v.toString());
+            }
+            kbService.updateEmbeddingModelId(id, embeddingModelId);
+        }
+        return R.ok(kbService.getById(id));
     }
 
     @RequireWorkspaceRole("admin")

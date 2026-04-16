@@ -112,6 +112,25 @@ public class WikiKnowledgeBaseService {
         return entity;
     }
 
+    /**
+     * 更新 KB 绑定的 embedding 模型 ID。
+     * <p>
+     * 切换模型后，旧的向量维度/语义空间与新模型不一致，下次搜索/处理时会被
+     * WikiEmbeddingService 自动检测为"model 不匹配"触发重嵌。
+     * 这里不主动清空 embedding（让 embed_model 字段的差异自己触发重建）。
+     *
+     * @param embeddingModelId null 表示解绑（走系统默认）
+     */
+    @Transactional
+    public void updateEmbeddingModelId(Long id, Long embeddingModelId) {
+        WikiKnowledgeBaseEntity entity = kbMapper.selectById(id);
+        if (entity == null) {
+            throw new IllegalArgumentException("Knowledge base not found: " + id);
+        }
+        entity.setEmbeddingModelId(embeddingModelId);
+        kbMapper.updateById(entity);
+    }
+
     @Transactional
     public void updateConfig(Long id, String configContent) {
         WikiKnowledgeBaseEntity entity = kbMapper.selectById(id);
