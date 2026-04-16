@@ -83,12 +83,22 @@
           <div class="modal-body">
             <div class="form-grid" style="grid-template-columns: 1fr;">
               <div class="form-group">
-                <label>{{ t('security.members.addDialog.userId') }}</label>
-                <input v-model.number="newMemberUserId" type="number" class="form-input" :placeholder="t('security.members.addDialog.userIdPlaceholder')" />
+                <label>{{ t('security.members.addDialog.username') }} <span class="required">*</span></label>
+                <input v-model.trim="newMemberForm.username" type="text" class="form-input" :placeholder="t('security.members.addDialog.usernamePlaceholder')" />
+                <span class="form-hint">{{ t('security.members.addDialog.usernameHint') }}</span>
+              </div>
+              <div class="form-group">
+                <label>{{ t('security.members.addDialog.password') }}</label>
+                <input v-model="newMemberForm.password" type="password" class="form-input" :placeholder="t('security.members.addDialog.passwordPlaceholder')" />
+                <span class="form-hint">{{ t('security.members.addDialog.passwordHint') }}</span>
+              </div>
+              <div class="form-group">
+                <label>{{ t('security.members.addDialog.nickname') }}</label>
+                <input v-model.trim="newMemberForm.nickname" type="text" class="form-input" :placeholder="t('security.members.addDialog.nicknamePlaceholder')" />
               </div>
               <div class="form-group">
                 <label>{{ t('security.members.addDialog.role') }}</label>
-                <select v-model="newMemberRole" class="form-input">
+                <select v-model="newMemberForm.role" class="form-input">
                   <option value="admin">{{ t('security.members.roles.admin') }}</option>
                   <option value="member">{{ t('security.members.roles.member') }}</option>
                   <option value="viewer">{{ t('security.members.roles.viewer') }}</option>
@@ -98,7 +108,7 @@
           </div>
           <div class="modal-footer">
             <button class="btn-secondary" @click="showAddDialog = false">{{ t('security.members.actions.cancel') }}</button>
-            <button class="btn-primary" @click="addMember" :disabled="!newMemberUserId">{{ t('security.members.actions.confirm') }}</button>
+            <button class="btn-primary" @click="addMember" :disabled="!newMemberForm.username">{{ t('security.members.actions.confirm') }}</button>
           </div>
         </div>
       </div>
@@ -107,7 +117,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, reactive, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ElMessage } from 'element-plus'
 import { workspaceTeamApi } from '@/api/index'
@@ -129,8 +139,9 @@ const store = useWorkspaceStore()
 const members = ref<Member[]>([])
 const loading = ref(false)
 const showAddDialog = ref(false)
-const newMemberUserId = ref<number | null>(null)
-const newMemberRole = ref('member')
+
+const defaultForm = () => ({ username: '', password: '', nickname: '', role: 'member' })
+const newMemberForm = reactive(defaultForm())
 
 onMounted(() => {
   fetchMembers()
@@ -152,16 +163,20 @@ async function fetchMembers() {
 
 async function addMember() {
   const wsId = store.currentWorkspaceId
-  if (!wsId || !newMemberUserId.value) return
+  if (!wsId || !newMemberForm.username) return
   try {
-    await workspaceTeamApi.addMember(wsId, { userId: newMemberUserId.value, role: newMemberRole.value })
+    await workspaceTeamApi.addMember(wsId, {
+      username: newMemberForm.username,
+      password: newMemberForm.password || undefined,
+      nickname: newMemberForm.nickname || undefined,
+      role: newMemberForm.role,
+    })
     ElMessage.success(t('security.members.messages.addSuccess'))
     showAddDialog.value = false
-    newMemberUserId.value = null
-    newMemberRole.value = 'member'
+    Object.assign(newMemberForm, defaultForm())
     fetchMembers()
   } catch (e: any) {
-    ElMessage.error(t('security.members.messages.addFailed'))
+    ElMessage.error(e?.msg || e?.message || t('security.members.messages.addFailed'))
   }
 }
 
@@ -247,5 +262,16 @@ function formatDate(dateStr: string) {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+}
+
+.required {
+  color: var(--mc-danger, #e74c3c);
+}
+
+.form-hint {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--mc-text-tertiary);
 }
 </style>

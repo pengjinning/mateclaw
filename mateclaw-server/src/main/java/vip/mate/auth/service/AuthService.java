@@ -55,7 +55,7 @@ public class AuthService {
         }
 
         String token = generateToken(user);
-        return new LoginResponse(token, user.getUsername(), user.getNickname(), user.getRole());
+        return new LoginResponse(user.getId(), token, user.getUsername(), user.getNickname(), user.getRole());
     }
 
     /**
@@ -76,7 +76,10 @@ public class AuthService {
         if (count > 0) {
             throw new MateClawException("err.auth.username_exists", "用户名已存在: " + user.getUsername());
         }
-        user.setPassword(passwordEncoder.encode(user.getPassword()));
+        if (user.getPassword() == null || user.getPassword().isBlank()) {
+            throw new MateClawException("err.auth.password_required", "Password is required");
+        }
+        user.setPassword(passwordEncoder.encode(user.getPassword().trim()));
         user.setEnabled(true);
         if (user.getRole() == null) {
             user.setRole("user");
@@ -84,6 +87,22 @@ public class AuthService {
         userMapper.insert(user);
         user.setPassword(null);
         return user;
+    }
+
+    /**
+     * Reset password (admin operation — no old password required).
+     * Used when an admin wants to set/reset a member's password.
+     */
+    public void resetPassword(Long userId, String newPassword) {
+        if (newPassword == null || newPassword.isBlank()) {
+            throw new MateClawException("err.auth.password_required", "Password is required");
+        }
+        UserEntity user = userMapper.selectById(userId);
+        if (user == null) {
+            throw new MateClawException("err.auth.user_not_found", "用户不存在");
+        }
+        user.setPassword(passwordEncoder.encode(newPassword.trim()));
+        userMapper.updateById(user);
     }
 
     /**

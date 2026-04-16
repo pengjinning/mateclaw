@@ -200,18 +200,30 @@ async function onDeleteProvider(provider: ProviderInfo) {
 }
 
 async function onAddProviderModel() {
-  await addProviderModel()
-  showSavedTip(t('settings.model.modelAdded'))
+  try {
+    await addProviderModel()
+    showSavedTip(t('settings.model.modelAdded'))
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : t('settings.model.modelAddFailed'))
+  }
 }
 
 async function onRemoveProviderModel(model: ProviderModelInfo) {
-  await removeProviderModel(model)
-  showSavedTip(t('settings.model.modelRemoved'))
+  try {
+    await removeProviderModel(model)
+    showSavedTip(t('settings.model.modelRemoved'))
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : t('settings.model.modelRemoveFailed'))
+  }
 }
 
 async function onSetActiveModel(model: ProviderModelInfo) {
-  await setActiveModel(model)
-  showSavedTip(t('settings.model.activeChanged'))
+  try {
+    await setActiveModel(model)
+    showSavedTip(t('settings.model.activeChanged'))
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : t('settings.model.activeChangeFailed'))
+  }
 }
 
 async function onApplyModels() {

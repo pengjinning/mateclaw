@@ -94,7 +94,35 @@ public class WorkspaceController {
                                                Authentication auth) {
         Long userId = resolveUserId(auth);
         workspaceService.requirePermission(id, userId, "admin");
-        Long targetUserId = Long.valueOf(body.get("userId").toString());
+
+        Long targetUserId;
+        if (body.containsKey("username")) {
+            String username = body.get("username").toString().trim();
+            String password = body.containsKey("password") && body.get("password") != null
+                    ? body.get("password").toString().trim() : null;
+            UserEntity target = authService.findByUsername(username);
+            if (target == null) {
+                // User does not exist — create account (password required)
+                if (password == null || password.isBlank()) {
+                    throw new MateClawException("err.workspace.user_not_found",
+                            "User not found: " + username + ". Provide a password to create the account.");
+                }
+                UserEntity newUser = new UserEntity();
+                newUser.setUsername(username);
+                newUser.setPassword(password);
+                newUser.setNickname(body.containsKey("nickname")
+                        ? body.get("nickname").toString() : username);
+                target = authService.createUser(newUser);
+            } else if (password != null && !password.isBlank()) {
+                // User exists AND admin provided a password — reset it.
+                // This fixes the case where an admin removes a member, re-adds
+                // them with a new password, but the stale password blocks login.
+                authService.resetPassword(target.getId(), password);
+            }
+            targetUserId = target.getId();
+        } else {
+            targetUserId = Long.valueOf(body.get("userId").toString());
+        }
         String role = body.containsKey("role") ? body.get("role").toString() : "member";
         return R.ok(workspaceService.addMember(id, targetUserId, role));
     }

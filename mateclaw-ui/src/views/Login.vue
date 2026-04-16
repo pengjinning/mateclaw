@@ -77,6 +77,7 @@ async function handleLogin() {
     const res: any = await authApi.login(form)
     const data = res.data || res
     localStorage.setItem('token', data.token)
+    localStorage.setItem('userId', String(data.id || '1'))
     localStorage.setItem('username', data.username || form.username)
     localStorage.setItem('role', data.role || 'user')
     router.push('/')

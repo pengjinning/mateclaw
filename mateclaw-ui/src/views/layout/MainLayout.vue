@@ -105,6 +105,9 @@
               <div class="user-name">{{ username }}</div>
               <div class="user-role">{{ roleLabel }}</div>
             </div>
+            <button class="change-password-btn" @click="showChangePassword = true" :title="t('auth.changePassword')">
+              <el-icon :size="16"><Lock /></el-icon>
+            </button>
             <button class="logout-btn" @click="logout" :title="t('nav.logout')">
               <el-icon :size="16"><SwitchButton /></el-icon>
             </button>
@@ -142,6 +145,8 @@
 
     <OnboardingWizard v-if="showOnboarding" @close="showOnboarding = false" />
     <DoctorDrawer :visible="showDoctor" @close="showDoctor = false" @status="onHealthStatus" />
+
+    <ChangePasswordDialog v-model:visible="showChangePassword" />
   </div>
 </template>
 
@@ -158,7 +163,8 @@ import DoctorDrawer from '@/views/Doctor/DoctorDrawer.vue'
 import WorkspaceSwitcher from '@/components/workspace/WorkspaceSwitcher.vue'
 import { useWorkspaceStore } from '@/stores/useWorkspaceStore'
 import { applyLocale, currentLocale, type AppLocale } from '@/i18n'
-import { SwitchButton } from '@element-plus/icons-vue'
+import { SwitchButton, Lock } from '@element-plus/icons-vue'
+import ChangePasswordDialog from '@/components/ChangePasswordDialog.vue'
 
 const router = useRouter()
 const route = useRoute()
@@ -364,6 +370,8 @@ function isNavItemActive(item: { path: string; label: string }) {
   }
   return route.path === item.path
 }
+
+const showChangePassword = ref(false)
 
 function logout() {
   localStorage.removeItem('token')
@@ -819,6 +827,7 @@ watch(() => workspaceStore.currentWorkspaceId, () => {
 
 .user-role { font-size: 10px; color: var(--mc-text-tertiary); }
 
+.change-password-btn,
 .logout-btn {
   width: 26px;
   height: 26px;
@@ -832,6 +841,11 @@ watch(() => workspaceStore.currentWorkspaceId, () => {
   border-radius: 4px;
   padding: 0;
   flex-shrink: 0;
+}
+
+.change-password-btn:hover {
+  background: var(--mc-primary-bg);
+  color: var(--mc-primary);
 }
 
 .logout-btn:hover {

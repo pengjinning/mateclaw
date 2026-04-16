@@ -221,7 +221,10 @@ router.beforeEach((to, _from, next) => {
     return
   }
   const token = localStorage.getItem('token')
-  if (to.name !== 'Login' && !token) {
+  if (to.name === 'Login' && token) {
+    // Already logged in — skip login page
+    next({ path: '/' })
+  } else if (to.name !== 'Login' && !token) {
     next({ name: 'Login' })
   } else {
     next()
