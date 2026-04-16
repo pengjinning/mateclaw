@@ -208,6 +208,10 @@ export interface Skill {
   builtin?: boolean
   tags?: string
   createTime: string
+  /** RFC-023: 来源对话 ID（AI 合成时记录） */
+  sourceConversationId?: string
+  /** RFC-023: 安全扫描状态 (PASSED / FAILED / null) */
+  securityScanStatus?: string
 }
 
 /** 运行时解析状态（来自 /runtime/status） */

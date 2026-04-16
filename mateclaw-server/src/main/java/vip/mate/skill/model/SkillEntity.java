@@ -74,6 +74,16 @@ public class SkillEntity {
     /** 标签（逗号分隔） */
     private String tags;
 
+    /** RFC-023：来源对话 ID（Agent 自治合成时记录） */
+    private String sourceConversationId;
+
+    /**
+     * RFC-023：安全扫描状态。
+     * NULL = 旧数据或手动创建（不受扫描约束），PASSED = 扫描通过，FAILED = 扫描拦截。
+     * listEnabledSkills 过滤条件：NULL 或 PASSED 才加载。
+     */
+    private String securityScanStatus;
+
     @TableField(fill = FieldFill.INSERT)
     private LocalDateTime createTime;
 

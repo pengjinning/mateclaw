@@ -70,7 +70,18 @@
           <span class="runtime-badge" :class="getRuntimeBadgeClass(skill)">
             {{ getRuntimeLabel(skill) }}
           </span>
-          <!-- Security Badge -->
+          <!-- RFC-023: AI Synthesized Badge -->
+          <span v-if="skill.sourceConversationId" class="runtime-badge rt-synthesized" title="Auto-synthesized from conversation">
+            🤖 AI
+          </span>
+          <!-- Security Scan Status (RFC-023) -->
+          <span v-if="skill.securityScanStatus === 'FAILED'" class="runtime-badge rt-blocked">
+            🛡️ Scan Failed
+          </span>
+          <span v-else-if="skill.securityScanStatus === 'PASSED'" class="runtime-badge rt-ready">
+            ✓ Scanned
+          </span>
+          <!-- Security Badge (runtime) -->
           <span v-if="getSecurityBadge(skill)" class="runtime-badge" :class="getSecurityBadge(skill)?.cls">
             {{ getSecurityBadge(skill)?.label }}
           </span>
@@ -566,6 +577,8 @@ function getSkillTypeLabel(type: string) {
 .rt-fallback { background: var(--mc-primary-bg); color: var(--mc-primary-hover); }
 .rt-error { background: var(--mc-danger-bg); color: var(--mc-danger); }
 .rt-blocked { background: var(--mc-danger-bg); color: var(--mc-danger); font-weight: 600; }
+.rt-synthesized { background: #f0f0ff; color: #6366f1; }
+:root.dark .rt-synthesized { background: rgba(99, 102, 241, 0.15); color: #818cf8; }
 .rt-sec-warning { background: var(--mc-primary-bg); color: var(--mc-primary-hover); }
 .rt-deps-missing { background: var(--mc-primary-bg); color: var(--mc-primary-hover); }
 .rt-disabled { background: var(--mc-bg-sunken); color: var(--mc-text-tertiary); }
