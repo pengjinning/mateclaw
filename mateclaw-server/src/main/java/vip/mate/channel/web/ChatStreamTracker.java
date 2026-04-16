@@ -144,6 +144,18 @@ public class ChatStreamTracker {
         if (state != null && state.done) {
             stopHeartbeat(conversationId);
             runs.put(conversationId, new RunState(conversationId));
+        } else if (state != null) {
+            // Reuse path: when complete() early-returns due to activeFluxCount > 0
+            // (approval replay / interrupt / any leaked flux increment), the RunState
+            // is kept with stopRequested still true from the previous turn. Left alone,
+            // the next register() would reuse it and ReasoningNode would instantly
+            // abort every new message with "Stop requested before LLM call".
+            // Reset the flag here — new registration means new user intent, and any
+            // still-live prior flux has already been cancelled via requestStop()'s
+            // disposable.dispose(), so the flag is redundant for it.
+            if (state.stopRequested.compareAndSet(true, false)) {
+                log.info("[ChatStreamTracker] Reset stale stopRequested on register: {}", conversationId);
+            }
         }
         startHeartbeat(conversationId);
         log.debug("Stream registered: {}", conversationId);
