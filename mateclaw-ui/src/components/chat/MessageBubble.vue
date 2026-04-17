@@ -322,6 +322,18 @@ const errorTitle = computed(() => {
 
 const errorDescription = computed(() => {
   if (!errorInfo.value) return ''
+  // 优先展示后端 extractUserFriendlyError 生成的具体消息（比泛化模板更有指向性，
+  // 比如"当前模型不支持工具调用，请切换到 qwen3 / qwen2.5 ..."）。
+  // 仅当 rawMessage 为空/过短时才回退到分类模板。
+  const raw = errorInfo.value.rawMessage?.trim() || ''
+  if (raw.length > 8) {
+    // 去掉后端冗余前缀，错误卡标题已经表达了类别
+    return raw
+      .replace(/^Bad request:\s*/i, '')
+      .replace(/^LLM 调用失败[:：]\s*/, '')
+      .replace(/^认证失败[:：]\s*/, '')
+      .replace(/^\[错误]\s*/, '')
+  }
   return t(`chat.error.${errorInfo.value.category}.description`)
 })
 

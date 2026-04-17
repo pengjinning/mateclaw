@@ -6,6 +6,7 @@ import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.prompt.Prompt;
+import org.springframework.web.reactive.function.client.WebClientResponseException;
 import vip.mate.channel.web.ChatStreamTracker;
 
 import reactor.core.Disposable;
@@ -657,12 +658,41 @@ public class NodeStreamingChatHelper {
     /** 从异常链提取用户友好的错误信息 */
     private static String extractUserFriendlyError(Throwable error) {
         String msg = error.getMessage();
-        if (msg == null) return error.getClass().getSimpleName();
+        if (msg == null) msg = error.getClass().getSimpleName();
+
+        // 若是 WebClientResponseException，先把 response body 也并入判定样本，
+        // 因为 Ollama 的 "does not support tools" 错误只在 body 里，不在 status line 里。
+        String bodySample = "";
+        Throwable cursor = error;
+        for (int i = 0; cursor != null && i < 5; i++, cursor = cursor.getCause()) {
+            if (cursor instanceof WebClientResponseException wre) {
+                try {
+                    String body = wre.getResponseBodyAsString();
+                    if (body != null && !body.isEmpty()) {
+                        bodySample = body.length() > 512 ? body.substring(0, 512) : body;
+                    }
+                } catch (Exception ignored) {
+                }
+                break;
+            }
+        }
+        String combined = msg + " " + bodySample;
+
+        // ↓↓↓ 具体错误翻译（优先级由高到低）↓↓↓
+
+        // Ollama / 其他 provider 在模型不支持 function calling 时返回此文案：
+        //   "<model> does not support tools"
+        // 这不是模型坏，而是用户选错了模型 —— 给出可操作的切换建议。
+        if (bodySample.contains("does not support tools") || msg.contains("does not support tools")) {
+            return "当前模型不支持工具调用（function calling）。请在 设置 → 模型 里切换到支持 tools 的模型，"
+                    + "例如 qwen3、qwen2.5:7b+、llama3.1:8b+、mistral-nemo、command-r 等。";
+        }
+
         // DashScope "url error" is really "model name not mapped to any valid endpoint".
-        // Translate it so users see the real cause and the actionable next step.
         if (msg.contains("url error") || msg.contains("[InvalidParameter]")
                 || msg.contains("Model not exist") || msg.contains("model_not_found")
-                || msg.contains("Model not found")) {
+                || msg.contains("Model not found")
+                || combined.contains("model not found") || combined.contains("not_found_error")) {
             return "Model name not available on this provider — verify the model exists and is supported (Settings → Models)";
         }
         // 对 Jackson 反序列化错误，提取关键信息

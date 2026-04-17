@@ -1,4 +1,8 @@
 -- V2: Upgrade schema for databases created before Flyway was introduced.
+-- MySQL does NOT support `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` (MariaDB-only).
+-- We use INFORMATION_SCHEMA + dynamic SQL as an idempotent replacement so this migration
+-- is safe on BOTH: (a) fresh MySQL installs whose V1 baseline already contains the columns,
+-- and (b) legacy installs bootstrapped from the old schema.sql that predates those columns.
 
 CREATE TABLE IF NOT EXISTS mate_workspace (
     id            BIGINT       NOT NULL PRIMARY KEY,
@@ -13,7 +17,11 @@ CREATE TABLE IF NOT EXISTS mate_workspace (
     deleted       INT          NOT NULL DEFAULT 0,
     UNIQUE KEY uk_workspace_slug (slug)
 );
-ALTER TABLE mate_workspace ADD COLUMN IF NOT EXISTS base_path VARCHAR(512);
+
+-- mate_workspace.base_path (legacy upgrade path)
+SET @c := (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'mate_workspace' AND COLUMN_NAME = 'base_path');
+SET @s := IF(@c = 0, 'ALTER TABLE mate_workspace ADD COLUMN base_path VARCHAR(512)', 'SELECT 1');
+PREPARE stmt FROM @s; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
 CREATE TABLE IF NOT EXISTS mate_workspace_member (
     id           BIGINT      NOT NULL PRIMARY KEY,
@@ -27,12 +35,30 @@ CREATE TABLE IF NOT EXISTS mate_workspace_member (
     INDEX idx_ws_member_user (user_id)
 );
 
-ALTER TABLE mate_agent ADD COLUMN IF NOT EXISTS workspace_id BIGINT NOT NULL DEFAULT 1;
-ALTER TABLE mate_channel ADD COLUMN IF NOT EXISTS workspace_id BIGINT NOT NULL DEFAULT 1;
-ALTER TABLE mate_conversation ADD COLUMN IF NOT EXISTS workspace_id BIGINT NOT NULL DEFAULT 1;
-ALTER TABLE mate_wiki_knowledge_base ADD COLUMN IF NOT EXISTS workspace_id BIGINT NOT NULL DEFAULT 1;
-ALTER TABLE mate_tool ADD COLUMN IF NOT EXISTS workspace_id BIGINT NOT NULL DEFAULT 1;
-ALTER TABLE mate_skill ADD COLUMN IF NOT EXISTS workspace_id BIGINT NOT NULL DEFAULT 1;
+-- workspace_id on pre-existing domain tables
+SET @c := (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'mate_agent' AND COLUMN_NAME = 'workspace_id');
+SET @s := IF(@c = 0, 'ALTER TABLE mate_agent ADD COLUMN workspace_id BIGINT NOT NULL DEFAULT 1', 'SELECT 1');
+PREPARE stmt FROM @s; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @c := (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'mate_channel' AND COLUMN_NAME = 'workspace_id');
+SET @s := IF(@c = 0, 'ALTER TABLE mate_channel ADD COLUMN workspace_id BIGINT NOT NULL DEFAULT 1', 'SELECT 1');
+PREPARE stmt FROM @s; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @c := (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'mate_conversation' AND COLUMN_NAME = 'workspace_id');
+SET @s := IF(@c = 0, 'ALTER TABLE mate_conversation ADD COLUMN workspace_id BIGINT NOT NULL DEFAULT 1', 'SELECT 1');
+PREPARE stmt FROM @s; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @c := (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'mate_wiki_knowledge_base' AND COLUMN_NAME = 'workspace_id');
+SET @s := IF(@c = 0, 'ALTER TABLE mate_wiki_knowledge_base ADD COLUMN workspace_id BIGINT NOT NULL DEFAULT 1', 'SELECT 1');
+PREPARE stmt FROM @s; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @c := (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'mate_tool' AND COLUMN_NAME = 'workspace_id');
+SET @s := IF(@c = 0, 'ALTER TABLE mate_tool ADD COLUMN workspace_id BIGINT NOT NULL DEFAULT 1', 'SELECT 1');
+PREPARE stmt FROM @s; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @c := (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'mate_skill' AND COLUMN_NAME = 'workspace_id');
+SET @s := IF(@c = 0, 'ALTER TABLE mate_skill ADD COLUMN workspace_id BIGINT NOT NULL DEFAULT 1', 'SELECT 1');
+PREPARE stmt FROM @s; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
 CREATE TABLE IF NOT EXISTS mate_workspace_file (
     id              BIGINT       NOT NULL PRIMARY KEY,
@@ -77,11 +103,26 @@ CREATE TABLE IF NOT EXISTS mate_audit_event (
     INDEX idx_audit_ws_time (workspace_id, create_time)
 );
 
-ALTER TABLE mate_model_provider ADD COLUMN IF NOT EXISTS auth_type VARCHAR(16) NOT NULL DEFAULT 'api_key';
-ALTER TABLE mate_model_provider ADD COLUMN IF NOT EXISTS oauth_access_token TEXT;
-ALTER TABLE mate_model_provider ADD COLUMN IF NOT EXISTS oauth_refresh_token TEXT;
-ALTER TABLE mate_model_provider ADD COLUMN IF NOT EXISTS oauth_expires_at BIGINT;
-ALTER TABLE mate_model_provider ADD COLUMN IF NOT EXISTS oauth_account_id VARCHAR(128);
+-- model provider OAuth columns
+SET @c := (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'mate_model_provider' AND COLUMN_NAME = 'auth_type');
+SET @s := IF(@c = 0, 'ALTER TABLE mate_model_provider ADD COLUMN auth_type VARCHAR(16) NOT NULL DEFAULT ''api_key''', 'SELECT 1');
+PREPARE stmt FROM @s; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @c := (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'mate_model_provider' AND COLUMN_NAME = 'oauth_access_token');
+SET @s := IF(@c = 0, 'ALTER TABLE mate_model_provider ADD COLUMN oauth_access_token TEXT', 'SELECT 1');
+PREPARE stmt FROM @s; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @c := (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'mate_model_provider' AND COLUMN_NAME = 'oauth_refresh_token');
+SET @s := IF(@c = 0, 'ALTER TABLE mate_model_provider ADD COLUMN oauth_refresh_token TEXT', 'SELECT 1');
+PREPARE stmt FROM @s; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @c := (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'mate_model_provider' AND COLUMN_NAME = 'oauth_expires_at');
+SET @s := IF(@c = 0, 'ALTER TABLE mate_model_provider ADD COLUMN oauth_expires_at BIGINT', 'SELECT 1');
+PREPARE stmt FROM @s; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @c := (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'mate_model_provider' AND COLUMN_NAME = 'oauth_account_id');
+SET @s := IF(@c = 0, 'ALTER TABLE mate_model_provider ADD COLUMN oauth_account_id VARCHAR(128)', 'SELECT 1');
+PREPARE stmt FROM @s; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
 CREATE TABLE IF NOT EXISTS mate_agent_skill (
     id           BIGINT    NOT NULL PRIMARY KEY,

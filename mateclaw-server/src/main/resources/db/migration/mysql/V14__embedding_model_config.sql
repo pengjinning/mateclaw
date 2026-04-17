@@ -1,6 +1,12 @@
 -- V14: Embedding model UI config (对标 Dify)
-ALTER TABLE mate_model_config ADD COLUMN IF NOT EXISTS model_type VARCHAR(32) DEFAULT 'chat';
-ALTER TABLE mate_wiki_knowledge_base ADD COLUMN IF NOT EXISTS embedding_model_id BIGINT DEFAULT NULL;
+-- MySQL lacks `ADD COLUMN IF NOT EXISTS`; use INFORMATION_SCHEMA guard instead.
+SET @c := (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'mate_model_config' AND COLUMN_NAME = 'model_type');
+SET @s := IF(@c = 0, 'ALTER TABLE mate_model_config ADD COLUMN model_type VARCHAR(32) DEFAULT ''chat''', 'SELECT 1');
+PREPARE stmt FROM @s; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @c := (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'mate_wiki_knowledge_base' AND COLUMN_NAME = 'embedding_model_id');
+SET @s := IF(@c = 0, 'ALTER TABLE mate_wiki_knowledge_base ADD COLUMN embedding_model_id BIGINT DEFAULT NULL', 'SELECT 1');
+PREPARE stmt FROM @s; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
 -- 播种 DashScope embedding（与 chat 模型共享 provider apiKey）
 INSERT INTO mate_model_config (id, name, provider, model_name, description, temperature, max_tokens, top_p, builtin, enabled, is_default, model_type, create_time, update_time, deleted)
