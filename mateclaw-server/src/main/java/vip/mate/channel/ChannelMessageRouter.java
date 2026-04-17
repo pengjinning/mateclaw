@@ -15,6 +15,7 @@ import vip.mate.memory.event.ConversationCompletedEvent;
 import vip.mate.tts.TtsService;
 import vip.mate.workspace.conversation.ConversationService;
 import vip.mate.workspace.conversation.model.MessageContentPart;
+import vip.mate.workspace.conversation.model.MessageEntity;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -22,6 +23,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.*;
@@ -427,10 +429,15 @@ public class ChannelMessageRouter {
             streamTracker.register(conversationId);
             streamTracker.incrementFlux(conversationId);
             conversationService.updateStreamStatus(conversationId, "running");
+            // 捕获已保存 assistant 的 DB id，供 finally 的 done 事件带出来 —— 前端 useChat.done 处理器
+            // 依赖 data.assistantMessageId 把本地流式 placeholder 的 client-uuid 升级为 DB id，这样
+            // 紧接着 refreshCurrentConversationMessages 的 reconcile 能按 id 干净匹配，不会走"认领"兜底
+            // 导致气泡丢失。
+            Long savedAssistantId = null;
             try {
                 // 流式路径：渠道实现了 StreamingChannelAdapter 则委托渠道渲染流式事件
                 if (adapter instanceof StreamingChannelAdapter streamingAdapter) {
-                    processWithStreaming(message, streamingAdapter, conversationId, agentId, promptText, channelEntity);
+                    savedAssistantId = processWithStreaming(message, streamingAdapter, conversationId, agentId, promptText, channelEntity);
                 } else {
                     // 同步路径：直接获取完整回复
                     String reply = agentService.chat(agentId, promptText, conversationId);
@@ -445,7 +452,8 @@ public class ChannelMessageRouter {
                                 adapter.getChannelType(), newPending.getToolName());
                     } else {
                         // 正常回复：保存并发送
-                        conversationService.saveMessage(conversationId, "assistant", reply);
+                        MessageEntity saved = conversationService.saveMessage(conversationId, "assistant", reply);
+                        savedAssistantId = saved != null ? saved.getId() : null;
                         publishConversationCompletedEvent(agentId, conversationId, message.getContent(), reply);
                         adapter.renderAndSend(replyTarget, reply);
                         log.info("[{}] Reply sent to {}: {}chars",
@@ -453,21 +461,29 @@ public class ChannelMessageRouter {
 
                         // 给 observer 推送完整的 assistant 消息以便前端一次性渲染为气泡
                         // （在 content_delta 事件可能没开的同步路径下作为兜底）
-                        streamTracker.broadcastObject(conversationId, "message_complete", Map.of(
-                                "conversationId", conversationId,
-                                "content", reply,
-                                "timestamp", System.currentTimeMillis()));
+                        Map<String, Object> msgCompletePayload = new HashMap<>();
+                        msgCompletePayload.put("conversationId", conversationId);
+                        msgCompletePayload.put("content", reply);
+                        if (savedAssistantId != null) {
+                            msgCompletePayload.put("assistantMessageId", savedAssistantId);
+                        }
+                        msgCompletePayload.put("timestamp", System.currentTimeMillis());
+                        streamTracker.broadcastObject(conversationId, "message_complete", msgCompletePayload);
 
                         // 语音回复：异步 TTS 合成并追加发送（先文本后语音，不阻塞）
                         maybeGenerateVoiceReply(message, adapter, replyTarget, conversationId, reply, channelEntity);
                     }
                 }
             } finally {
-                // 广播 done 事件让 observer 前端收尾
-                streamTracker.broadcastObject(conversationId, "done", Map.of(
-                        "conversationId", conversationId,
-                        "status", "completed",
-                        "timestamp", System.currentTimeMillis()));
+                // 广播 done 事件让 observer 前端收尾（HashMap 允许 null 值缺失，Map.of 不允许）
+                Map<String, Object> donePayload = new HashMap<>();
+                donePayload.put("conversationId", conversationId);
+                donePayload.put("status", "completed");
+                if (savedAssistantId != null) {
+                    donePayload.put("assistantMessageId", savedAssistantId);
+                }
+                donePayload.put("timestamp", System.currentTimeMillis());
+                streamTracker.broadcastObject(conversationId, "done", donePayload);
                 streamTracker.completeAndConsumeIfLast(conversationId);
                 try {
                     conversationService.updateStreamStatus(conversationId, "idle");
@@ -499,7 +515,7 @@ public class ChannelMessageRouter {
      * - StreamingChannelAdapter 负责渲染（AI Card / 卡片更新 / 文本累积等）
      * - Router 负责后续的审批检查、消息持久化、事件发布
      */
-    private void processWithStreaming(ChannelMessage message, StreamingChannelAdapter streamingAdapter,
+    private Long processWithStreaming(ChannelMessage message, StreamingChannelAdapter streamingAdapter,
                                       String conversationId, Long agentId, String promptText,
                                       ChannelEntity channelEntity) {
         String channelType = streamingAdapter.getChannelType();
@@ -521,7 +537,7 @@ public class ChannelMessageRouter {
                 log.info("[{}] Approval triggered during streaming (NOT saved to DB): tool={}",
                         channelType, newPending.getToolName());
             } else if (finalContent != null && !finalContent.isBlank()) {
-                conversationService.saveMessage(conversationId, "assistant", finalContent);
+                MessageEntity saved = conversationService.saveMessage(conversationId, "assistant", finalContent);
                 publishConversationCompletedEvent(agentId, conversationId, promptText, finalContent);
                 log.info("[{}] Streaming completed: contentLen={}", channelType, finalContent.length());
 
@@ -531,6 +547,7 @@ public class ChannelMessageRouter {
                     maybeGenerateVoiceReply(message, streamingAdapter, replyTarget,
                             conversationId, finalContent, channelEntity);
                 }
+                return saved != null ? saved.getId() : null;
             }
 
         } catch (Exception e) {
@@ -543,6 +560,7 @@ public class ChannelMessageRouter {
                 log.error("[{}] Failed to send streaming error message: {}", channelType, sendErr.getMessage());
             }
         }
+        return null;
     }
 
     // ==================== 审批重放 ====================

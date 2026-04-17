@@ -63,11 +63,19 @@
             v-for="conv in group.items"
             :key="conv.conversationId"
             class="conv-item"
-            :class="{ active: currentConversationId === conv.conversationId }"
+            :class="{
+              active: currentConversationId === conv.conversationId,
+              'is-running': conv.streamStatus === 'running',
+            }"
             @click="selectConversation(conv)"
           >
             <div class="conv-icon">
               <img :src="channelIconUrl(conv.source)" width="14" height="14" alt="" />
+              <span
+                v-if="conv.streamStatus === 'running'"
+                class="conv-running-dot"
+                :title="$t('chat.streamGenerating')"
+              ></span>
             </div>
             <div v-if="!convPanelCollapsed || isMobile" class="conv-info">
               <input
@@ -80,7 +88,17 @@
                 @click.stop
                 ref="renameInputRef"
               />
-              <div v-else class="conv-title" @dblclick.stop="startRename(conv)">{{ conv.title }}</div>
+              <div v-else class="conv-title" @dblclick.stop="startRename(conv)">
+                <span>{{ conv.title }}</span>
+                <span
+                  v-if="conv.streamStatus === 'running'"
+                  class="conv-running-badge"
+                  :title="$t('chat.streamGenerating')"
+                >
+                  <span class="conv-running-badge-pulse"></span>
+                  {{ $t('chat.streamGenerating') }}
+                </span>
+              </div>
               <div class="conv-meta">
                 <span>{{ $t('chat.messages', { count: conv.messageCount }) }}</span>
                 <span class="conv-dot">·</span>
@@ -877,10 +895,14 @@ function syncRouteState() {
 
 async function selectConversation(conv: Conversation) {
   if (isMobile.value) convPanelOpen.value = false
-  // 切换到不同会话时才 reset（含 stop 旧流）；点同一个会话时只刷新状态，避免误杀正在跑的 observer 流
+  // 切换到不同会话：只清理本地 UI/SSE（resetForNewConversation 会 stream.disconnect + 清变量），
+  // 但不 POST /chat/{A}/stop —— 让 A 的后台 agent run 跑到完成。
+  // 用户之后回到 A：pollActivity / selectConversation 的 /status 探测会自动 reconnect 接回实时流；
+  // 若 A 已完成，refreshCurrentConversationMessages 会从 DB 拉完整结果。
+  // 点同一个会话则完全不 reset，避免打断正在观察的流。
   const switchingAway = currentConversationId.value !== conv.conversationId
   if (switchingAway) {
-    resetStreamingState()
+    resetForNewConversation()
   }
   currentConversationId.value = conv.conversationId
   selectedAgentId.value = conv.agentId || selectedAgentId.value
@@ -1740,10 +1762,62 @@ function handleCodeCopy(e: MouseEvent) {
 .conv-icon {
   color: var(--mc-text-tertiary);
   flex-shrink: 0;
+  position: relative;
 }
 
 .conv-item.active .conv-icon {
   color: var(--mc-primary);
+}
+
+/* 正在执行：图标右上角脉冲小点（折叠与展开态均可见） */
+.conv-running-dot {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #fbbf24;
+  box-shadow: 0 0 4px rgba(251, 191, 36, 0.6), 0 0 0 2px var(--mc-bg-primary, #fff);
+  animation: pulse-dot 1.2s infinite;
+  pointer-events: none;
+}
+
+.conv-item.is-running {
+  background: color-mix(in srgb, #fbbf24 8%, transparent);
+}
+
+.conv-item.is-running:hover {
+  background: color-mix(in srgb, #fbbf24 14%, var(--mc-bg-sunken));
+}
+
+.conv-item.is-running.active {
+  background: var(--mc-primary-bg);
+}
+
+/* 展开态：标题右侧"生成中..."小徽章 */
+.conv-running-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 500;
+  color: #b45309;
+  background: rgba(251, 191, 36, 0.15);
+  border: 1px solid rgba(251, 191, 36, 0.3);
+  padding: 1px 6px 1px 5px;
+  border-radius: 10px;
+  line-height: 1.3;
+  white-space: nowrap;
+}
+
+.conv-running-badge-pulse {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #f59e0b;
+  animation: pulse-dot 1.2s infinite;
 }
 
 .conv-info {
@@ -1755,9 +1829,19 @@ function handleCodeCopy(e: MouseEvent) {
   font-size: 13px;
   font-weight: 500;
   color: var(--mc-text-primary);
-  white-space: nowrap;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* 标题文本本身承担省略号；flex 父级上的 overflow:hidden 会阻止 ellipsis 正常工作 */
+.conv-title > span:first-child {
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 1 1 auto;
 }
 
 .conv-item.active .conv-title {
