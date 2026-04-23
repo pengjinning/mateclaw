@@ -1,21 +1,24 @@
 <template>
-  <div class="page-container">
-    <div class="page-header">
-      <div>
-        <h1 class="page-title">{{ t('channels.title') }}</h1>
-        <p class="page-desc">{{ t('channels.desc') }}</p>
-      </div>
-      <button class="btn-primary" @click="openCreateModal">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
-        </svg>
-        {{ t('channels.newChannel') }}
-      </button>
-    </div>
+  <div class="mc-page-shell">
+    <div class="mc-page-frame">
+      <div class="mc-page-inner channels-page">
+        <div class="mc-page-header">
+          <div>
+            <div class="mc-page-kicker">Connect</div>
+            <h1 class="mc-page-title">{{ t('channels.title') }}</h1>
+            <p class="mc-page-desc">{{ t('channels.desc') }}</p>
+          </div>
+          <button class="btn-primary" @click="openCreateModal">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+            </svg>
+            {{ t('channels.newChannel') }}
+          </button>
+        </div>
 
-    <!-- 渠道卡片 -->
-    <div class="channel-grid">
-      <div v-for="channel in channels" :key="channel.id" class="channel-card">
+        <!-- 渠道卡片 -->
+        <div class="channel-grid">
+          <div v-for="channel in channels" :key="channel.id" class="channel-card mc-surface-card">
         <div class="channel-header">
           <div class="channel-icon-wrap">
             <img class="channel-icon-img" :src="getChannelIconPath(channel.channelType)" :alt="channel.channelType" />
@@ -63,17 +66,19 @@
             {{ t('common.delete') }}
           </button>
         </div>
-      </div>
+          </div>
 
-      <!-- 添加渠道卡片 -->
-      <div class="channel-card add-card" @click="openCreateModal">
-        <div class="add-icon">+</div>
-        <p class="add-label">{{ t('channels.addChannel') }}</p>
+          <!-- 添加渠道卡片 -->
+          <div class="channel-card add-card mc-surface-card" @click="openCreateModal">
+            <div class="add-icon">+</div>
+            <p class="add-label">{{ t('channels.addChannel') }}</p>
+          </div>
+        </div>
       </div>
     </div>
 
     <!-- Modal -->
-    <div v-if="showModal" class="modal-overlay" @click.self="closeModal">
+    <div v-if="showModal" class="modal-overlay">
       <div class="modal">
         <div class="modal-header">
           <h2>{{ editingChannel ? t('channels.modal.editTitle') : t('channels.modal.newTitle') }}</h2>
@@ -101,6 +106,8 @@
                 <option value="wecom">{{ t('channels.types.wecom') }}</option>
                 <option value="weixin">{{ t('channels.types.weixin') }}</option>
                 <option value="qq">{{ t('channels.types.qq') }}</option>
+                <option value="slack">{{ t('channels.types.slack') }}</option>
+                <option value="webchat">{{ t('channels.types.webchat') }}</option>
                 <option value="webhook">{{ t('channels.types.webhook') }}</option>
               </select>
             </div>
@@ -164,6 +171,16 @@
                 <p class="weixin-auth-hint">
                   {{ t('channels.weixin.authHint') }}
                 </p>
+                <!-- 编辑模式：提示扫码会替换当前账号，引导添加新渠道 -->
+                <div v-if="editingChannel && channelConfig.bot_token" class="weixin-multi-account-hint">
+                  <p class="hint-warning">⚠️ {{ t('channels.weixin.replaceWarning') }}</p>
+                  <button type="button" class="weixin-add-account-btn" @click="addNewWeixinChannel">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/>
+                    </svg>
+                    {{ t('channels.weixin.addNewAccount') }}
+                  </button>
+                </div>
                 <button type="button" class="weixin-auth-btn" @click="handleWeixinQrcode" :disabled="weixinQrcodeLoading">
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/>
@@ -171,7 +188,10 @@
                     <line x1="21" y1="14" x2="21" y2="17"/><line x1="14" y1="21" x2="17" y2="21"/>
                     <line x1="21" y1="21" x2="21" y2="21"/>
                   </svg>
-                  {{ weixinQrcodeLoading ? t('channels.weixin.qrcodeLoading') : t('channels.weixin.qrcodeButton') }}
+                  {{ editingChannel && channelConfig.bot_token
+                    ? t('channels.weixin.rescanButton')
+                    : (weixinQrcodeLoading ? t('channels.weixin.qrcodeLoading') : t('channels.weixin.qrcodeButton'))
+                  }}
                 </button>
                 <!-- 二维码展示区 -->
                 <div v-if="weixinQrcodeImg || weixinPollStatus === 'confirmed'" class="weixin-qrcode-area">
@@ -222,9 +242,11 @@
                         :type="visibleFields[field.key] ? 'text' : 'password'"
                         class="form-input"
                         :placeholder="field.placeholder"
+                        :readonly="field.readOnly"
                         autocomplete="off"
                       />
                       <button
+                        v-if="!field.readOnly"
                         type="button" class="eye-btn"
                         @click="visibleFields[field.key] = !visibleFields[field.key]"
                         :title="visibleFields[field.key] ? t('common.hide') : t('common.show')"
@@ -236,6 +258,17 @@
                         <svg v-else width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                           <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/>
                           <line x1="1" y1="1" x2="23" y2="23"/>
+                        </svg>
+                      </button>
+                      <button
+                        v-else-if="channelConfig[field.key]"
+                        type="button" class="copy-inline-btn"
+                        @click="copyText(String(channelConfig[field.key]))"
+                        :title="t('common.copy')"
+                      >
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                          <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+                          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
                         </svg>
                       </button>
                     </div>
@@ -267,6 +300,7 @@
                       type="number"
                       class="form-input"
                       :placeholder="field.placeholder"
+                      :readonly="field.readOnly"
                     />
 
                     <!-- 普通文本 -->
@@ -276,7 +310,12 @@
                       type="text"
                       class="form-input"
                       :placeholder="field.placeholder"
+                      :readonly="field.readOnly"
                     />
+
+                    <span v-if="field.readOnly && field.key === 'api_key'" class="form-hint">
+                      {{ editingChannel ? t('channels.webchatApiKeyReadOnly') : t('channels.webchatApiKeyGenerated') }}
+                    </span>
                   </div>
                 </div>
               </template>
@@ -306,6 +345,11 @@
               <!-- Web 类型：无额外配置 -->
               <div v-else-if="form.channelType === 'web'" class="empty-config">
                 <p class="empty-text">{{ t('channels.webHint') }}</p>
+              </div>
+
+              <!-- WebChat 类型 -->
+              <div v-else-if="form.channelType === 'webchat'" class="empty-config">
+                <p class="empty-text">{{ t('channels.webchatHint') }}</p>
               </div>
 
               <!-- Webhook 类型 -->
@@ -512,69 +556,69 @@ interface WebhookGuideInfo {
   steps: string[]
 }
 
-const WEBHOOK_GUIDES: Record<string, WebhookGuideInfo> = {
+const WEBHOOK_GUIDES = computed<Record<string, WebhookGuideInfo>>(() => ({
   dingtalk: {
     steps: [
-      '在 <a href="https://open-dev.dingtalk.com/" target="_blank" rel="noopener">钉钉开放平台</a> 创建机器人，填入 <b>AppKey</b> 和 <b>AppSecret</b>',
-      'Stream 模式（推荐）：消息接收模式选「Stream 模式」，无需公网 IP 即可使用',
-      'Webhook 模式：消息接收模式选「HTTP 模式」，将 Webhook URL 填入回调地址',
+      t('channels.guide.dingtalk.step1'),
+      t('channels.guide.dingtalk.step2'),
+      t('channels.guide.dingtalk.step3'),
     ],
   },
   feishu: {
     steps: [
-      '前往 <a href="https://open.feishu.cn/" target="_blank" rel="noopener">飞书开放平台</a> 创建企业自建应用',
-      '将应用的 <b>App ID</b> 和 <b>App Secret</b> 填入下方配置',
-      '<b>Webhook 模式</b>：在「事件订阅」配置中将请求地址设置为上方 Webhook URL，并订阅 <code>im.message.receive_v1</code> 事件',
-      '<b>WebSocket 模式</b>：无需公网地址，在下方接入模式中选择「WebSocket（长连接）」即可。需在飞书后台「事件订阅」中选择长连接方式',
-      '如需昵称显示，请在「权限管理」中申请 <code>contact:user.base:readonly</code> 权限',
+      t('channels.guide.feishu.step1'),
+      t('channels.guide.feishu.step2'),
+      t('channels.guide.feishu.step3'),
+      t('channels.guide.feishu.step4'),
+      t('channels.guide.feishu.step5'),
     ],
   },
   telegram: {
     steps: [
-      '在 Telegram 中搜索 <a href="https://t.me/BotFather" target="_blank" rel="noopener">@BotFather</a>，发送 <code>/newbot</code> 创建 Bot',
-      '将 BotFather 返回的 <b>Bot Token</b> 填入下方配置',
-      '<b>Long-Polling 模式</b>（推荐）：启动后自动通过 <code>getUpdates</code> 轮询接收消息，<b>无需公网 IP</b>',
-      '<b>Webhook 模式</b>：需要公网可访问的回调地址，切换接入模式后填入 Webhook URL',
+      t('channels.guide.telegram.step1'),
+      t('channels.guide.telegram.step2'),
+      t('channels.guide.telegram.step3'),
+      t('channels.guide.telegram.step4'),
     ],
   },
   discord: {
     steps: [
-      '前往 <a href="https://discord.com/developers/applications" target="_blank" rel="noopener">Discord Developer Portal</a> 创建 Application',
-      '在 Bot 页面创建 Bot 并复制 <b>Bot Token</b> 填入下方配置',
-      '在 Bot 页面开启 <b>MESSAGE CONTENT Intent</b>（Privileged Gateway Intents 区域）',
-      '在 OAuth2 → URL Generator 中勾选 <b>bot</b> scope 和 <b>Send Messages / Read Message History</b> 权限，生成邀请链接将 Bot 添加到目标服务器',
-      '启动后通过 <b>Gateway WebSocket</b> 自动接收消息，<b>无需公网 IP 和回调 URL</b>',
+      t('channels.guide.discord.step1'),
+      t('channels.guide.discord.step2'),
+      t('channels.guide.discord.step3'),
+      t('channels.guide.discord.step4'),
+      t('channels.guide.discord.step5'),
     ],
   },
   wecom: {
     steps: [
-      '前往 <a href="https://work.weixin.qq.com/wework_admin/frame" target="_blank" rel="noopener">企业微信管理后台</a>，进入「应用管理 → 智能机器人」创建一个新的智能机器人',
-      '在机器人配置中选择「<b>API 模式 → 配置长连接</b>」',
-      '记录机器人的 <b>Bot ID</b> 和 <b>Secret</b>，填入下方配置',
-      '启动渠道后即可在企业微信中扫码添加机器人对话，<b>无需公网 IP 和回调 URL</b>',
+      t('channels.guide.wecom.step1'),
+      t('channels.guide.wecom.step2'),
+      t('channels.guide.wecom.step3'),
+      t('channels.guide.wecom.step4'),
     ],
   },
   weixin: {
     steps: [
-      '确保已获得微信 <b>iLink Bot</b> 内测资格（目前为受邀内测阶段）',
-      '点击下方「获取登录二维码」按钮，用微信扫码登录',
-      '扫码成功后系统自动获取 <b>bot_token</b> 并填入配置',
-      '启动渠道后通过 <b>HTTP 长轮询</b>自动接收消息，<b>无需公网 IP 和回调 URL</b>',
+      t('channels.guide.weixin.step1'),
+      t('channels.guide.weixin.step2'),
+      t('channels.guide.weixin.step3'),
+      t('channels.guide.weixin.step4'),
     ],
   },
   qq: {
     steps: [
-      '前往 <a href="https://q.qq.com/" target="_blank" rel="noopener">QQ 开放平台</a> 创建机器人应用',
-      '在应用管理页面获取 <b>AppID</b> 和 <b>AppSecret</b>，填入下方配置',
-      '在「功能配置 → 消息订阅」中开启需要的消息类型（C2C 消息、群聊 @消息、频道消息等）',
-      '启动渠道后通过 <b>WebSocket 长连接</b>自动接收消息，<b>无需公网 IP 和回调 URL</b>',
+      t('channels.guide.qq.step1'),
+      t('channels.guide.qq.step2'),
+      t('channels.guide.qq.step3'),
+      t('channels.guide.qq.step4'),
     ],
   },
-}
+}))
 
 /** 当前渠道是否有接入引导 */
 const webhookGuide = computed<WebhookGuideInfo | null>(() => {
-  return WEBHOOK_GUIDES[form.value.channelType] || null
+  return WEBHOOK_GUIDES.value[form.value.channelType] || null
 })
 
 /** 当前渠道是否需要 Webhook URL（WebSocket / Stream / Long-Polling 模式不需要） */
@@ -740,6 +784,14 @@ async function handleWeixinQrcode() {
             if (s.base_url) {
               channelConfig.value.base_url = s.base_url
             }
+            // 新建模式且名称为默认值时，自动追加 token 后缀便于区分多账号
+            if (!editingChannel.value) {
+              const suffix = s.bot_token.slice(-6)
+              const currentName = form.value.name || ''
+              if (!currentName || currentName === t('channels.weixin.newAccountName') || currentName === t('channels.types.weixin')) {
+                form.value.name = t('channels.weixin.newAccountName') + ' (' + suffix + ')'
+              }
+            }
             weixinQrcodeImg.value = ''
             weixinPollStatus.value = 'confirmed'
             ElMessage.success(t('channels.weixin.loginSuccess'))
@@ -792,37 +844,32 @@ const feishuPermissionUrl = computed(() => {
 const feishuRequiredPermissions = computed(() => {
   const perms: { scope: string; desc: string; reason: string }[] = []
 
-  // 基础权限（始终需要）
   perms.push(
-    { scope: 'im:message', desc: '获取与发送单聊、群组消息', reason: '基础：收发消息' },
-    { scope: 'im:message.receive_v1', desc: '接收消息事件', reason: '基础：接收用户消息' },
+    { scope: 'im:message', desc: t('channels.feishu.perm.message'), reason: t('channels.feishu.perm.messageReason') },
+    { scope: 'im:message.receive_v1', desc: t('channels.feishu.perm.receive'), reason: t('channels.feishu.perm.receiveReason') },
   )
 
-  // WebSocket 模式需要的权限
   if (channelConfig.value?.connection_mode === 'websocket') {
     perms.push(
-      { scope: 'im:resource', desc: '获取消息中的资源文件', reason: 'WebSocket 模式下获取消息内容' },
+      { scope: 'im:resource', desc: t('channels.feishu.perm.resource'), reason: t('channels.feishu.perm.resourceReason') },
     )
   }
 
-  // 消息反应
   if (channelConfig.value?.enable_reaction !== false) {
     perms.push(
-      { scope: 'im:message.reactions', desc: '管理消息表情回复', reason: '消息反应：添加 👍 表情' },
+      { scope: 'im:message.reactions', desc: t('channels.feishu.perm.reactions'), reason: t('channels.feishu.perm.reactionsReason') },
     )
   }
 
-  // 昵称获取
   if (channelConfig.value?.enable_nickname_cache !== false) {
     perms.push(
-      { scope: 'contact:user.base:readonly', desc: '获取用户基本信息', reason: '昵称获取：显示用户真实姓名' },
+      { scope: 'contact:user.base:readonly', desc: t('channels.feishu.perm.contact'), reason: t('channels.feishu.perm.contactReason') },
     )
   }
 
-  // 媒体下载
   if (channelConfig.value?.media_download_enabled) {
     perms.push(
-      { scope: 'im:message.resource', desc: '获取消息中的资源文件', reason: '媒体下载：下载图片和文件' },
+      { scope: 'im:message.resource', desc: t('channels.feishu.perm.media'), reason: t('channels.feishu.perm.mediaReason') },
     )
   }
 
@@ -836,6 +883,15 @@ async function copyWebhookUrl() {
     await navigator.clipboard.writeText(webhookUrl.value)
     copyLabel.value = t('channels.webhook.copied')
     setTimeout(() => { copyLabel.value = t('channels.webhook.copy') }, 2000)
+  } catch {
+    ElMessage.warning(t('channels.webhook.copyFailed'))
+  }
+}
+
+async function copyText(text: string) {
+  try {
+    await navigator.clipboard.writeText(text)
+    ElMessage.success(t('common.copied'))
   } catch {
     ElMessage.warning(t('channels.webhook.copyFailed'))
   }
@@ -981,6 +1037,21 @@ function openEditModal(channel: Channel) {
 function closeModal() {
   showModal.value = false
   editingChannel.value = null
+}
+
+/** 绑定新微信账号：关闭当前编辑弹窗，以新建模式打开微信渠道 */
+function addNewWeixinChannel() {
+  closeModal()
+  // 计算已有微信渠道数量，用于自动递增命名
+  const existingCount = channels.value.filter(c => c.channelType === 'weixin').length
+  const newName = t('channels.weixin.newAccountName') + ' ' + (existingCount + 1)
+  // 延迟打开新建弹窗，确保关闭动画完成
+  setTimeout(() => {
+    openCreateModal()
+    form.value.channelType = 'weixin'
+    form.value.name = newName
+    onChannelTypeChange()
+  }, 200)
 }
 
 /** 渠道类型变更时重置配置字段 */
@@ -1148,7 +1219,7 @@ async function toggleChannel(channel: Channel) {
 
 // ==================== 渠道图标 ====================
 
-const CHANNEL_ICON_TYPES = ['web', 'dingtalk', 'feishu', 'wecom', 'weixin', 'telegram', 'discord', 'qq', 'webhook']
+const CHANNEL_ICON_TYPES = ['web', 'dingtalk', 'feishu', 'wecom', 'weixin', 'telegram', 'discord', 'qq', 'slack', 'webchat', 'webhook']
 function getChannelIconPath(type: string) {
   const name = CHANNEL_ICON_TYPES.includes(type) ? type : 'default'
   return `/icons/channels/${name}.svg`
@@ -1156,26 +1227,23 @@ function getChannelIconPath(type: string) {
 </script>
 
 <style scoped>
-.page-container { height: 100%; overflow-y: auto; padding: 24px; background: var(--mc-bg); }
-.page-header { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 24px; }
-.page-title { font-size: 20px; font-weight: 700; color: var(--mc-text-primary); margin: 0 0 4px; }
-.page-desc { font-size: 14px; color: var(--mc-text-secondary); margin: 0; }
+.channels-page { gap: 18px; }
 
-.btn-primary { display: flex; align-items: center; gap: 6px; padding: 8px 16px; background: var(--mc-primary); color: white; border: none; border-radius: 8px; font-size: 14px; font-weight: 500; cursor: pointer; }
+.btn-primary { display: flex; align-items: center; gap: 6px; padding: 10px 16px; background: linear-gradient(135deg, var(--mc-primary), var(--mc-primary-hover)); color: white; border: none; border-radius: 14px; font-size: 14px; font-weight: 600; cursor: pointer; box-shadow: var(--mc-shadow-soft); }
 .btn-primary:hover { background: var(--mc-primary-hover); }
 .btn-primary:disabled { background: var(--mc-border); cursor: not-allowed; }
-.btn-secondary { padding: 8px 16px; background: var(--mc-bg-elevated); color: var(--mc-text-primary); border: 1px solid var(--mc-border); border-radius: 8px; font-size: 14px; cursor: pointer; }
+.btn-secondary { padding: 8px 16px; background: var(--mc-bg-elevated); color: var(--mc-text-primary); border: 1px solid var(--mc-border); border-radius: 12px; font-size: 14px; cursor: pointer; }
 .btn-secondary:hover { background: var(--mc-bg-sunken); }
 
 /* 渠道卡片 */
-.channel-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; }
-.channel-card { background: var(--mc-bg-elevated); border: 1px solid var(--mc-border); border-radius: 12px; padding: 16px; transition: all 0.15s; }
-.channel-card:hover { border-color: var(--mc-primary-light); box-shadow: 0 4px 12px rgba(217,119,87,0.08); }
-.channel-header { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 10px; }
-.channel-icon-wrap { width: 40px; height: 40px; border-radius: 10px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; overflow: hidden; }
-.channel-icon-img { width: 40px; height: 40px; border-radius: 10px; object-fit: cover; }
+.channel-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 18px; }
+.channel-card { padding: 20px; transition: all 0.15s; min-height: 238px; display: flex; flex-direction: column; }
+.channel-card:hover { border-color: var(--mc-primary-light); box-shadow: var(--mc-shadow-medium); transform: translateY(-2px); }
+.channel-header { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px; }
+.channel-icon-wrap { width: 48px; height: 48px; border-radius: 14px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; overflow: hidden; background: linear-gradient(135deg, rgba(217,109,87,0.12), rgba(24,74,69,0.08)); }
+.channel-icon-img { width: 42px; height: 42px; border-radius: 12px; object-fit: cover; }
 .channel-meta { flex: 1; }
-.channel-name { font-size: 15px; font-weight: 600; color: var(--mc-text-primary); margin: 0 0 2px; }
+.channel-name { font-size: 16px; font-weight: 700; color: var(--mc-text-primary); margin: 0 0 2px; }
 .channel-type { font-size: 12px; color: var(--mc-text-tertiary); }
 
 .channel-status { padding: 3px 10px; border-radius: 20px; font-size: 12px; font-weight: 500; }
@@ -1189,13 +1257,13 @@ function getChannelIconPath(type: string) {
 .conn-disconnected { color: var(--mc-text-tertiary); background: var(--mc-bg-sunken); }
 @keyframes pulse-reconnecting { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
 
-.channel-desc { font-size: 13px; color: var(--mc-text-secondary); margin: 0 0 14px; line-height: 1.5; }
-.channel-footer { display: flex; gap: 6px; border-top: 1px solid var(--mc-border-light); padding-top: 12px; }
-.card-btn { display: flex; align-items: center; gap: 4px; padding: 5px 10px; border: 1px solid var(--mc-border); background: var(--mc-bg-elevated); border-radius: 6px; font-size: 12px; color: var(--mc-text-primary); cursor: pointer; transition: all 0.15s; }
+.channel-desc { font-size: 13px; color: var(--mc-text-secondary); margin: 0 0 14px; line-height: 1.6; min-height: 42px; }
+.channel-footer { display: flex; gap: 6px; border-top: 1px solid var(--mc-border-light); padding-top: 12px; margin-top: auto; flex-wrap: wrap; }
+.card-btn { display: flex; align-items: center; gap: 4px; padding: 7px 11px; border: 1px solid var(--mc-border); background: var(--mc-bg-muted); border-radius: 10px; font-size: 12px; color: var(--mc-text-primary); cursor: pointer; transition: all 0.15s; font-weight: 600; }
 .card-btn:hover { background: var(--mc-bg-sunken); }
 .card-btn.danger:hover { background: var(--mc-danger-bg); border-color: var(--mc-danger); color: var(--mc-danger); }
 
-.add-card { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 160px; border: 2px dashed var(--mc-border); cursor: pointer; background: transparent; }
+.add-card { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 238px; border: 2px dashed var(--mc-border); cursor: pointer; background: transparent; }
 .add-card:hover { border-color: var(--mc-primary); background: var(--mc-primary-bg); }
 .add-icon { font-size: 28px; color: var(--mc-text-tertiary); margin-bottom: 8px; }
 .add-label { font-size: 14px; color: var(--mc-text-tertiary); }
@@ -1266,6 +1334,10 @@ function getChannelIconPath(type: string) {
 .weixin-auth-btn:hover:not(:disabled) { background: #06AD56; transform: translateY(-1px); box-shadow: 0 2px 8px rgba(7,193,96,0.3); }
 .weixin-auth-btn:active:not(:disabled) { transform: translateY(0); }
 .weixin-auth-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+.weixin-multi-account-hint { margin-bottom: 12px; padding: 12px; background: #FFF7E6; border: 1px solid #FFD666; border-radius: 8px; }
+.weixin-multi-account-hint .hint-warning { font-size: 13px; color: #D48806; margin: 0 0 10px 0; line-height: 1.5; }
+.weixin-add-account-btn { display: flex; align-items: center; justify-content: center; gap: 6px; width: 100%; padding: 8px 14px; background: var(--mc-primary); color: #fff; border: none; border-radius: 6px; font-size: 13px; font-weight: 500; cursor: pointer; transition: all 0.2s; }
+.weixin-add-account-btn:hover { opacity: 0.9; transform: translateY(-1px); }
 .weixin-qrcode-area { display: flex; flex-direction: column; align-items: center; margin-top: 16px; padding: 16px; background: #fff; border-radius: 8px; border: 1px solid var(--mc-border); }
 .weixin-qrcode-img { width: 200px; height: 200px; border-radius: 4px; }
 .weixin-scan-hint { font-size: 13px; color: var(--mc-text-secondary); margin-top: 10px; transition: color 0.2s; }
@@ -1292,6 +1364,9 @@ function getChannelIconPath(type: string) {
 .password-wrap .form-input { padding-right: 36px; }
 .eye-btn { position: absolute; right: 8px; background: none; border: none; cursor: pointer; color: var(--mc-text-tertiary); padding: 2px; display: flex; align-items: center; }
 .eye-btn:hover { color: var(--mc-text-primary); }
+.copy-inline-btn { position: absolute; right: 8px; background: none; border: none; cursor: pointer; color: var(--mc-text-tertiary); padding: 2px; display: flex; align-items: center; }
+.copy-inline-btn:hover { color: var(--mc-text-primary); }
+.form-hint { font-size: 12px; color: var(--mc-text-tertiary); line-height: 1.5; }
 
 /* 开关 */
 .switch-wrap { display: flex; align-items: center; gap: 8px; height: 36px; }

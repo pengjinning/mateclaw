@@ -16,6 +16,7 @@ import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
 import java.time.Duration;
 import java.util.List;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
@@ -114,10 +115,34 @@ public class SkillRuntimeService {
     }
 
     /**
-     * 构建技能 prompt 增强片段（分层注入）
+     * 构建技能 prompt 增强片段（全局，向后兼容）
      */
     public String buildSkillPromptEnhancement() {
-        List<ResolvedSkill> activeSkills = getActiveSkills();
+        return buildSkillPromptEnhancement(null);
+    }
+
+    /**
+     * 构建技能 prompt 增强片段（支持 per-agent 过滤）
+     *
+     * @param boundSkillIds Agent 绑定的 skill ID 集合。null 表示使用全局默认（无绑定）。
+     *                      非 null 时仅包含指定 ID 的 skill。
+     */
+    public String buildSkillPromptEnhancement(Set<Long> boundSkillIds) {
+        List<ResolvedSkill> activeSkills;
+        if (boundSkillIds != null) {
+            // Per-agent 过滤：从全局 enabled skills 中按 ID 过滤
+            List<SkillEntity> enabledSkills = skillService.listEnabledSkills();
+            activeSkills = enabledSkills.stream()
+                    .filter(s -> boundSkillIds.contains(s.getId()))
+                    .map(packageResolver::resolve)
+                    .filter(ResolvedSkill::isEnabled)
+                    .filter(ResolvedSkill::isRuntimeAvailable)
+                    .filter(s -> !s.isSecurityBlocked())
+                    .filter(ResolvedSkill::isDependencyReady)
+                    .collect(java.util.stream.Collectors.toList());
+        } else {
+            activeSkills = getActiveSkills();
+        }
         if (activeSkills.isEmpty()) {
             return "";
         }

@@ -14,6 +14,12 @@ import vip.mate.llm.model.*;
 
 import java.time.Duration;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.stream.Collectors;
 
 @Slf4j
@@ -27,26 +33,247 @@ public class ModelDiscoveryService {
 
     private static final Duration TIMEOUT = Duration.ofSeconds(10);
 
+    // Virtual-thread executor for parallel model probing (lightweight, short-lived)
+    private static final ExecutorService PROBE_EXECUTOR = Executors.newVirtualThreadPerTaskExecutor();
+
+    // Probe concurrency cap — reduced from 5 to 3 because higher parallelism
+    // triggered 429 Throttling.RateQuota on DashScope during bulk refresh
+    private static final int MAX_PROBE_CONCURRENCY = 3;
+
+    // Per-model probe timeout (short; we only need to know "yes/no usable")
+    private static final long PROBE_TIMEOUT_SECONDS = 12;
+
+    /**
+     * Explicit deny list: model ids listed by DashScope compatible-mode that are known
+     * to fail on the native protocol. Updated as we observe new failures.
+     */
+    private static final Set<String> DASHSCOPE_NATIVE_DENY = Set.of(
+            "qwen3.5-max",
+            "qwen3.5-plus"
+    );
+
+    /**
+     * Pattern matching DashScope model ids that use a dot-versioned family (e.g.
+     * "qwen3.5-max", "qwen3.6-plus"). These are only offered on compatible-mode
+     * and consistently fail on the native endpoint with
+     * "[InvalidParameter] url error". Block them regardless of exact name.
+     */
+    private static final java.util.regex.Pattern DASHSCOPE_NATIVE_UNSUPPORTED_PATTERN =
+            java.util.regex.Pattern.compile("^qwen\\d+\\.\\d+.*", java.util.regex.Pattern.CASE_INSENSITIVE);
+
+    /**
+     * Parameter-size suffixes used by DashScope open-source base models (e.g.
+     * {@code qwen3-0.6b}, {@code qwen3-8b}, {@code qwen3-32b}, {@code qwen3-30b-a3b}).
+     * These are catalog entries, not DashScope-hosted chat endpoints, and the native
+     * protocol returns {@code InvalidParameter: parameter.enable_thinking ...} for
+     * any attempt to invoke them. Pre-filter them out of discovery.
+     */
+    private static final java.util.regex.Pattern DASHSCOPE_OPEN_SOURCE_SIZE_PATTERN =
+            java.util.regex.Pattern.compile("^qwen\\d+-\\d+(?:\\.\\d+)?b(?:-.*)?$", java.util.regex.Pattern.CASE_INSENSITIVE);
+
+    /**
+     * Prefixes that identify non-chat modalities (image generation, vision understanding,
+     * TTS, ASR, omni/multimodal bases, realtime speech, live translation, OCR, speech-to-
+     * speech, voice-clone). They are catalog-visible but have different endpoints than
+     * the native chat-generation API, so probing them via chat always fails with
+     * "url error". Blocking them up-front cuts discovery time and log noise dramatically.
+     */
+    private static final Set<String> DASHSCOPE_NON_CHAT_PREFIXES = Set.of(
+            // Vision understanding / OCR
+            "qwen-vl-",
+            "qwen3-vl-",
+            // Image generation / edit
+            "qwen-image-",
+            "qwen3-image-",
+            // TTS / ASR / speech-to-speech / voice
+            "qwen-tts-",
+            "qwen3-tts-",
+            "qwen-asr-",
+            "qwen3-asr-",
+            "qwen-s2s-",
+            "qwen3-s2s-",
+            // Omni multimodal bases
+            "qwen-omni-",
+            "qwen3-omni-",
+            // Audio understanding
+            "qwen-audio-",
+            // Live translation
+            "qwen-livetranslate-",
+            "qwen3-livetranslate-"
+    );
+
+    /**
+     * Allow-list prefixes for DashScope models that are known to work on the native
+     * chat protocol. An empty set means "no prefix filter" (we still apply DENY).
+     * Extend conservatively as new families are verified.
+     */
+    private static final Set<String> DASHSCOPE_NATIVE_ALLOW_PREFIXES = Set.of(
+            "qwen-",          // qwen-max / qwen-plus / qwen-turbo / qwen-coder-* / qwen-long
+            "qwen2-",         // qwen2 series
+            "qwen3-",         // qwen3-max / qwen3-plus / qwen3-coder / qwen3-235b-*
+            "deepseek-",      // deepseek-v3.x / deepseek-r1*
+            "baichuan",
+            "yi-",
+            "llama"
+    );
+
     // ==================== 模型发现 ====================
 
     public DiscoverResult discoverModels(String providerId) {
         ModelProviderEntity provider = modelProviderService.getProviderConfig(providerId);
         if (!Boolean.TRUE.equals(provider.getSupportModelDiscovery())) {
-            throw new MateClawException("该供应商不支持模型发现: " + providerId);
+            throw new MateClawException("err.llm.discovery_not_supported", "该供应商不支持模型发现: " + providerId);
         }
 
         ModelProtocol protocol = ModelProtocol.fromChatModel(provider.getChatModel());
         List<ModelInfoDTO> discovered = fetchRemoteModels(provider, protocol);
 
-        // 去重：对比已有模型
+        // Layer 2: Protocol-aware allow/deny filtering. The listing endpoint
+        // (compatible-mode /v1/models for DashScope) often returns models that
+        // the native SDK does not accept — filter them out before the user sees
+        // them.
+        discovered = applyProtocolFilter(discovered, protocol, providerId);
+
+        // Layer 3: Probe each remaining model with a real runtime-protocol call.
+        // This catches any model the allow-list let through but the provider
+        // actually rejects at request time. Failed probes are kept in the list
+        // but marked probeOk=false so the UI can show a warning badge.
+        discovered = probeInParallel(discovered, provider, protocol);
+
+        // De-dupe against already-configured models for the "new" bucket
         Set<String> existingIds = modelConfigService.listModelsByProvider(providerId).stream()
                 .map(ModelConfigEntity::getModelName)
                 .collect(Collectors.toSet());
+
+        // Only propose models that passed the probe (or were not probed) as "new"
         List<ModelInfoDTO> newModels = discovered.stream()
                 .filter(m -> !existingIds.contains(m.getId()))
+                .filter(m -> !Boolean.FALSE.equals(m.getProbeOk()))
                 .toList();
 
         return new DiscoverResult(discovered, newModels, discovered.size(), newModels.size());
+    }
+
+    /**
+     * Apply protocol-aware allow/deny filtering to the raw discovery list.
+     * <p>
+     * Currently only DashScope is filtered: the compatible-mode listing includes
+     * many models the native SDK rejects. Other providers pass through unchanged.
+     */
+    private List<ModelInfoDTO> applyProtocolFilter(List<ModelInfoDTO> discovered,
+                                                    ModelProtocol protocol,
+                                                    String providerId) {
+        if (protocol != ModelProtocol.DASHSCOPE_NATIVE) {
+            return discovered;
+        }
+        int before = discovered.size();
+        List<ModelInfoDTO> filtered = discovered.stream()
+                .filter(m -> isDashScopeModelIdAcceptable(m.getId()))
+                .toList();
+        if (filtered.size() < before) {
+            log.info("[ModelDiscovery] Filtered {} -> {} DashScope models for provider={} (allow/deny rules)",
+                    before, filtered.size(), providerId);
+        }
+        return filtered;
+    }
+
+    /**
+     * Return true if a DashScope model id is allowed on the native chat protocol.
+     * Rejection rules (in order):
+     *   1. Explicit DENY set (e.g. qwen3.5-max)
+     *   2. Dot-version family pattern (qwen3.5-*, qwen3.6-*, ...)
+     *   3. Non-chat modality prefix (vl, image, tts, asr, omni, audio, s2s, ocr, livetranslate)
+     *   4. Open-source parameter-size suffix (qwen3-8b, qwen3-32b, qwen3-30b-a3b, qwen3-0.6b ...)
+     *   5. Must start with a known ALLOW prefix (qwen-, qwen2-, qwen3-, deepseek-, ...)
+     */
+    private static boolean isDashScopeModelIdAcceptable(String modelId) {
+        if (modelId == null || modelId.isBlank()) return false;
+        String lower = modelId.toLowerCase();
+        if (DASHSCOPE_NATIVE_DENY.contains(lower)) return false;
+        if (DASHSCOPE_NATIVE_UNSUPPORTED_PATTERN.matcher(lower).matches()) return false;
+        if (DASHSCOPE_NON_CHAT_PREFIXES.stream().anyMatch(lower::startsWith)) return false;
+        if (DASHSCOPE_OPEN_SOURCE_SIZE_PATTERN.matcher(lower).matches()) return false;
+        if (DASHSCOPE_NATIVE_ALLOW_PREFIXES.isEmpty()) return true;
+        return DASHSCOPE_NATIVE_ALLOW_PREFIXES.stream().anyMatch(lower::startsWith);
+    }
+
+    /**
+     * Defensive guard for code paths that persist a model id without going through
+     * discovery (e.g. the manual "Add model" form). Throws a MateClawException with
+     * a user-friendly message if the id is known to be unusable under the provider's
+     * runtime protocol.
+     */
+    public static void assertModelIdAcceptable(String providerId, ModelProviderEntity provider, String modelId) {
+        if (provider == null) return;
+        ModelProtocol protocol = ModelProtocol.fromChatModel(provider.getChatModel());
+        if (protocol == ModelProtocol.DASHSCOPE_NATIVE && !isDashScopeModelIdAcceptable(modelId)) {
+            throw new MateClawException(
+                    "err.llm.model_not_supported",
+                    "Model id '" + modelId + "' is not supported on DashScope native protocol. " +
+                            "Dot-versioned families (e.g. qwen3.5-*, qwen3.6-*) are only available via compatible-mode. " +
+                            "Use an allowed id such as qwen-max / qwen-plus / qwen3-max."
+            );
+        }
+    }
+
+    /**
+     * Probe each discovered model in parallel (bounded concurrency) using the same
+     * protocol the runtime will use. Populates {@code probeOk}/{@code probeError}
+     * on each DTO; does not remove failed entries so the UI can surface the reason.
+     */
+    private List<ModelInfoDTO> probeInParallel(List<ModelInfoDTO> discovered,
+                                                 ModelProviderEntity provider,
+                                                 ModelProtocol protocol) {
+        if (discovered.isEmpty()) return discovered;
+
+        // OpenAI ChatGPT has no model-level test, skip probe for it
+        if (protocol == ModelProtocol.OPENAI_CHATGPT) return discovered;
+
+        Semaphore sem = new Semaphore(MAX_PROBE_CONCURRENCY);
+        List<CompletableFuture<Void>> futures = new ArrayList<>(discovered.size());
+        for (ModelInfoDTO dto : discovered) {
+            futures.add(CompletableFuture.runAsync(() -> {
+                try { sem.acquire(); }
+                catch (InterruptedException ie) { Thread.currentThread().interrupt(); return; }
+                try {
+                    sendTestPrompt(provider, protocol, dto.getId());
+                    dto.setProbeOk(true);
+                } catch (Exception e) {
+                    dto.setProbeOk(false);
+                    dto.setProbeError(shortError(e));
+                    // DEBUG level — per-model probe failures are an expected part of bulk
+                    // discovery (DashScope lists many deprecated/restricted models). The
+                    // aggregate "Probe results: X passed, Y failed" summary below is
+                    // sufficient for normal operations. Enable DEBUG for ModelDiscovery
+                    // if you need to inspect individual reasons.
+                    log.debug("[ModelDiscovery] Probe failed for model={}: {}", dto.getId(), dto.getProbeError());
+                } finally {
+                    sem.release();
+                }
+            }, PROBE_EXECUTOR));
+        }
+        try {
+            CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
+                    .get(PROBE_TIMEOUT_SECONDS * Math.max(1, discovered.size() / MAX_PROBE_CONCURRENCY + 1),
+                         TimeUnit.SECONDS);
+        } catch (TimeoutException te) {
+            log.warn("[ModelDiscovery] Probe batch timeout; {} models may be marked unknown",
+                    futures.stream().filter(f -> !f.isDone()).count());
+        } catch (Exception e) {
+            log.warn("[ModelDiscovery] Probe batch wait failed: {}", e.getMessage());
+        }
+        long passed = discovered.stream().filter(m -> Boolean.TRUE.equals(m.getProbeOk())).count();
+        long failed = discovered.stream().filter(m -> Boolean.FALSE.equals(m.getProbeOk())).count();
+        log.info("[ModelDiscovery] Probe results: {} passed, {} failed, {} unknown (of {})",
+                passed, failed, discovered.size() - passed - failed, discovered.size());
+        return discovered;
+    }
+
+    private String shortError(Exception e) {
+        String msg = extractErrorMessage(e);
+        if (msg == null) return "unknown error";
+        // Clip to ~120 chars so the UI tooltip stays usable
+        return msg.length() > 120 ? msg.substring(0, 120) + "..." : msg;
     }
 
     // ==================== 连接测试 ====================
@@ -66,7 +293,7 @@ public class ModelDiscoveryService {
                 // 不支持模型发现（如智谱）：用第一个已配置模型发送测试请求
                 List<ModelConfigEntity> models = modelConfigService.listModelsByProvider(providerId);
                 if (models.isEmpty()) {
-                    throw new MateClawException("该供应商没有已配置的模型，无法测试连接");
+                    throw new MateClawException("err.llm.no_model_for_test", "该供应商没有已配置的模型，无法测试连接");
                 }
                 String testModelId = models.get(0).getModelName();
                 String response = sendTestPrompt(provider, protocol, testModelId);
@@ -99,17 +326,28 @@ public class ModelDiscoveryService {
     // ==================== 批量添加发现的模型 ====================
 
     public int batchAddModels(String providerId, List<String> modelIds) {
-        modelProviderService.getProviderConfig(providerId);
+        ModelProviderEntity provider = modelProviderService.getProviderConfig(providerId);
+        ModelProtocol protocol = ModelProtocol.fromChatModel(provider.getChatModel());
         Set<String> existingIds = modelConfigService.listModelsByProvider(providerId).stream()
                 .map(ModelConfigEntity::getModelName)
                 .collect(Collectors.toSet());
 
         int added = 0;
+        int skipped = 0;
         for (String modelId : modelIds) {
-            if (!existingIds.contains(modelId)) {
-                modelConfigService.addModelToProvider(providerId, modelId, modelId, false);
-                added++;
+            if (modelId == null || modelId.isBlank()) continue;
+            if (existingIds.contains(modelId)) continue;
+            // Defense-in-depth: never add a DashScope model that fails the protocol-aware check
+            if (protocol == ModelProtocol.DASHSCOPE_NATIVE && !isDashScopeModelIdAcceptable(modelId)) {
+                log.warn("[ModelDiscovery] Refusing to add {} — blocked by DashScope native protocol filter", modelId);
+                skipped++;
+                continue;
             }
+            modelConfigService.addModelToProvider(providerId, modelId, modelId, false);
+            added++;
+        }
+        if (skipped > 0) {
+            log.info("[ModelDiscovery] batchAddModels: added={}, skipped(deny)={}", added, skipped);
         }
         return added;
     }
@@ -122,13 +360,14 @@ public class ModelDiscoveryService {
             case DASHSCOPE_NATIVE -> fetchDashScopeModels(provider);
             case GEMINI_NATIVE -> fetchGeminiModels(provider);
             case ANTHROPIC_MESSAGES -> fetchAnthropicModels(provider);
+            case OPENAI_CHATGPT -> throw new MateClawException("err.llm.chatgpt_no_discovery", "ChatGPT OAuth provider 不支持模型发现");
         };
     }
 
     private List<ModelInfoDTO> fetchOpenAiCompatibleModels(ModelProviderEntity provider) {
         String baseUrl = normalizeBaseUrl(provider.getBaseUrl());
         if (!StringUtils.hasText(baseUrl)) {
-            throw new MateClawException("Base URL 未配置");
+            throw new MateClawException("err.llm.base_url_missing", "Base URL 未配置");
         }
         String apiKey = provider.getApiKey();
 
@@ -152,7 +391,7 @@ public class ModelDiscoveryService {
     private List<ModelInfoDTO> fetchDashScopeModels(ModelProviderEntity provider) {
         String apiKey = provider.getApiKey();
         if (!modelProviderService.hasUsableApiKey(apiKey)) {
-            throw new MateClawException("DashScope API Key 未配置");
+            throw new MateClawException("err.llm.dashscope_key_missing", "DashScope API Key 未配置");
         }
 
         // DashScope 兼容模式暴露了 OpenAI 兼容的 /v1/models 端点
@@ -169,7 +408,7 @@ public class ModelDiscoveryService {
     private List<ModelInfoDTO> fetchGeminiModels(ModelProviderEntity provider) {
         String apiKey = provider.getApiKey();
         if (!modelProviderService.hasUsableApiKey(apiKey)) {
-            throw new MateClawException("Gemini API Key 未配置");
+            throw new MateClawException("err.llm.gemini_key_missing", "Gemini API Key 未配置");
         }
 
         RestClient client = RestClient.builder()
@@ -187,7 +426,7 @@ public class ModelDiscoveryService {
     private List<ModelInfoDTO> fetchAnthropicModels(ModelProviderEntity provider) {
         String apiKey = provider.getApiKey();
         if (!modelProviderService.hasUsableApiKey(apiKey)) {
-            throw new MateClawException("Anthropic API Key 未配置");
+            throw new MateClawException("err.llm.anthropic_key_missing", "Anthropic API Key 未配置");
         }
 
         String baseUrl = StringUtils.hasText(provider.getBaseUrl())
@@ -213,13 +452,14 @@ public class ModelDiscoveryService {
             case DASHSCOPE_NATIVE -> sendDashScopeTestPrompt(provider, modelId);
             case GEMINI_NATIVE -> sendGeminiTestPrompt(provider, modelId);
             case ANTHROPIC_MESSAGES -> sendAnthropicTestPrompt(provider, modelId);
+            case OPENAI_CHATGPT -> throw new MateClawException("err.llm.chatgpt_no_test", "ChatGPT OAuth provider 不支持模型测试");
         };
     }
 
     private String sendOpenAiTestPrompt(ModelProviderEntity provider, String modelId) {
         String baseUrl = normalizeBaseUrl(provider.getBaseUrl());
         if (!StringUtils.hasText(baseUrl)) {
-            throw new MateClawException("Base URL 未配置");
+            throw new MateClawException("err.llm.base_url_missing", "Base URL 未配置");
         }
 
         Map<String, Object> requestBody = Map.of(
@@ -250,36 +490,71 @@ public class ModelDiscoveryService {
         return extractOpenAiChatContent(body);
     }
 
+    /**
+     * Test a DashScope model using the **native** endpoint
+     * ({@code /api/v1/services/aigc/text-generation/generation}).
+     * <p>
+     * This matches the protocol Spring AI Alibaba's {@code DashScopeChatModel} uses
+     * at runtime. Using compatible-mode for testing (as the previous implementation
+     * did) was the root cause of "test passed but chat fails" — compatible-mode
+     * accepts a broader set of model names than the native API does.
+     */
     private String sendDashScopeTestPrompt(ModelProviderEntity provider, String modelId) {
         String apiKey = provider.getApiKey();
         if (!modelProviderService.hasUsableApiKey(apiKey)) {
-            throw new MateClawException("DashScope API Key 未配置");
+            throw new MateClawException("err.llm.dashscope_key_missing", "DashScope API Key 未配置");
         }
 
+        // DashScope native request shape: input.messages + parameters
         Map<String, Object> requestBody = Map.of(
                 "model", modelId,
-                "messages", List.of(Map.of("role", "user", "content", "请回复：连接正常")),
-                "max_tokens", 10,
-                "temperature", 0
+                "input", Map.of(
+                        "messages", List.of(Map.of("role", "user", "content", "ping"))
+                ),
+                "parameters", Map.of(
+                        "max_tokens", 1,
+                        "temperature", 0,
+                        "result_format", "message"
+                )
         );
 
         String body = RestClient.builder()
-                .baseUrl("https://dashscope.aliyuncs.com/compatible-mode")
+                .baseUrl("https://dashscope.aliyuncs.com")
                 .defaultHeader(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE)
                 .defaultHeader(HttpHeaders.AUTHORIZATION, "Bearer " + apiKey.trim())
                 .build()
                 .post()
-                .uri("/v1/chat/completions")
+                .uri("/api/v1/services/aigc/text-generation/generation")
                 .body(requestBody)
                 .retrieve()
                 .body(String.class);
-        return extractOpenAiChatContent(body);
+        return extractDashScopeNativeContent(body);
+    }
+
+    /**
+     * Extract content from DashScope native response:
+     * {@code { "output": { "choices": [ { "message": { "content": "..." } } ] } } }
+     * Falls back to the raw body preview if the shape differs.
+     */
+    private String extractDashScopeNativeContent(String body) {
+        try {
+            JsonNode root = objectMapper.readTree(body);
+            JsonNode choices = root.path("output").path("choices");
+            if (choices.isArray() && choices.size() > 0) {
+                String content = choices.get(0).path("message").path("content").asText("");
+                if (!content.isBlank()) return content;
+            }
+            // Older shape: output.text
+            String legacyText = root.path("output").path("text").asText("");
+            if (!legacyText.isBlank()) return legacyText;
+        } catch (Exception ignored) {}
+        return body == null ? "" : (body.length() > 200 ? body.substring(0, 200) : body);
     }
 
     private String sendGeminiTestPrompt(ModelProviderEntity provider, String modelId) {
         String apiKey = provider.getApiKey();
         if (!modelProviderService.hasUsableApiKey(apiKey)) {
-            throw new MateClawException("Gemini API Key 未配置");
+            throw new MateClawException("err.llm.gemini_key_missing", "Gemini API Key 未配置");
         }
 
         Map<String, Object> requestBody = Map.of(
@@ -304,7 +579,7 @@ public class ModelDiscoveryService {
     private String sendAnthropicTestPrompt(ModelProviderEntity provider, String modelId) {
         String apiKey = provider.getApiKey();
         if (!modelProviderService.hasUsableApiKey(apiKey)) {
-            throw new MateClawException("Anthropic API Key 未配置");
+            throw new MateClawException("err.llm.anthropic_key_missing", "Anthropic API Key 未配置");
         }
 
         String baseUrl = StringUtils.hasText(provider.getBaseUrl())

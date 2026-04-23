@@ -2,6 +2,7 @@ package vip.mate.channel;
 
 import vip.mate.workspace.conversation.model.MessageContentPart;
 
+import java.time.Duration;
 import java.util.List;
 
 /**
@@ -135,5 +136,16 @@ public interface ChannelAdapter {
      */
     default String getDisplayName() {
         return getChannelType();
+    }
+
+    /**
+     * RFC-024 Change 2：本 adapter 认为"多久没活动就视作 stale 需要重启"的阈值。
+     *
+     * <p>通用默认 60 分钟；长轮询类渠道（如 iLink 微信）应覆盖为 5 分钟，
+     * 这样代理/NAT 侧 2–5 分钟 idle-close 把连接切断后，
+     * {@code ChannelHealthMonitor} 能在几分钟内触发自动重启，而非静默等整小时。</p>
+     */
+    default Duration stalenessThreshold() {
+        return Duration.ofMinutes(60);
     }
 }

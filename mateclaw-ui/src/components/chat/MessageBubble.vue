@@ -18,22 +18,32 @@
     <!-- 消息体 -->
     <div class="msg-body" :class="`${role}-body`">
       <div class="msg-bubble" :class="`${role}-bubble`">
+        <!-- ===== 分段式渲染模式（Claude Code 风格）===== -->
+        <template v-if="useSegmentedView">
+          <div class="segments-view">
+            <!-- 计划步骤面板（始终显示在 segments 之上） -->
+            <PlanStepsPanel v-if="planMeta" :plan="planMeta" :is-generating="isGenerating" />
+            <template v-for="(seg, index) in segments" :key="seg.id">
+              <ThinkingSegment v-if="seg.type === 'thinking'" :segment="seg" />
+              <ToolCallSegment v-if="seg.type === 'tool_call'" :segment="seg" />
+              <ContentSegment v-if="seg.type === 'content'" :segment="seg" :show-cursor="showCursor && seg.status === 'running'" />
+            </template>
+          </div>
+        </template>
+
+        <!-- ===== 传统合并渲染模式（降级兼容）===== -->
+        <template v-else>
+
         <!-- 思考面板 -->
         <div v-if="showThinkingPanel" class="thinking-section">
           <button class="thinking-toggle" type="button" @click="toggleThinking">
             <span class="thinking-toggle__indicator" :class="{ active: isGenerating && !hasContent }">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M9 18h6"/>
-                <path d="M10 22h4"/>
-                <path d="M12 2a7 7 0 0 0-4 12.75c.63.44 1 1.16 1 1.93V17h6v-.32c0-.77.37-1.49 1-1.93A7 7 0 0 0 12 2z"/>
-              </svg>
+              <el-icon><Opportunity /></el-icon>
             </span>
             <span class="thinking-toggle__label">{{ $t('chat.thinking') }}</span>
             <span class="thinking-toggle__duration" v-if="thinkingDuration">{{ thinkingDuration }}</span>
             <span class="thinking-toggle__arrow" :class="{ expanded: localThinkingExpanded }">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <polyline points="6 9 12 15 18 9"/>
-              </svg>
+              <el-icon><ArrowDown /></el-icon>
             </span>
           </button>
 
@@ -51,37 +61,19 @@
         <div v-if="showExecutionPanel" class="execution-section">
           <button class="execution-toggle" type="button" @click="executionExpanded = !executionExpanded">
             <span class="execution-toggle__indicator" :class="{ active: isGenerating }">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
-              </svg>
+              <el-icon><Tools /></el-icon>
             </span>
             <span class="execution-toggle__label">{{ executionPhaseLabel }}</span>
             <span class="execution-toggle__count" v-if="toolCallsMeta.length">{{ toolCallsMeta.length }} calls</span>
             <span class="execution-toggle__arrow" :class="{ expanded: executionExpanded }">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <polyline points="6 9 12 15 18 9"/>
-              </svg>
+              <el-icon><ArrowDown /></el-icon>
             </span>
           </button>
 
           <Transition name="thinking-slide">
             <div v-if="executionExpanded" class="execution-content">
               <!-- Plan 步骤进度 -->
-              <div v-if="planMeta" class="plan-steps">
-                <div class="plan-steps__title">Plan ({{ planMeta.steps.length }} steps)</div>
-                <div
-                  v-for="(step, i) in planMeta.steps"
-                  :key="i"
-                  class="plan-step"
-                  :class="{
-                    'plan-step--done': planMeta.stepResults?.[i]?.status === 'completed',
-                    'plan-step--active': i === planMeta.currentStep && isGenerating
-                  }"
-                >
-                  <span class="plan-step__index">{{ i + 1 }}</span>
-                  <span class="plan-step__text">{{ step }}</span>
-                </div>
-              </div>
+              <PlanStepsPanel v-if="planMeta" :plan="planMeta" :is-generating="isGenerating" />
 
               <!-- 工具调用列表 -->
               <div v-if="toolCallsMeta.length" class="tool-calls">
@@ -92,18 +84,10 @@
                   :class="{ 'tool-call--running': tc.status === 'running', 'tool-call--awaiting': tc.status === 'awaiting_approval', 'tool-call--error': tc.status === 'completed' && tc.success === false }"
                 >
                   <span class="tool-call__status">
-                    <svg v-if="tc.status === 'running'" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="spin">
-                      <path d="M21 12a9 9 0 11-6.219-8.56"/>
-                    </svg>
-                    <svg v-else-if="tc.status === 'awaiting_approval'" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" stroke-width="2">
-                      <rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/>
-                    </svg>
-                    <svg v-else-if="tc.success !== false" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2">
-                      <polyline points="20 6 9 17 4 12"/>
-                    </svg>
-                    <svg v-else width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#ef4444" stroke-width="2">
-                      <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-                    </svg>
+                    <el-icon v-if="tc.status === 'running'" class="spin"><Loading /></el-icon>
+                    <el-icon v-else-if="tc.status === 'awaiting_approval'" class="tc-icon--warning"><WarningFilled /></el-icon>
+                    <el-icon v-else-if="tc.success !== false" class="tc-icon--success"><Select /></el-icon>
+                    <el-icon v-else class="tc-icon--error"><CloseBold /></el-icon>
                   </span>
                   <span class="tool-call__name">{{ tc.name }}</span>
                   <span class="tool-call__args" v-if="tc.arguments">{{ truncateArgs(tc.arguments) }}</span>
@@ -117,46 +101,21 @@
           </Transition>
         </div>
 
-        <!-- 工具审批面板 -->
-        <div v-if="pendingApproval" class="approval-section" :class="approvalSeverityClass">
-          <div class="approval-header">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
-            </svg>
-            <span class="approval-title">{{ $t('chat.approvalRequired') || 'Approval Required' }}</span>
-            <span v-if="pendingApproval.maxSeverity" class="approval-severity-badge" :class="'severity-' + pendingApproval.maxSeverity?.toLowerCase()">
-              {{ pendingApproval.maxSeverity }}
-            </span>
-          </div>
-          <div class="approval-detail">
-            <div class="approval-tool"><strong>Tool:</strong> {{ pendingApproval.toolName }}</div>
-            <div v-if="pendingApproval.summary" class="approval-summary">{{ pendingApproval.summary }}</div>
-            <div class="approval-reason"><strong>Reason:</strong> {{ pendingApproval.reason }}</div>
-            <div class="approval-args" v-if="pendingApproval.arguments">
-              <strong>Args:</strong> <code>{{ truncateArgs(pendingApproval.arguments) }}</code>
-            </div>
-          </div>
-          <!-- Findings List -->
-          <div v-if="pendingApproval.findings?.length" class="approval-findings">
-            <div v-for="(finding, idx) in pendingApproval.findings" :key="idx" class="approval-finding-item">
-              <span class="finding-severity-dot" :class="'dot-' + finding.severity?.toLowerCase()"></span>
-              <span class="finding-category-tag">{{ finding.category }}</span>
-              <span class="finding-text">{{ finding.title }}</span>
-              <span v-if="finding.remediation" class="finding-fix">{{ finding.remediation }}</span>
-            </div>
-          </div>
-          <div v-if="pendingApproval.status === 'pending_approval'" class="approval-waiting">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="approval-waiting__spin">
-              <path d="M21 12a9 9 0 11-6.219-8.56"/>
-            </svg>
-            <span>{{ $t('chat.approvalWaiting') }}</span>
-          </div>
-          <div v-else-if="pendingApproval.status === 'approved'" class="approval-resolved approval-resolved--approved">
-            {{ $t('chat.approved') }}
-          </div>
-          <div v-else class="approval-resolved approval-resolved--denied">
-            {{ $t('chat.denied') }}
-          </div>
+        <!-- 浏览器执行时间线 -->
+        <BrowserTimeline v-if="browserActionsMeta.length" :actions="browserActionsMeta" />
+
+        <!-- 工具审批状态（极简一行，操作在输入栏） -->
+        <div v-if="pendingApproval" class="approval-inline">
+          <el-icon class="approval-inline__icon"><WarningFilled /></el-icon>
+          <span v-if="pendingApproval.status === 'pending_approval'" class="approval-inline__text">
+            {{ $t('chat.approvalWaiting') }} <code>{{ pendingApproval.toolName }}</code>
+          </span>
+          <span v-else-if="pendingApproval.status === 'approved'" class="approval-inline__text approval-inline--approved">
+            {{ $t('chat.approved') }}: <code>{{ pendingApproval.toolName }}</code>
+          </span>
+          <span v-else class="approval-inline__text approval-inline--denied">
+            {{ $t('chat.denied') }}: <code>{{ pendingApproval.toolName }}</code>
+          </span>
         </div>
 
         <!-- 主要内容 -->
@@ -169,27 +128,17 @@
           <TypingCursor v-if="showCursor" :typing="isGenerating" />
         </div>
 
-        <!-- 加载指示器 -->
-        <div v-if="showLoadingIndicator" class="typing-indicator">
-          <span></span><span></span><span></span>
-        </div>
 
         <!-- 停止指示器 -->
         <div v-if="status === 'stopped' || status === 'interrupted'" class="stopped-indicator">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <rect x="3" y="3" width="18" height="18" rx="2"/>
-          </svg>
-          <span>{{ status === 'interrupted' ? ($t('chat.interrupted') || '已中断') : $t('chat.stopped') }}</span>
+          <el-icon><CloseBold /></el-icon>
+          <span>{{ status === 'interrupted' ? $t('chat.interrupted') : $t('chat.stopped') }}</span>
         </div>
 
         <!-- 错误卡片 -->
         <div v-if="status === 'failed'" class="error-card">
           <div class="error-card__header">
-            <svg class="error-card__icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
-              <line x1="12" y1="9" x2="12" y2="13"/>
-              <line x1="12" y1="17" x2="12.01" y2="17"/>
-            </svg>
+            <el-icon class="error-card__icon"><WarningFilled /></el-icon>
             <span class="error-card__title">{{ errorTitle }}</span>
           </div>
           <p class="error-card__description">{{ errorDescription }}</p>
@@ -197,14 +146,13 @@
           <div class="error-card__footer">
             <span v-if="errorCode" class="error-card__code">{{ errorCode }}</span>
             <button v-if="errorRetryable" class="error-card__retry" type="button" @click="$emit('regenerate')">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <polyline points="23 4 23 10 17 10"/>
-                <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
-              </svg>
+              <el-icon><RefreshRight /></el-icon>
               {{ $t('chat.retry') }}
             </button>
           </div>
         </div>
+
+        </template><!-- /传统合并渲染模式 -->
 
         <!-- 附件列表 -->
         <div v-if="attachments?.length" class="message-attachments">
@@ -241,10 +189,7 @@
             type="button"
             @click="downloadFile(attachment)"
           >
-            <svg class="message-attachment__icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-              <polyline points="14 2 14 8 20 8"/>
-            </svg>
+            <el-icon class="message-attachment__icon"><Document /></el-icon>
             <span class="message-attachment__name">{{ attachment.name }}</span>
             <span class="message-attachment__meta">{{ formatFileSize(attachment.size) }}</span>
           </button>
@@ -267,13 +212,22 @@
             :title="copyState === 'copied' ? $t('chat.copied') : $t('chat.copy')"
             @click="copyMessage"
           >
-            <svg v-if="copyState !== 'copied'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <rect x="9" y="9" width="13" height="13" rx="2"/>
-              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
-            </svg>
-            <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <polyline points="20 6 9 17 4 12"/>
-            </svg>
+            <el-icon v-if="copyState !== 'copied'"><CopyDocument /></el-icon>
+            <el-icon v-else><Select /></el-icon>
+          </button>
+          <!-- 朗读 TTS（仅 assistant） -->
+          <button
+            v-if="role === 'assistant' && !isGenerating"
+            class="action-btn"
+            :class="{ 'tts-playing': ttsState === 'playing' }"
+            type="button"
+            :title="ttsState === 'playing' ? $t('chat.ttsStop') : $t('chat.ttsPlay')"
+            :disabled="ttsState === 'loading'"
+            @click="handleTts"
+          >
+            <el-icon v-if="ttsState === 'loading'" class="tts-loading-icon"><Loading /></el-icon>
+            <el-icon v-else-if="ttsState === 'playing'"><VideoPause /></el-icon>
+            <el-icon v-else><Microphone /></el-icon>
           </button>
           <!-- 重新生成（仅 assistant） -->
           <button
@@ -283,10 +237,7 @@
             :title="$t('chat.regenerate')"
             @click="$emit('regenerate')"
           >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <polyline points="23 4 23 10 17 10"/>
-              <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
-            </svg>
+            <el-icon><RefreshRight /></el-icon>
           </button>
           <!-- 时间戳（inline） -->
           <span class="action-time">{{ formattedTime }}</span>
@@ -298,10 +249,31 @@
 <script setup lang="ts">
 import { computed, ref, watch, onBeforeUnmount } from 'vue'
 import { useI18n } from 'vue-i18n'
+import {
+  ArrowDown,
+  CloseBold,
+  CopyDocument,
+  Document,
+  Loading,
+  Microphone,
+  Opportunity,
+  RefreshRight,
+  Select,
+  Tools,
+  VideoPause,
+  WarningFilled,
+} from '@element-plus/icons-vue'
 import { useMarkdownRenderer } from '@/composables/useMarkdownRenderer'
 import { useAuthenticatedAttachment } from '@/composables/useAuthenticatedAttachment'
+import { http } from '@/api'
 import TypingCursor from './TypingCursor.vue'
-import type { Message, ChatAttachment, ToolCallMeta, PlanMeta } from '@/types'
+import BrowserTimeline from './BrowserTimeline.vue'
+import ToolCallSegment from './ToolCallSegment.vue'
+import ThinkingSegment from './ThinkingSegment.vue'
+import ContentSegment from './ContentSegment.vue'
+import PlanStepsPanel from './PlanStepsPanel.vue'
+import type { BrowserAction } from './BrowserTimeline.vue'
+import type { Message, MessageSegment, ChatAttachment, ToolCallMeta, PlanMeta } from '@/types'
 import type { ChatErrorInfo } from '@/types/chatError'
 
 const { renderMarkdown } = useMarkdownRenderer()
@@ -350,6 +322,18 @@ const errorTitle = computed(() => {
 
 const errorDescription = computed(() => {
   if (!errorInfo.value) return ''
+  // 优先展示后端 extractUserFriendlyError 生成的具体消息（比泛化模板更有指向性，
+  // 比如"当前模型不支持工具调用，请切换到 qwen3 / qwen2.5 ..."）。
+  // 仅当 rawMessage 为空/过短时才回退到分类模板。
+  const raw = errorInfo.value.rawMessage?.trim() || ''
+  if (raw.length > 8) {
+    // 去掉后端冗余前缀，错误卡标题已经表达了类别
+    return raw
+      .replace(/^Bad request:\s*/i, '')
+      .replace(/^LLM 调用失败[:：]\s*/, '')
+      .replace(/^认证失败[:：]\s*/, '')
+      .replace(/^\[错误]\s*/, '')
+  }
   return t(`chat.error.${errorInfo.value.category}.description`)
 })
 
@@ -390,9 +374,18 @@ const showThinkingPanel = computed(() => !!thinkingContent.value)
 // 思考耗时（生成结束后显示）
 const thinkingDuration = computed(() => {
   if (isGenerating.value) return ''
+  if (!thinkingContent.value) return ''
+  // 优先使用 segment 真实时间戳
+  const segs = (props.message as any).segments || []
+  const thinkSeg = segs.find((s: any) => s.type === 'thinking')
+  const contentSeg = segs.find((s: any) => s.type === 'content')
+  if (thinkSeg?.timestamp && contentSeg?.timestamp) {
+    const sec = Math.max(1, Math.round((contentSeg.timestamp - thinkSeg.timestamp) / 1000))
+    return sec >= 60 ? `${Math.floor(sec / 60)}m ${sec % 60}s` : `${sec}s`
+  }
+  // 回退：从内容长度估算
   const len = thinkingContent.value.length
   if (len < 50) return ''
-  // 粗略估计：每 100 字符约 1 秒
   const sec = Math.max(1, Math.round(len / 100))
   return sec >= 60 ? `${Math.floor(sec / 60)}m ${sec % 60}s` : `${sec}s`
 })
@@ -467,8 +460,62 @@ function copyMessage() {
   }).catch(() => {})
 }
 
+// --- TTS 朗读 ---
+const ttsState = ref<'idle' | 'loading' | 'playing'>('idle')
+let ttsAudio: HTMLAudioElement | null = null
+
+async function handleTts() {
+  if (ttsState.value === 'playing') {
+    // 停止播放
+    ttsAudio?.pause()
+    ttsAudio = null
+    ttsState.value = 'idle'
+    return
+  }
+
+  const text = displayContent.value || props.message.content || ''
+  if (!text) return
+
+  const conversationId = props.message.conversationId
+  if (!conversationId) return
+
+  ttsState.value = 'loading'
+  try {
+    const res: any = await http.post('/tts/synthesize', {
+      conversationId,
+      text,
+    })
+    if (res.data?.success && res.data?.audioUrl) {
+      // 通过认证 fetch 获取音频 blob
+      const audioRes = await fetch(res.data.audioUrl, {
+        headers: { Authorization: `Bearer ${localStorage.getItem('token') || ''}` },
+      })
+      const blob = await audioRes.blob()
+      const blobUrl = URL.createObjectURL(blob)
+      ttsAudio = new Audio(blobUrl)
+      ttsAudio.onended = () => {
+        ttsState.value = 'idle'
+        URL.revokeObjectURL(blobUrl)
+        ttsAudio = null
+      }
+      ttsAudio.onerror = () => {
+        ttsState.value = 'idle'
+        URL.revokeObjectURL(blobUrl)
+        ttsAudio = null
+      }
+      ttsState.value = 'playing'
+      await ttsAudio.play()
+    } else {
+      ttsState.value = 'idle'
+    }
+  } catch {
+    ttsState.value = 'idle'
+  }
+}
+
 onBeforeUnmount(() => {
   if (copyTimer) clearTimeout(copyTimer)
+  if (ttsAudio) { ttsAudio.pause(); ttsAudio = null }
   revokeAll()
 })
 
@@ -508,16 +555,105 @@ const formatFileSize = (size: number) => {
 // --- 执行过程面板 ---
 const executionExpanded = ref(false)
 
+// --- 分段式渲染（Claude Code 风格） ---
+const parsedMetadata = computed(() => {
+  const raw = props.message.metadata
+  if (!raw) return {} as any
+  if (typeof raw === 'string') {
+    try {
+      let parsed = JSON.parse(raw)
+      // 处理双重 JSON 编码（DB 中 metadata 是字符串，Jackson 序列化时可能再次转义）
+      if (typeof parsed === 'string') {
+        try { parsed = JSON.parse(parsed) } catch { /* ignore */ }
+      }
+      return parsed
+    } catch { return {} }
+  }
+  return raw
+})
+
+const segments = computed<MessageSegment[]>(() => {
+  if (props.message.role !== 'assistant') return []
+  const meta = parsedMetadata.value
+
+  // 优先：使用 metadata.segments（流式时由前端写入，历史时由后端持久化）
+  if (meta?.segments && Array.isArray(meta.segments) && meta.segments.length > 0
+      && typeof meta.segments[0] === 'object' && meta.segments[0]?.type) {
+    const segs = [...meta.segments] as MessageSegment[]
+
+    // 补充：如果后端 segments 没有 thinking 但 contentParts 有（非原生 thinking 模型）
+    const hasThinking = segs.some(s => s.type === 'thinking')
+    if (!hasThinking) {
+      const thinkingPart = props.message.contentParts?.find(p => p.type === 'thinking')
+      if (thinkingPart?.text) {
+        segs.unshift({ id: 'th-fb', type: 'thinking', status: 'completed', thinkingText: thinkingPart.text })
+      }
+    }
+
+    // 去重：相同 toolName + toolArgs 的 tool_call segment 只保留第一个
+    const seenToolCalls = new Set<string>()
+    const deduped = segs.filter(seg => {
+      if (seg.type !== 'tool_call') return true
+      const key = `${seg.toolName}::${seg.toolArgs || ''}`
+      if (seenToolCalls.has(key)) return false
+      seenToolCalls.add(key)
+      return true
+    })
+    segs.length = 0
+    segs.push(...deduped)
+
+    // 修复历史消息顺序：如果 thinking 被落在 content 后面，提到首个 content 前
+    // 只处理单个 thinking 段的常见场景，避免破坏复杂交错时间线
+    const thinkingIndices = segs
+      .map((seg, index) => seg.type === 'thinking' ? index : -1)
+      .filter(index => index >= 0)
+    const firstNonThinkingIdx = segs.findIndex((seg: MessageSegment) => seg.type !== 'thinking')
+    if (thinkingIndices.length === 1 && firstNonThinkingIdx >= 0 && thinkingIndices[0] > firstNonThinkingIdx) {
+      const [thinkingSeg] = segs.splice(thinkingIndices[0], 1)
+      segs.splice(0, 0, thinkingSeg)
+    }
+
+    return segs
+  }
+
+  // Fallback：从 toolCalls + contentParts 做 best-effort 重建（旧消息兼容）
+  // 注意：这会丢失事件交错顺序（所有 thinking 在前，所有 tool calls 在中，content 在后）
+  const segs: MessageSegment[] = []
+  const thinkingPart = props.message.contentParts?.find(p => p.type === 'thinking')
+  if (thinkingPart?.text) {
+    segs.push({ id: 'th-0', type: 'thinking', status: 'completed', thinkingText: thinkingPart.text })
+  }
+  const toolCalls = meta?.toolCalls || []
+  toolCalls.forEach((tc: ToolCallMeta, i: number) => {
+    segs.push({
+      id: `tc-${i}`, type: 'tool_call', status: 'completed',
+      toolName: tc.name, toolArgs: tc.arguments,
+      toolResult: tc.result, toolSuccess: tc.success,
+    })
+  })
+  if (props.message.content) {
+    segs.push({ id: 'ct-0', type: 'content', status: 'completed', text: props.message.content })
+  }
+  return segs
+})
+
+/** 是否使用分段模式渲染（有 segments 数据且包含多个分段） */
+const useSegmentedView = computed(() => segments.value.length > 1)
+
 const toolCallsMeta = computed<ToolCallMeta[]>(() => {
-  return props.message.metadata?.toolCalls || []
+  return parsedMetadata.value?.toolCalls || []
+})
+
+const browserActionsMeta = computed<BrowserAction[]>(() => {
+  return parsedMetadata.value?.browserActions || []
 })
 
 const planMeta = computed<PlanMeta | undefined>(() => {
-  return props.message.metadata?.plan
+  return parsedMetadata.value?.plan
 })
 
 const currentPhaseName = computed(() => {
-  const phase = props.message.metadata?.currentPhase
+  const phase = parsedMetadata.value?.currentPhase
   switch (phase) {
     case 'reasoning': return 'Reasoning'
     case 'action': return 'Executing tools'
@@ -539,7 +675,9 @@ const truncateArgs = (args: string) => {
 
 // --- 审批面板 ---
 const pendingApproval = computed(() => {
-  return props.message.metadata?.pendingApproval || null
+  const approval = parsedMetadata.value?.pendingApproval
+  if (!approval || approval.status === 'expired') return null
+  return approval
 })
 
 const approvalSeverityClass = computed(() => {
@@ -570,16 +708,22 @@ const showExecutionPanel = computed(() => {
   if (role.value !== 'assistant') return false
   // 审批卡片有独立的渲染区域，但 execution panel 也应该在审批阶段展示上下文
   return toolCallsMeta.value.length > 0 || !!planMeta.value
-    || (isGenerating.value && props.message.metadata?.currentPhase)
+    || (isGenerating.value && parsedMetadata.value?.currentPhase)
     || !!pendingApproval.value
 })
 
-// 自动展开执行面板（工具调用时或审批时）
+// 自动展开执行面板（工具调用时、审批时或计划创建时）
 watch(toolCallsMeta, (calls) => {
   if (calls.length > 0 && isGenerating.value) {
     executionExpanded.value = true
   }
 }, { deep: true })
+
+watch(planMeta, (plan) => {
+  if (plan && plan.steps?.length > 0 && isGenerating.value) {
+    executionExpanded.value = true
+  }
+})
 
 watch(pendingApproval, (approval) => {
   if (approval?.status === 'pending_approval') {
@@ -596,6 +740,14 @@ watch(isGenerating, (generating) => {
 </script>
 
 <style scoped>
+/* 分段式渲染容器 */
+.segments-view {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 0;
+}
+
 .message-wrapper {
   display: flex;
   gap: 12px;
@@ -887,6 +1039,9 @@ watch(isGenerating, (generating) => {
   align-items: center;
   flex-shrink: 0;
 }
+.tc-icon--warning { color: var(--mc-warning, #f59e0b); }
+.tc-icon--success { color: var(--mc-success, #10b981); }
+.tc-icon--error { color: var(--mc-danger, #ef4444); }
 
 .tool-call__name {
   font-weight: 600;
@@ -901,61 +1056,7 @@ watch(isGenerating, (generating) => {
   flex: 1;
 }
 
-.plan-steps {
-  margin-bottom: 10px;
-}
-
-.plan-steps__title {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--mc-text-secondary, #64748b);
-  margin-bottom: 6px;
-}
-
-.plan-step {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 4px 0;
-  font-size: 12px;
-  color: var(--mc-text-tertiary, #94a3b8);
-}
-
-.plan-step--done {
-  color: #10b981;
-}
-
-.plan-step--active {
-  color: var(--mc-primary, #D97757);
-  font-weight: 600;
-}
-
-.plan-step__index {
-  width: 20px;
-  height: 20px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 50%;
-  background: var(--mc-bg-elevated, #f8fafc);
-  font-size: 11px;
-  font-weight: 600;
-  flex-shrink: 0;
-}
-
-.plan-step--done .plan-step__index {
-  background: rgba(16, 185, 129, 0.1);
-}
-
-.plan-step--active .plan-step__index {
-  background: rgba(217, 119, 87, 0.1);
-}
-
-.plan-step__text {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
+/* plan-steps 样式已迁移到 PlanStepsPanel.vue 组件 */
 
 .execution-empty {
   font-size: 12px;
@@ -973,172 +1074,44 @@ watch(isGenerating, (generating) => {
 }
 
 /* ==================== 审批面板 ==================== */
-.approval-section {
-  margin-bottom: 12px;
-  padding: 12px 14px;
-  border: 1px solid #f59e0b;
-  border-left: 3px solid #f59e0b;
-  border-radius: 10px;
-  background: rgba(245, 158, 11, 0.06);
-}
-
-.approval-section.approval-severity-critical {
-  border-color: #ef4444;
-  border-left-color: #ef4444;
-  background: rgba(239, 68, 68, 0.06);
-}
-
-.approval-section.approval-severity-high {
-  border-color: #f97316;
-  border-left-color: #f97316;
-  background: rgba(249, 115, 22, 0.06);
-}
-
-.approval-section.approval-severity-medium {
-  border-color: #f59e0b;
-  border-left-color: #f59e0b;
-  background: rgba(245, 158, 11, 0.06);
-}
-
-.approval-section.approval-severity-low {
-  border-color: #3b82f6;
-  border-left-color: #3b82f6;
-  background: rgba(59, 130, 246, 0.06);
-}
-
-.approval-section.approval-severity-info {
-  border-color: #6b7280;
-  border-left-color: #6b7280;
-  background: rgba(107, 114, 128, 0.06);
-}
-
-.approval-header {
+/* 极简审批状态（一行式） */
+.approval-inline {
   display: flex;
   align-items: center;
-  gap: 8px;
-  color: #f59e0b;
-  font-weight: 600;
-  font-size: 14px;
+  gap: 6px;
+  padding: 8px 12px;
   margin-bottom: 8px;
-}
-
-.approval-title {
   font-size: 13px;
-}
-
-.approval-detail {
-  font-size: 12px;
   color: var(--mc-text-secondary, #64748b);
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
+  background: var(--mc-bg-muted, #f9f7f5);
+  border-radius: 8px;
 }
 
-.approval-detail code {
-  font-size: 11px;
-  background: var(--mc-inline-code-bg, #f1f5f9);
-  padding: 1px 4px;
-  border-radius: 4px;
-}
-
-.approval-waiting {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-top: 10px;
-  font-size: 12px;
-  color: var(--mc-text-tertiary, #94a3b8);
-}
-
-.approval-waiting__spin {
-  animation: spin 1s linear infinite;
+.approval-inline__icon {
+  color: var(--mc-warning, #f59e0b);
   flex-shrink: 0;
 }
 
-.approval-resolved {
-  margin-top: 10px;
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.approval-resolved--approved {
-  color: #10b981;
-}
-
-.approval-severity-badge {
-  display: inline-block;
-  padding: 1px 7px;
-  border-radius: 4px;
-  font-size: 10px;
-  font-weight: 700;
-  text-transform: uppercase;
-  margin-left: auto;
-}
-
-.approval-severity-badge.severity-critical { background: rgba(239, 68, 68, 0.15); color: #ef4444; }
-.approval-severity-badge.severity-high { background: rgba(249, 115, 22, 0.15); color: #f97316; }
-.approval-severity-badge.severity-medium { background: rgba(245, 158, 11, 0.15); color: #f59e0b; }
-.approval-severity-badge.severity-low { background: rgba(59, 130, 246, 0.15); color: #3b82f6; }
-.approval-severity-badge.severity-info { background: rgba(107, 114, 128, 0.15); color: #6b7280; }
-
-.approval-summary {
+.approval-inline__text code {
   font-size: 12px;
-  color: var(--mc-text-primary, #334155);
-  font-weight: 500;
-  padding: 4px 0;
-}
-
-.approval-findings {
-  margin-top: 8px;
-  padding: 8px 10px;
-  background: var(--mc-bg-sunken, rgba(0, 0, 0, 0.03));
-  border-radius: 6px;
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-}
-
-.approval-finding-item {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 11px;
-}
-
-.finding-severity-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
-
-.finding-severity-dot.dot-critical { background: #ef4444; }
-.finding-severity-dot.dot-high { background: #f97316; }
-.finding-severity-dot.dot-medium { background: #f59e0b; }
-.finding-severity-dot.dot-low { background: #3b82f6; }
-.finding-severity-dot.dot-info { background: #6b7280; }
-
-.finding-category-tag {
-  font-family: 'SF Mono', 'Fira Code', monospace;
-  font-size: 10px;
-  color: var(--mc-text-tertiary, #94a3b8);
   background: var(--mc-inline-code-bg, #f1f5f9);
   padding: 1px 5px;
-  border-radius: 3px;
+  border-radius: 4px;
+  font-weight: 500;
 }
 
-.finding-text {
-  color: var(--mc-text-secondary, #64748b);
+.approval-inline--approved {
+  color: var(--mc-success, #10b981);
+}
+.approval-inline--approved .approval-inline__icon {
+  color: var(--mc-success, #10b981);
 }
 
-.finding-fix {
-  color: var(--mc-text-tertiary, #94a3b8);
-  font-style: italic;
-  margin-left: auto;
+.approval-inline--denied {
+  color: var(--mc-danger, #ef4444);
 }
-
-.approval-resolved--denied {
-  color: #ef4444;
+.approval-inline--denied .approval-inline__icon {
+  color: var(--mc-danger, #ef4444);
 }
 
 /* ==================== 操作栏 ==================== */
@@ -1185,6 +1158,16 @@ watch(isGenerating, (generating) => {
 .action-btn.copied {
   color: #10b981;
 }
+.action-btn.tts-playing {
+  color: var(--mc-primary);
+}
+.tts-loading-icon {
+  animation: spin 1s linear infinite;
+}
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
 
 .action-time {
   font-size: 11px;
@@ -1201,30 +1184,6 @@ watch(isGenerating, (generating) => {
 .msg-content.with-cursor {
   display: inline;
 }
-
-/* 加载指示器 */
-.typing-indicator {
-  display: flex;
-  gap: 4px;
-  padding: 4px 0;
-}
-
-.typing-indicator span {
-  width: 6px;
-  height: 6px;
-  background: var(--mc-text-tertiary, #94a3b8);
-  border-radius: 50%;
-  animation: bounce 1.2s infinite;
-}
-
-.typing-indicator span:nth-child(2) { animation-delay: 0.2s; }
-.typing-indicator span:nth-child(3) { animation-delay: 0.4s; }
-
-@keyframes bounce {
-  0%, 60%, 100% { transform: translateY(0); }
-  30% { transform: translateY(-6px); }
-}
-
 
 /* 状态指示器 */
 .stopped-indicator {

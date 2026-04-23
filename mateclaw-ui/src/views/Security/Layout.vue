@@ -1,32 +1,81 @@
 <template>
-  <div class="settings-layout">
-    <div class="settings-nav">
-      <h2 class="nav-title">{{ t('security.title') }}</h2>
-      <router-link
-        v-for="section in sections"
-        :key="section.id"
-        :to="section.path"
-        class="nav-item"
-        :class="{ active: isActive(section.path) }"
-      >
-        <span class="nav-icon" v-html="section.icon"></span>
-        {{ section.label }}
-      </router-link>
-    </div>
+  <div class="mc-page-shell security-shell">
+    <div class="mc-page-frame security-frame">
+      <div class="mc-page-inner security-layout">
+        <div class="settings-nav mc-surface-card" :class="{ 'nav-collapsed': navCollapsed }">
+          <div v-if="!navCollapsed" class="settings-nav__intro">
+            <div class="mc-page-kicker">{{ t('security.kicker') }}</div>
+            <h2 class="nav-title">{{ t('security.title') }}</h2>
+          </div>
+          <template v-for="section in sections" :key="section.id">
+            <el-tooltip
+              :content="section.label"
+              placement="right"
+              :disabled="!navCollapsed"
+            >
+              <router-link
+                :to="section.path"
+                class="nav-item"
+                :class="{ active: isActive(section.path) }"
+              >
+                <span class="nav-icon" v-html="section.icon"></span>
+                <span v-if="!navCollapsed" class="nav-label">{{ section.label }}</span>
+              </router-link>
+            </el-tooltip>
+          </template>
+          <!-- 折叠切换按钮 -->
+          <button class="nav-collapse-btn" @click="toggleNav" :title="navCollapsed ? t('common.expandSidebar') : t('common.collapseSidebar')">
+            <svg v-if="!navCollapsed" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>
+            <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </button>
+        </div>
 
-    <div class="settings-content">
-      <router-view />
+        <div class="settings-content mc-surface-card">
+          <div class="settings-content__inner">
+            <router-view />
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 
 const route = useRoute()
 const { t } = useI18n()
+
+// 折叠状态（与 Settings 共享 key）
+const navCollapsed = ref(localStorage.getItem('mc-settings-nav-collapsed') === 'true')
+const userExplicit = ref(localStorage.getItem('mc-settings-nav-collapsed') === 'true')
+let mediumQuery: MediaQueryList | null = null
+
+function toggleNav() {
+  navCollapsed.value = !navCollapsed.value
+  userExplicit.value = navCollapsed.value
+  localStorage.setItem('mc-settings-nav-collapsed', String(navCollapsed.value))
+}
+
+function handleMediumChange(e: MediaQueryListEvent | MediaQueryList) {
+  if (e.matches && !userExplicit.value) {
+    navCollapsed.value = true
+  } else if (!e.matches && !userExplicit.value) {
+    navCollapsed.value = false
+  }
+}
+
+onMounted(() => {
+  mediumQuery = window.matchMedia('(max-width: 1200px)')
+  handleMediumChange(mediumQuery)
+  mediumQuery.addEventListener('change', handleMediumChange)
+})
+
+onBeforeUnmount(() => {
+  mediumQuery?.removeEventListener('change', handleMediumChange)
+})
 
 const sections = computed(() => [
   {
@@ -55,25 +104,61 @@ function isActive(path: string) {
 </script>
 
 <style scoped>
-.settings-layout {
-  display: flex;
+.security-shell {
+  background: transparent;
   height: 100%;
+  min-height: 0;
   overflow: hidden;
 }
 
+.security-frame {
+  height: min(calc(100vh - 28px), 100%);
+  min-height: 0;
+  overflow: hidden;
+}
+
+.security-layout {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  gap: 18px;
+}
+
 .settings-nav {
-  width: 200px;
-  min-width: 200px;
-  border-right: 1px solid var(--mc-border-light);
-  padding: 20px 12px;
+  width: 210px;
+  min-width: 210px;
+  padding: 14px 10px;
   overflow-y: auto;
+  align-self: stretch;
+  transition: width 0.25s ease, min-width 0.25s ease;
+  display: flex;
+  flex-direction: column;
+}
+
+.settings-nav.nav-collapsed {
+  width: 56px;
+  min-width: 56px;
+  padding: 12px 8px;
+}
+
+.settings-nav__intro {
+  padding: 4px 8px 10px;
+  border-bottom: 1px solid var(--mc-border-light);
+  margin-bottom: 6px;
 }
 
 .nav-title {
-  font-size: 18px;
+  font-size: 20px;
   font-weight: 700;
   color: var(--mc-text-primary);
-  margin: 0 0 16px 4px;
+  letter-spacing: -0.03em;
+  margin: 0 0 4px;
+}
+
+.nav-desc {
+  color: var(--mc-text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .nav-item {
@@ -81,25 +166,97 @@ function isActive(path: string) {
   align-items: center;
   gap: 8px;
   width: 100%;
-  padding: 8px 12px;
+  padding: 8px 10px;
   border: none;
   background: transparent;
   color: var(--mc-text-secondary);
-  font-size: 14px;
-  border-radius: 6px;
+  font-size: 13px;
+  border-radius: 10px;
   cursor: pointer;
   text-align: left;
   text-decoration: none;
   margin-bottom: 2px;
+  font-weight: 500;
+  transition: all 0.15s;
 }
 
-.nav-item:hover { background: var(--mc-bg-hover); color: var(--mc-text-primary); }
-.nav-item.active { background: var(--mc-sidebar-active); color: var(--mc-text-primary); font-weight: 500; }
+.nav-item:hover { background: var(--mc-bg-muted); color: var(--mc-text-primary); }
+.nav-item.active { background: var(--mc-primary-bg); color: var(--mc-primary); font-weight: 600; box-shadow: inset 0 0 0 1px rgba(217, 109, 70, 0.08); }
 .nav-icon { display: flex; align-items: center; flex-shrink: 0; }
+
+.nav-collapsed .nav-item {
+  justify-content: center;
+  padding: 10px 8px;
+}
+
+.nav-collapse-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 32px;
+  margin-top: auto;
+  border: none;
+  border-top: 1px solid var(--mc-border-light);
+  background: transparent;
+  color: var(--mc-text-tertiary);
+  cursor: pointer;
+  transition: all 0.15s;
+  flex-shrink: 0;
+}
+
+.nav-collapse-btn:hover {
+  background: var(--mc-bg-muted);
+  color: var(--mc-text-primary);
+}
 
 .settings-content {
   flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  padding: 22px;
+}
+
+.settings-content__inner {
+  height: 100%;
+  min-height: 0;
   overflow-y: auto;
-  padding: 24px 32px;
+  overflow-x: hidden;
+  padding-right: 4px;
+}
+
+@media (max-width: 900px) {
+  .security-frame {
+    height: auto;
+    min-height: calc(100vh - 28px);
+    overflow: visible;
+  }
+
+  .security-layout {
+    flex-direction: row;
+    height: auto;
+  }
+
+  .settings-nav {
+    width: 56px;
+    min-width: 56px;
+    align-self: auto;
+    padding: 12px 8px;
+  }
+
+  .settings-nav .settings-nav__intro { display: none; }
+  .settings-nav .nav-item { justify-content: center; padding: 10px 8px; }
+  .settings-nav .nav-label { display: none; }
+  .nav-collapse-btn { display: none; }
+
+  .settings-content {
+    overflow: visible;
+  }
+
+  .settings-content__inner {
+    overflow: visible;
+    padding-right: 0;
+  }
 }
 </style>

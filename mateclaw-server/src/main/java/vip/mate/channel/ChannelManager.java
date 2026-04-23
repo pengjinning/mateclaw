@@ -48,6 +48,9 @@ public class ChannelManager {
     /** 运行中的渠道适配器：channelId -> adapter */
     private final Map<Long, ChannelAdapter> activeAdapters = new HashMap<>();
 
+    /** 插件注册的渠道适配器：pluginName -> adapter */
+    private final Map<String, ChannelAdapter> pluginChannels = new ConcurrentHashMap<>();
+
     /** 读写锁：读操作（getAdapter 等）用读锁，写操作（start/stop/replace）用写锁 */
     private final ReadWriteLock adapterLock = new ReentrantReadWriteLock();
 
@@ -63,7 +66,7 @@ public class ChannelManager {
 
     /** 支持的渠道类型 */
     private static final Set<String> SUPPORTED_TYPES = Set.of(
-            "web", "dingtalk", "feishu", "telegram", "discord", "wecom", "qq", "weixin"
+            "web", "dingtalk", "feishu", "telegram", "discord", "wecom", "qq", "weixin", "slack", "webchat"
     );
 
     /**
@@ -227,12 +230,17 @@ public class ChannelManager {
     }
 
     /**
-     * 按渠道类型获取适配器（返回第一个匹配的）
+     * 按渠道类型获取适配器（返回第一个匹配的，先查内置再查插件）
      */
     public Optional<ChannelAdapter> getAdapterByType(String channelType) {
         adapterLock.readLock().lock();
         try {
-            return activeAdapters.values().stream()
+            Optional<ChannelAdapter> builtin = activeAdapters.values().stream()
+                    .filter(a -> a.getChannelType().equals(channelType))
+                    .findFirst();
+            if (builtin.isPresent()) return builtin;
+            // Fallback to plugin channels
+            return pluginChannels.values().stream()
                     .filter(a -> a.getChannelType().equals(channelType))
                     .findFirst();
         } finally {
@@ -241,12 +249,14 @@ public class ChannelManager {
     }
 
     /**
-     * 获取所有运行中的渠道适配器
+     * 获取所有运行中的渠道适配器（含插件渠道）
      */
     public Collection<ChannelAdapter> getActiveAdapters() {
         adapterLock.readLock().lock();
         try {
-            return List.copyOf(activeAdapters.values());
+            List<ChannelAdapter> all = new ArrayList<>(activeAdapters.values());
+            all.addAll(pluginChannels.values());
+            return List.copyOf(all);
         } finally {
             adapterLock.readLock().unlock();
         }
@@ -298,10 +308,12 @@ public class ChannelManager {
     }
 
     /**
-     * 判断是否支持该渠道类型
+     * 判断是否支持该渠道类型（含插件渠道）
      */
     public boolean isSupported(String channelType) {
-        return SUPPORTED_TYPES.contains(channelType);
+        if (SUPPORTED_TYPES.contains(channelType)) return true;
+        return pluginChannels.values().stream()
+                .anyMatch(a -> a.getChannelType().equals(channelType));
     }
 
     // ==================== 主动推送 ====================
@@ -343,6 +355,35 @@ public class ChannelManager {
             throw new IllegalStateException("No channel session found for conversation: " + conversationId);
         }
         sendToChannel(session.getChannelId(), session.getTargetId(), content);
+    }
+
+    // ==================== 插件渠道管理 ====================
+
+    /**
+     * Register a channel adapter from a plugin.
+     *
+     * @param pluginName the plugin name (used as key for unregistration)
+     * @param adapter    the channel adapter
+     */
+    public void registerPluginChannel(String pluginName, ChannelAdapter adapter) {
+        try {
+            adapter.start();
+            pluginChannels.put(pluginName, adapter);
+            log.info("Plugin channel registered: {} (type={})", pluginName, adapter.getChannelType());
+        } catch (Exception e) {
+            log.error("Failed to start plugin channel {}: {}", pluginName, e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Unregister a plugin channel.
+     */
+    public void unregisterPluginChannel(String pluginName) {
+        ChannelAdapter adapter = pluginChannels.remove(pluginName);
+        if (adapter != null) {
+            stopAdapterSafely(adapter, "unregisterPluginChannel");
+            log.info("Plugin channel unregistered: {}", pluginName);
+        }
     }
 
     // ==================== 内部方法 ====================
@@ -406,6 +447,8 @@ public class ChannelManager {
             case "wecom" -> new WeComChannelAdapter(channel, messageRouter, objectMapper);
             case "qq" -> new QQChannelAdapter(channel, messageRouter, objectMapper);
             case "weixin" -> new WeixinChannelAdapter(channel, messageRouter, objectMapper);
+            case "slack" -> new vip.mate.channel.slack.SlackChannelAdapter(channel, messageRouter, objectMapper);
+            case "webchat" -> new vip.mate.channel.webchat.WebChatChannelAdapter(channel, messageRouter, objectMapper);
             default -> throw new IllegalArgumentException("Unsupported channel type: " + type);
         };
     }

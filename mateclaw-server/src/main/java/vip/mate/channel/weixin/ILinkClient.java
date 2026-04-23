@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
+import vip.mate.channel.weixin.error.WeixinClientError;
 
 import java.net.URI;
 import java.net.URLEncoder;
@@ -96,6 +97,34 @@ public class ILinkClient {
         return headers;
     }
 
+    /**
+     * RFC-024 Change 3：统一的 HTTP 状态校验。
+     *
+     * <p>非 200 响应按 {@link WeixinClientError#fromStatus} 分类后抛出：
+     * <ul>
+     *   <li>401 / 403 → {@code TokenExpiredException}（WeixinChannelAdapter 捕获后进入 ERROR 状态）</li>
+     *   <li>4xx / 5xx / 其它 → 泛化 {@code RuntimeException}（消息文本保持与旧版兼容）</li>
+     * </ul></p>
+     *
+     * <p>把正文字节也带上（截断到 200 字符），便于日志/审计定位，不会撑爆日志。</p>
+     */
+    private static void ensureOk(HttpResponse<?> response, String operation) {
+        int status = response.statusCode();
+        if (status == 200) return;
+        String body = stringifyBody(response.body());
+        throw WeixinClientError.fromStatus(status, operation, body).toException();
+    }
+
+    private static String stringifyBody(Object body) {
+        if (body == null) return "";
+        if (body instanceof String s) return s;
+        if (body instanceof byte[] bytes) {
+            int len = Math.min(bytes.length, 200);
+            return new String(bytes, 0, len, StandardCharsets.UTF_8);
+        }
+        return String.valueOf(body);
+    }
+
     private HttpRequest.Builder applyHeaders(HttpRequest.Builder builder) {
         makeHeaders().forEach(builder::header);
         return builder;
@@ -115,9 +144,7 @@ public class ILinkClient {
                 .timeout(DEFAULT_TIMEOUT)
                 .build();
         HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-        if (response.statusCode() != 200) {
-            throw new RuntimeException("getBotQrcode failed: HTTP " + response.statusCode());
-        }
+        ensureOk(response, "getBotQrcode");
         return objectMapper.readValue(response.body(), new TypeReference<>() {});
     }
 
@@ -135,9 +162,7 @@ public class ILinkClient {
                 .timeout(DEFAULT_TIMEOUT)
                 .build();
         HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-        if (response.statusCode() != 200) {
-            throw new RuntimeException("getQrcodeStatus failed: HTTP " + response.statusCode());
-        }
+        ensureOk(response, "getQrcodeStatus");
         return objectMapper.readValue(response.body(), new TypeReference<>() {});
     }
 
@@ -186,9 +211,7 @@ public class ILinkClient {
                 .timeout(GETUPDATES_TIMEOUT)
                 .build();
         HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-        if (response.statusCode() != 200) {
-            throw new RuntimeException("getUpdates failed: HTTP " + response.statusCode());
-        }
+        ensureOk(response, "getUpdates");
         return objectMapper.readValue(response.body(), new TypeReference<>() {});
     }
 
@@ -209,9 +232,7 @@ public class ILinkClient {
                 .timeout(DEFAULT_TIMEOUT)
                 .build();
         HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-        if (response.statusCode() != 200) {
-            throw new RuntimeException("sendMessage failed: HTTP " + response.statusCode());
-        }
+        ensureOk(response, "sendMessage");
         return objectMapper.readValue(response.body(), new TypeReference<>() {});
     }
 
@@ -268,9 +289,7 @@ public class ILinkClient {
                 .timeout(DOWNLOAD_TIMEOUT)
                 .build();
         HttpResponse<byte[]> response = httpClient.send(request, HttpResponse.BodyHandlers.ofByteArray());
-        if (response.statusCode() != 200) {
-            throw new RuntimeException("downloadMedia failed: HTTP " + response.statusCode());
-        }
+        ensureOk(response, "downloadMedia");
 
         byte[] data = response.body();
         if (aesKeyParam != null && !aesKeyParam.isBlank()) {
@@ -300,9 +319,7 @@ public class ILinkClient {
                 .timeout(DEFAULT_TIMEOUT)
                 .build();
         HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-        if (response.statusCode() != 200) {
-            throw new RuntimeException("getConfig failed: HTTP " + response.statusCode());
-        }
+        ensureOk(response, "getConfig");
         return objectMapper.readValue(response.body(), new TypeReference<>() {});
     }
 
@@ -327,9 +344,7 @@ public class ILinkClient {
                 .timeout(DEFAULT_TIMEOUT)
                 .build();
         HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-        if (response.statusCode() != 200) {
-            throw new RuntimeException("sendTyping failed: HTTP " + response.statusCode());
-        }
+        ensureOk(response, "sendTyping");
         return objectMapper.readValue(response.body(), new TypeReference<>() {});
     }
 
@@ -367,9 +382,7 @@ public class ILinkClient {
                 .timeout(DEFAULT_TIMEOUT)
                 .build();
         HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-        if (response.statusCode() != 200) {
-            throw new RuntimeException("getUploadUrl failed: HTTP " + response.statusCode());
-        }
+        ensureOk(response, "getUploadUrl");
         return objectMapper.readValue(response.body(), new TypeReference<>() {});
     }
 
@@ -400,7 +413,7 @@ public class ILinkClient {
         random.nextBytes(aesKeyRawBytes);
         String aesKeyHex = bytesToHex(aesKeyRawBytes);
         String aesKeyB64ForEncrypt = Base64.getEncoder().encodeToString(aesKeyRawBytes);
-        // 消息中的 aes_key: base64(hex_string) — CoPaw 的 Format B 编码
+        // 消息中的 aes_key: base64(hex_string) — iLink 要求的 base64-of-hex 编码
         String aesKeyB64ForMsg = Base64.getEncoder().encodeToString(aesKeyHex.getBytes(StandardCharsets.UTF_8));
 
         byte[] encryptedData = WeixinAesUtil.aesEcbEncrypt(fileBytes, aesKeyB64ForEncrypt);
@@ -440,9 +453,7 @@ public class ILinkClient {
         }
 
         HttpResponse<byte[]> cdnResponse = httpClient.send(cdnBuilder.build(), HttpResponse.BodyHandlers.ofByteArray());
-        if (cdnResponse.statusCode() != 200) {
-            throw new RuntimeException("CDN upload failed: HTTP " + cdnResponse.statusCode());
-        }
+        ensureOk(cdnResponse, "CDN upload");
 
         // 6. 从响应头提取 encrypt_query_param
         String encryptQueryParam = cdnResponse.headers().firstValue("x-encrypted-param")
@@ -560,6 +571,23 @@ public class ILinkClient {
         msg.put("item_list", List.of(videoItem));
 
         sendMessage(msg);
+    }
+
+    /**
+     * 发送语音消息（以文件形式发送 MP3，用户可点击播放）
+     * <p>
+     * 注意：iLink Bot API 的语音发送接口（mediaType=4, item type=3）尚未经过完全验证。
+     * 若原生语音发送失败，自动降级为 sendFile() 以文件形式发送。
+     *
+     * @param toUserId     收件人 ID
+     * @param voiceBytes   音频字节（MP3 格式）
+     * @param fileName     文件名（如 "reply.mp3"）
+     * @param contextToken 上下文 token
+     */
+    public void sendVoice(String toUserId, byte[] voiceBytes, String fileName, String contextToken) throws Exception {
+        // 降级策略：直接以文件形式发送 MP3（可靠性最高）
+        // 后续验证 iLink API 的原生语音接口后，可改为 voice item type=3
+        sendFile(toUserId, voiceBytes, fileName, contextToken);
     }
 
     // ==================== 工具方法 ====================

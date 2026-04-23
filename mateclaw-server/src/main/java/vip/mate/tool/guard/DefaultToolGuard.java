@@ -36,6 +36,12 @@ public class DefaultToolGuard implements ToolGuard {
             "edit_file"
     );
 
+    /** 定时任务变更工具 —— 创建和删除需要用户审批 */
+    private static final Set<String> CRON_APPROVAL_TOOL_NAMES = Set.of(
+            "create_cron_job",
+            "delete_cron_job"
+    );
+
     /** 极端破坏性模式 —— 即使是 shell 工具也直接 BLOCK，不允许审批覆盖 */
     private final List<DangerousPattern> absoluteBlockPatterns;
 
@@ -85,13 +91,19 @@ public class DefaultToolGuard implements ToolGuard {
         // Shell 工具即使未命中任何模式，也需要审批（任何本地命令执行都是敏感操作）
         if (isShellTool) {
             log.info("[ToolGuard] NEEDS_APPROVAL (shell tool default): tool={}", toolName);
-            return ToolGuardResult.needsApproval("本地命令执行需要用户确认", "shell_tool_default");
+            return ToolGuardResult.needsApproval("Shell command execution requires user approval", "shell_tool_default");
         }
 
         // 文件写入/编辑工具需要审批
         if (toolName != null && FILE_WRITE_TOOL_NAMES.contains(toolName)) {
             log.info("[ToolGuard] NEEDS_APPROVAL (file write tool): tool={}", toolName);
-            return ToolGuardResult.needsApproval("文件写入/编辑操作需要用户确认", "file_write_tool_default");
+            return ToolGuardResult.needsApproval("File write/edit operation requires user approval", "file_write_tool_default");
+        }
+
+        // 定时任务创建/删除需要审批
+        if (toolName != null && CRON_APPROVAL_TOOL_NAMES.contains(toolName)) {
+            log.info("[ToolGuard] NEEDS_APPROVAL (cron job tool): tool={}", toolName);
+            return ToolGuardResult.needsApproval("Cron job create/delete requires user approval", "cron_tool_default");
         }
 
         return ToolGuardResult.allow();
@@ -106,27 +118,27 @@ public class DefaultToolGuard implements ToolGuard {
                 new DangerousPattern(
                         "rm\\s+-(rf|fr)\\s+/\\s*$",
                         "filesystem_destroy",
-                        "递归强制删除根目录"),
+                        "Recursive force delete root directory"),
                 new DangerousPattern(
                         "mkfs\\b",
                         "filesystem_destroy",
-                        "文件系统格式化命令"),
+                        "Filesystem formatting command"),
                 new DangerousPattern(
                         "dd\\s+if=.+of=/dev/",
                         "filesystem_destroy",
-                        "直接磁盘写入操作"),
+                        "Direct disk write operation"),
                 new DangerousPattern(
                         "\\bkill\\s+-9\\s+1\\b",
                         "system_danger",
-                        "杀死 init/systemd 进程"),
+                        "Kill init/systemd process"),
                 new DangerousPattern(
                         "curl.*\\|\\s*(sh|bash|zsh)",
                         "code_injection",
-                        "管道下载内容到 Shell 执行"),
+                        "Pipe download to shell execution"),
                 new DangerousPattern(
                         "wget.*\\|\\s*(sh|bash|zsh)",
                         "code_injection",
-                        "管道下载内容到 Shell 执行")
+                        "Pipe download to shell execution")
         );
     }
 
@@ -139,69 +151,69 @@ public class DefaultToolGuard implements ToolGuard {
                 new DangerousPattern(
                         "rm\\s+-(rf|fr)",
                         "filesystem_destroy",
-                        "递归强制删除操作"),
+                        "Recursive force delete"),
                 new DangerousPattern(
                         "rm\\s+/",
                         "filesystem_destroy",
-                        "从根路径删除文件"),
+                        "Delete from root path"),
                 new DangerousPattern(
                         "rmdir\\s+/",
                         "filesystem_destroy",
-                        "从根路径删除目录"),
+                        "Delete directory from root path"),
 
                 // SQL
                 new DangerousPattern(
                         "DROP\\s+(TABLE|DATABASE|INDEX|VIEW|SCHEMA)",
                         "sql_destroy",
-                        "SQL DROP 语句"),
+                        "SQL DROP statement"),
                 new DangerousPattern(
                         "TRUNCATE\\s+TABLE",
                         "sql_destroy",
-                        "SQL TRUNCATE TABLE 语句"),
+                        "SQL TRUNCATE TABLE statement"),
                 new DangerousPattern(
                         "DELETE\\s+FROM\\s+\\w+\\s*;",
                         "sql_destroy",
-                        "无条件 DELETE（缺少 WHERE 子句）"),
+                        "Unconditional DELETE (missing WHERE clause)"),
                 new DangerousPattern(
                         "ALTER\\s+TABLE\\s+\\w+\\s+DROP",
                         "sql_destroy",
-                        "ALTER TABLE DROP 操作"),
+                        "ALTER TABLE DROP operation"),
 
-                // 系统
+                // System
                 new DangerousPattern(
                         "\\bshutdown\\b",
                         "system_danger",
-                        "系统关机命令"),
+                        "System shutdown command"),
                 new DangerousPattern(
                         "\\breboot\\b",
                         "system_danger",
-                        "系统重启命令"),
+                        "System reboot command"),
                 new DangerousPattern(
                         "chmod\\s+777",
                         "system_danger",
-                        "过度宽松的权限设置"),
+                        "Overly permissive file permissions"),
 
-                // 代码注入
+                // Code injection
                 new DangerousPattern(
                         "eval\\s*\\(",
                         "code_injection",
-                        "动态代码执行（eval）"),
+                        "Dynamic code execution (eval)"),
 
-                // 凭据
+                // Credentials
                 new DangerousPattern(
                         "(password|secret|api[_-]?key|token)\\s*=\\s*['\"]?\\S{8,}",
                         "credential_exposure",
-                        "可能的凭据信息暴露"),
+                        "Potential credential exposure"),
 
                 // Git
                 new DangerousPattern(
                         "git\\s+push\\s+.*--force",
                         "git_danger",
-                        "Git 强制推送"),
+                        "Git force push"),
                 new DangerousPattern(
                         "git\\s+reset\\s+--hard",
                         "git_danger",
-                        "Git 硬重置")
+                        "Git hard reset")
         );
     }
 }

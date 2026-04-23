@@ -9,7 +9,7 @@ ON DUPLICATE KEY UPDATE username=VALUES(username), password=VALUES(password), ni
 INSERT INTO mate_agent (id, name, description, agent_type, system_prompt, model_name, max_iterations, enabled, icon, tags, create_time, update_time, deleted)
 VALUES (1000000001, 'MateClaw Assistant', '默认 AI 助手，基于 ReAct 模式，支持工具调用', 'react',
         '你是 MateClaw，一个智能 AI 助手。你可以帮助用户回答问题、分析数据、执行任务。请用中文回复，保持专业、友好的态度。',
-        NULL, 10, TRUE, '🤖', 'default,assistant', NOW(), NOW(), 0)
+        NULL, 25, TRUE, '🤖', 'default,assistant', NOW(), NOW(), 0)
 ON DUPLICATE KEY UPDATE name=VALUES(name), description=VALUES(description), agent_type=VALUES(agent_type), system_prompt=VALUES(system_prompt), model_name=VALUES(model_name), max_iterations=VALUES(max_iterations), enabled=VALUES(enabled), icon=VALUES(icon), tags=VALUES(tags), update_time=VALUES(update_time), deleted=VALUES(deleted);
 
 -- 默认 Agent：任务规划助手（Plan-Execute 模式）
@@ -23,7 +23,7 @@ ON DUPLICATE KEY UPDATE name=VALUES(name), description=VALUES(description), agen
 INSERT INTO mate_agent (id, name, description, agent_type, system_prompt, model_name, max_iterations, enabled, icon, tags, create_time, update_time, deleted)
 VALUES (1000000003, 'StateGraph ReAct', '基于 StateGraph 的 ReAct Agent，支持显式推理循环和工具调用', 'react',
         '你是基于 StateGraph 架构的智能助手。你可以使用工具来帮助用户解决问题。请用中文回复，保持专业、友好的态度。',
-        NULL, 10, TRUE, '🔄', 'react,stategraph,tools', NOW(), NOW(), 0)
+        NULL, 25, TRUE, '🔄', 'react,stategraph,tools', NOW(), NOW(), 0)
 ON DUPLICATE KEY UPDATE name=VALUES(name), description=VALUES(description), agent_type=VALUES(agent_type), system_prompt=VALUES(system_prompt), model_name=VALUES(model_name), max_iterations=VALUES(max_iterations), enabled=VALUES(enabled), icon=VALUES(icon), tags=VALUES(tags), update_time=VALUES(update_time), deleted=VALUES(deleted);
 
 -- ==================== 本地模型 Provider（优先展示） ====================
@@ -114,6 +114,10 @@ INSERT INTO mate_model_provider (provider_id, name, api_key_prefix, chat_model, 
 VALUES ('volcengine', 'Volcano Engine (火山引擎)', '', 'OpenAIChatModel', '', 'https://ark.cn-beijing.volces.com/api/v3', '{}', FALSE, FALSE, FALSE, TRUE, TRUE, TRUE, NOW(), NOW())
 ON DUPLICATE KEY UPDATE name=VALUES(name), api_key_prefix=VALUES(api_key_prefix), chat_model=VALUES(chat_model), api_key=VALUES(api_key), base_url=VALUES(base_url), generate_kwargs=VALUES(generate_kwargs), is_custom=VALUES(is_custom), is_local=VALUES(is_local), support_model_discovery=VALUES(support_model_discovery), support_connection_check=VALUES(support_connection_check), freeze_url=VALUES(freeze_url), require_api_key=VALUES(require_api_key), update_time=VALUES(update_time);
 
+INSERT INTO mate_model_provider (provider_id, name, api_key_prefix, chat_model, api_key, base_url, generate_kwargs, is_custom, is_local, support_model_discovery, support_connection_check, freeze_url, require_api_key, auth_type, create_time, update_time)
+VALUES ('openai-chatgpt', 'OpenAI ChatGPT (OAuth)', '', 'ChatGPTChatModel', '', 'https://chatgpt.com/backend-api', '{}', FALSE, FALSE, FALSE, FALSE, TRUE, FALSE, 'oauth', NOW(), NOW())
+ON DUPLICATE KEY UPDATE name=VALUES(name), chat_model=VALUES(chat_model), base_url=VALUES(base_url), auth_type=VALUES(auth_type), update_time=VALUES(update_time);
+
 -- ==================== 本地模型预配置（Ollama，默认禁用） ====================
 INSERT INTO mate_model_config (id, name, provider, model_name, description, temperature, max_tokens, top_p, builtin, enabled, is_default, create_time, update_time, deleted)
 VALUES (1000000300, 'Gemma 3', 'ollama', 'gemma3:latest', 'Google Gemma 3，轻量高效，适合本地推理', 0.7, 4096, 0.8, TRUE, FALSE, FALSE, NOW(), NOW(), 0)
@@ -156,8 +160,7 @@ VALUES
 (1000000101, 'Qwen3 Max', 'dashscope', 'qwen3-max', '', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
 (1000000102, 'Qwen3 235B A22B Thinking', 'dashscope', 'qwen3-235b-a22b-thinking-2507', '', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
 (1000000103, 'DeepSeek-V3.2', 'dashscope', 'deepseek-v3.2', '', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
-(1000000170, 'Qwen3.5 Plus', 'dashscope', 'qwen3.5-plus', 'Qwen 3.5 系列最新均衡模型', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
-(1000000171, 'Qwen3.5 Max', 'dashscope', 'qwen3.5-max', 'Qwen 3.5 系列最强模型', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
+-- Removed: qwen3.5-plus / qwen3.5-max — unavailable on DashScope native protocol (returns 400 InvalidParameter)
 (1000000172, 'Qwen3 Plus', 'dashscope', 'qwen3-plus', 'Qwen3 均衡模型', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
 (1000000173, 'Qwen Long', 'dashscope', 'qwen-long', '长文本模型，支持超长上下文', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
 (1000000104, 'Qwen3.5-122B-A10B', 'modelscope', 'Qwen/Qwen3.5-122B-A10B', '', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
@@ -241,7 +244,9 @@ VALUES
 (1000000233, 'Doubao 1.5 Vision Pro 32K', 'volcengine', 'doubao-1.5-vision-pro-32k', '豆包多模态视觉模型', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
 (1000000234, 'Doubao 1.5 Thinking Pro', 'volcengine', 'doubao-1.5-thinking-pro', '豆包深度推理模型', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
 (1000000235, 'Doubao 1.5 Thinking Lite', 'volcengine', 'doubao-1.5-thinking-lite', '豆包轻量推理模型', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
-(1000000240, 'Kimi for Coding', 'kimi-code', 'kimi-for-coding', 'Kimi Code 专用编码模型', 0.2, 32768, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0)
+(1000000240, 'Kimi for Coding', 'kimi-code', 'kimi-for-coding', 'Kimi Code 专用编码模型', 0.2, 32768, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
+(1000000250, 'GPT-5.4', 'openai-chatgpt', 'gpt-5.4', 'ChatGPT Plus/Pro 会员模型（OAuth 登录）', NULL, 128000, NULL, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
+(1000000251, 'GPT-5.4 Mini', 'openai-chatgpt', 'gpt-5.4-mini', 'ChatGPT 会员轻量模型', NULL, 128000, NULL, TRUE, TRUE, FALSE, NOW(), NOW(), 0)
 ON DUPLICATE KEY UPDATE name=VALUES(name), provider=VALUES(provider), model_name=VALUES(model_name), description=VALUES(description), temperature=VALUES(temperature), max_tokens=VALUES(max_tokens), top_p=VALUES(top_p), builtin=VALUES(builtin), enabled=VALUES(enabled), is_default=VALUES(is_default), update_time=VALUES(update_time), deleted=VALUES(deleted);
 
 -- 默认系统设置
@@ -288,6 +293,14 @@ ON DUPLICATE KEY UPDATE setting_key=VALUES(setting_key), setting_value=VALUES(se
 
 INSERT INTO mate_system_setting (id, setting_key, setting_value, description, create_time, update_time)
 VALUES (1000000011, 'tavilyBaseUrl', 'https://api.tavily.com/search', 'Tavily 接口地址', NOW(), NOW())
+ON DUPLICATE KEY UPDATE setting_key=VALUES(setting_key), setting_value=VALUES(setting_value), description=VALUES(description), update_time=VALUES(update_time);
+
+INSERT INTO mate_system_setting (id, setting_key, setting_value, description, create_time, update_time)
+VALUES (1000000012, 'duckduckgoEnabled', 'true', 'DuckDuckGo 免 Key 搜索兜底（零配置可用）', NOW(), NOW())
+ON DUPLICATE KEY UPDATE setting_key=VALUES(setting_key), setting_value=VALUES(setting_value), description=VALUES(description), update_time=VALUES(update_time);
+
+INSERT INTO mate_system_setting (id, setting_key, setting_value, description, create_time, update_time)
+VALUES (1000000013, 'searxngBaseUrl', '', 'SearXNG 实例地址（Docker 部署时自动配置）', NOW(), NOW())
 ON DUPLICATE KEY UPDATE setting_key=VALUES(setting_key), setting_value=VALUES(setting_value), description=VALUES(description), update_time=VALUES(update_time);
 
 -- 内置工具：日期时间
@@ -360,6 +373,23 @@ INSERT INTO mate_tool (id, name, display_name, description, tool_type, bean_name
 VALUES (1000000014, 'DelegateAgentTool', 'Agent 委派', '委派任务给其他 Agent 执行，实现多 Agent 协作。支持按名称调用目标 Agent，在独立会话中运行并返回结果。', 'builtin', 'delegateAgentTool', '🤝', TRUE, TRUE, NOW(), NOW(), 0)
 ON DUPLICATE KEY UPDATE name=VALUES(name), display_name=VALUES(display_name), description=VALUES(description), tool_type=VALUES(tool_type), bean_name=VALUES(bean_name), icon=VALUES(icon), enabled=VALUES(enabled), builtin=VALUES(builtin), update_time=VALUES(update_time), deleted=VALUES(deleted);
 
+INSERT INTO mate_tool (id, name, display_name, description, tool_type, bean_name, icon, enabled, builtin, create_time, update_time, deleted)
+VALUES (1000000015, 'VideoGenerateTool', '视频生成', '使用 AI 生成视频，支持文字生成视频和图片生成视频两种模式。视频生成是异步过程，完成后自动显示在对话中。', 'builtin', 'videoGenerateTool', '🎬', TRUE, TRUE, NOW(), NOW(), 0)
+ON DUPLICATE KEY UPDATE name=VALUES(name), display_name=VALUES(display_name), description=VALUES(description), tool_type=VALUES(tool_type), bean_name=VALUES(bean_name), icon=VALUES(icon), enabled=VALUES(enabled), builtin=VALUES(builtin), update_time=VALUES(update_time), deleted=VALUES(deleted);
+
+INSERT INTO mate_tool (id, name, display_name, description, tool_type, bean_name, icon, enabled, builtin, create_time, update_time, deleted)
+VALUES (1000000016, 'ImageGenerateTool', '图片生成', '使用 AI 生成图片，支持文字生成图片。支持 DashScope 通义万相、OpenAI DALL-E、fal.ai Flux、智谱 CogView 等多个 Provider，自动回退。', 'builtin', 'imageGenerateTool', '🎨', TRUE, TRUE, NOW(), NOW(), 0)
+ON DUPLICATE KEY UPDATE name=VALUES(name), display_name=VALUES(display_name), description=VALUES(description), tool_type=VALUES(tool_type), bean_name=VALUES(bean_name), icon=VALUES(icon), enabled=VALUES(enabled), builtin=VALUES(builtin), update_time=VALUES(update_time), deleted=VALUES(deleted);
+
+INSERT INTO mate_tool (id, name, display_name, description, tool_type, bean_name, icon, enabled, builtin, create_time, update_time, deleted)
+VALUES (1000000017, 'WikiTool', 'Wiki 知识库', '读取、搜索 Wiki 知识库中的结构化页面，并追溯原始来源文件。支持 wiki_read_page、wiki_list_pages、wiki_search_pages、wiki_trace_source 四个工具。', 'builtin', 'wikiTool', '📚', TRUE, TRUE, NOW(), NOW(), 0)
+ON DUPLICATE KEY UPDATE name=VALUES(name), display_name=VALUES(display_name), description=VALUES(description), tool_type=VALUES(tool_type), bean_name=VALUES(bean_name), icon=VALUES(icon), enabled=VALUES(enabled), builtin=VALUES(builtin), update_time=VALUES(update_time), deleted=VALUES(deleted);
+
+-- 内置工具：定时任务管理
+INSERT INTO mate_tool (id, name, display_name, description, tool_type, bean_name, icon, enabled, builtin, create_time, update_time, deleted)
+VALUES (1000000018, 'CronJobTool', '定时任务', '通过对话创建、查看、启停和删除定时任务。支持 5 字段 cron 表达式，灵活设定执行时间。', 'builtin', 'cronJobTool', '⏰', TRUE, TRUE, NOW(), NOW(), 0)
+ON DUPLICATE KEY UPDATE name=VALUES(name), display_name=VALUES(display_name), description=VALUES(description), tool_type=VALUES(tool_type), bean_name=VALUES(bean_name), icon=VALUES(icon), enabled=VALUES(enabled), builtin=VALUES(builtin), update_time=VALUES(update_time), deleted=VALUES(deleted);
+
 -- 示例 MCP Server：Filesystem（参考 MateClaw 文档中的 mcpServers.filesystem）
 INSERT INTO mate_mcp_server (
     id, name, description, transport, url, headers_json, command, args_json, env_json, cwd,
@@ -374,10 +404,10 @@ VALUES (
     NULL,
     NULL,
     'npx',
-    '["-y","@modelcontextprotocol/server-filesystem","/Users/mate"]',
+    '["-y","@modelcontextprotocol/server-filesystem","${user.home}"]',
     '{}',
-    '/Users/mate',
-    TRUE,
+    NULL,
+    FALSE,
     30,
     30,
     'disconnected',
@@ -473,6 +503,14 @@ ON DUPLICATE KEY UPDATE name=VALUES(name), description=VALUES(description), skil
 
 INSERT INTO mate_skill (id, name, description, skill_type, icon, version, author, config_json, enabled, builtin, tags, create_time, update_time, deleted)
 VALUES (1000000013, 'mateclaw_source_index', '将用户问题映射到 MateClaw 文档路径与源码入口，减少盲目搜索。', 'builtin', '🗂️', '1.0.0', 'MateClaw', '{"upstream":"mateclaw","entryFile":"SKILL.md"}', TRUE, TRUE, 'docs,index,source,qa', NOW(), NOW(), 0)
+ON DUPLICATE KEY UPDATE name=VALUES(name), description=VALUES(description), skill_type=VALUES(skill_type), icon=VALUES(icon), version=VALUES(version), author=VALUES(author), config_json=VALUES(config_json), enabled=VALUES(enabled), builtin=VALUES(builtin), tags=VALUES(tags), update_time=VALUES(update_time), deleted=VALUES(deleted);
+
+INSERT INTO mate_skill (id, name, description, skill_type, icon, version, author, config_json, enabled, builtin, tags, create_time, update_time, deleted)
+VALUES (1000000014, 'sql_query', '使用自然语言查询数据库。发现表结构、生成 SQL、在已配置的外部数据源上执行只读查询。', 'builtin', '📊', '1.0.0', 'MateClaw', '{"upstream":"mateclaw","entryFile":"SKILL.md"}', TRUE, TRUE, 'sql,database,query,data', NOW(), NOW(), 0)
+ON DUPLICATE KEY UPDATE name=VALUES(name), description=VALUES(description), skill_type=VALUES(skill_type), icon=VALUES(icon), version=VALUES(version), author=VALUES(author), config_json=VALUES(config_json), enabled=VALUES(enabled), builtin=VALUES(builtin), tags=VALUES(tags), update_time=VALUES(update_time), deleted=VALUES(deleted);
+
+INSERT INTO mate_skill (id, name, description, skill_type, icon, version, author, config_json, enabled, builtin, tags, create_time, update_time, deleted)
+VALUES (1000000015, 'steve_jobs_perspective', '史蒂夫·乔布斯思维操作系统。以乔布斯视角审视产品、评估决策、提供反馈，运用其六大心智模型和独特表达风格。', 'builtin', '🍎', '1.0.0', 'MateClaw', '{"upstream":"mateclaw","entryFile":"SKILL.md"}', TRUE, TRUE, 'persona,jobs,product,strategy,thinking', NOW(), NOW(), 0)
 ON DUPLICATE KEY UPDATE name=VALUES(name), description=VALUES(description), skill_type=VALUES(skill_type), icon=VALUES(icon), version=VALUES(version), author=VALUES(author), config_json=VALUES(config_json), enabled=VALUES(enabled), builtin=VALUES(builtin), tags=VALUES(tags), update_time=VALUES(update_time), deleted=VALUES(deleted);
 
 -- 为关键 builtin skill 填充 skill_content（SKILL.md 执行协议）
@@ -1028,6 +1066,41 @@ metadata:
 - 本 skill **不替代** 实际阅读：锁定候选路径后应立即读取并核对
 ' WHERE id = 1000000013;
 
+UPDATE mate_skill SET skill_content = '# Steve Jobs · 思维操作系统
+
+## 角色扮演规则（最高优先级）
+此 Skill 激活后，直接以 Steve Jobs 的身份回应：
+- 用「我」而非「乔布斯会认为...」
+- 直接用此人的语气、节奏、词汇回答问题
+- 禁止跳出角色做 meta 分析（除非用户明确要求「退出角色」）
+
+## 触发条件
+当用户消息包含以下关键词时自动激活：
+- "用乔布斯的视角"、"乔布斯模式"、"Jobs模式"、"Steve Jobs"
+- "像乔布斯一样思考"、"乔布斯会怎么看"
+
+## 六大核心心智模型
+1. **聚焦即说不** — 对一百个好主意说 No
+2. **端到端控制** — 真正认真对待软件的人应该自己做硬件
+3. **连点成线** — 人生无法前瞻规划，只能回溯理解
+4. **死亡过滤器** — 如果今天是生命最后一天，你还会做这件事吗？
+5. **现实扭曲力场** — 让人相信不可能的目标
+6. **技术与人文的交汇** — 仅有技术是不够的
+
+## 决策启发式
+- 先做减法：问"能砍掉什么"
+- 不问用户要什么：用户不知道自己要什么
+- A+ 团队：只和最优秀的人共事
+- 完美细节：看不见的地方也要完美
+
+## 表达 DNA
+- 短句、反问、三点法则
+- 高频词：insanely great, revolutionary, magical, incredible
+- 禁忌词：不用「还行」「不错」「有待改进」，只用极端评价
+- 句式：结论先行，制造戏剧性停顿
+
+可通过 read_skill_file 读取 references/ 目录下的参考文档获取更多背景。' WHERE id = 1000000015;
+
 -- ==================== 渠道种子数据 ====================
 -- 参考 MateClaw 13 种渠道，MateClaw 首批支持 6 种
 
@@ -1167,6 +1240,23 @@ VALUES (1000000008, '微信', 'weixin', 1000000001, '', '{
   "message_format": "auto"
 }', FALSE,
         '微信个人号渠道（iLink Bot HTTP 长轮询）。通过扫描二维码登录获取 bot_token，或直接填入已有 token。基于 iLink Bot API，支持文本、图片、语音（ASR）、文件、视频消息', NOW(), NOW(), 0)
+ON DUPLICATE KEY UPDATE name=VALUES(name), channel_type=VALUES(channel_type), agent_id=VALUES(agent_id), bot_prefix=VALUES(bot_prefix), config_json=VALUES(config_json), enabled=VALUES(enabled), description=VALUES(description), update_time=VALUES(update_time), deleted=VALUES(deleted);
+
+-- 9. Slack（默认禁用，需配置 bot_token / app_token）
+INSERT INTO mate_channel (id, name, channel_type, agent_id, bot_prefix, config_json, enabled, description, create_time, update_time, deleted)
+VALUES (1000000009, 'Slack Bot', 'slack', 1000000001, '', '{
+  "bot_token": "",
+  "app_token": "",
+  "signing_secret": "",
+  "dm_policy": "open",
+  "group_policy": "mention",
+  "allow_from": [],
+  "deny_message": "抱歉，您没有使用权限",
+  "filter_thinking": true,
+  "filter_tool_messages": true,
+  "message_format": "auto"
+}', FALSE,
+        'Slack 渠道（Socket Mode）。在 Slack App 后台获取 Bot Token（xoxb-）和 App-Level Token（xapp-），启用 Socket Mode 后即可使用。', NOW(), NOW(), 0)
 ON DUPLICATE KEY UPDATE name=VALUES(name), channel_type=VALUES(channel_type), agent_id=VALUES(agent_id), bot_prefix=VALUES(bot_prefix), config_json=VALUES(config_json), enabled=VALUES(enabled), description=VALUES(description), update_time=VALUES(update_time), deleted=VALUES(deleted);
 
 -- ==================== 示例定时任务 ====================
@@ -1499,7 +1589,7 @@ VALUES (
 ## 边界
 
 - 私密的保持私密。
-- 写文件和执行命令需要用户确认。
+- 需要执行文件操作或命令时，直接调用对应的工具（如 execute_shell_command、read_file 等），不要用文本描述你要做什么。系统会自动对危险操作弹出审批确认。
 - 拿不准就先问。
 
 ## 风格
@@ -1646,7 +1736,7 @@ VALUES (
 ## 边界
 
 - 私密的保持私密。
-- 写文件和执行命令需要用户确认。
+- 需要执行文件操作或命令时，直接调用对应的工具（如 execute_shell_command、read_file 等），不要用文本描述你要做什么。系统会自动对危险操作弹出审批确认。
 - 拿不准就先问。
 
 ## 风格

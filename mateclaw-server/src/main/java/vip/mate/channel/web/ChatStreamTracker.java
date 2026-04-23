@@ -101,6 +101,30 @@ public class ChatStreamTracker {
 
     private final ConcurrentHashMap<String, RunState> runs = new ConcurrentHashMap<>();
 
+    /** 事件 relay：子会话事件转发到父会话（用于 Agent 委派进度可见性） */
+    private final ConcurrentHashMap<String, List<java.util.function.BiConsumer<String, String>>> eventRelays = new ConcurrentHashMap<>();
+
+    /**
+     * 注册事件 relay：将 sourceConversationId 的广播事件同时转发给 listener。
+     * 返回一个 Runnable，调用后取消注册。
+     */
+    public Runnable addEventRelay(String sourceConversationId,
+                                   java.util.function.BiConsumer<String, String> listener) {
+        eventRelays.computeIfAbsent(sourceConversationId, k -> new java.util.concurrent.CopyOnWriteArrayList<>())
+                .add(listener);
+        log.debug("Event relay registered for conversation {}", sourceConversationId);
+        return () -> {
+            List<java.util.function.BiConsumer<String, String>> listeners = eventRelays.get(sourceConversationId);
+            if (listeners != null) {
+                listeners.remove(listener);
+                if (listeners.isEmpty()) {
+                    eventRelays.remove(sourceConversationId);
+                }
+            }
+            log.debug("Event relay removed for conversation {}", sourceConversationId);
+        };
+    }
+
     /** 心跳调度线程池（守护线程） */
     private final ScheduledExecutorService heartbeatScheduler =
             Executors.newSingleThreadScheduledExecutor(r -> {
@@ -120,6 +144,18 @@ public class ChatStreamTracker {
         if (state != null && state.done) {
             stopHeartbeat(conversationId);
             runs.put(conversationId, new RunState(conversationId));
+        } else if (state != null) {
+            // Reuse path: when complete() early-returns due to activeFluxCount > 0
+            // (approval replay / interrupt / any leaked flux increment), the RunState
+            // is kept with stopRequested still true from the previous turn. Left alone,
+            // the next register() would reuse it and ReasoningNode would instantly
+            // abort every new message with "Stop requested before LLM call".
+            // Reset the flag here — new registration means new user intent, and any
+            // still-live prior flux has already been cancelled via requestStop()'s
+            // disposable.dispose(), so the flag is redundant for it.
+            if (state.stopRequested.compareAndSet(true, false)) {
+                log.info("[ChatStreamTracker] Reset stale stopRequested on register: {}", conversationId);
+            }
         }
         startHeartbeat(conversationId);
         log.debug("Stream registered: {}", conversationId);
@@ -211,6 +247,18 @@ public class ChatStreamTracker {
                 } catch (IOException | IllegalStateException e) {
                     log.debug("Removing dead subscriber for {}: {}", conversationId, e.getMessage());
                     it.remove();
+                }
+            }
+        }
+
+        // 事件 relay：转发给注册的监听器（用于子会话→父会话进度传递）
+        List<java.util.function.BiConsumer<String, String>> relays = eventRelays.get(conversationId);
+        if (relays != null) {
+            for (var relay : relays) {
+                try {
+                    relay.accept(eventName, jsonData);
+                } catch (Exception e) {
+                    log.debug("Event relay error for {}: {}", conversationId, e.getMessage());
                 }
             }
         }

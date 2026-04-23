@@ -1,5 +1,5 @@
 <template>
-  <div v-if="show" class="modal-overlay" @click.self="$emit('close')">
+  <div v-if="show" class="modal-overlay">
     <div class="modal">
       <div class="modal-header">
         <h2>{{ editingProvider ? t('settings.model.editTitle') : t('settings.model.createTitle') }}</h2>
@@ -24,7 +24,37 @@
             />
             <div class="field-hint">{{ baseUrlHint }}</div>
           </div>
-          <div class="form-group">
+          <!-- OAuth 登录区域（auth_type === 'oauth' 时显示） -->
+          <div v-if="editingProvider?.authType === 'oauth'" class="form-group full-width oauth-group">
+            <label class="form-label">{{ t('settings.model.oauthTitle') }}</label>
+            <div class="oauth-status-row">
+              <span v-if="editingProvider?.oauthConnected" class="oauth-badge oauth-connected">
+                {{ t('settings.model.oauthConnected') }}
+              </span>
+              <span v-else class="oauth-badge oauth-disconnected">
+                {{ t('settings.model.oauthDisconnected') }}
+              </span>
+              <button
+                v-if="!editingProvider?.oauthConnected"
+                class="btn-oauth"
+                type="button"
+                @click="$emit('oauthLogin')"
+              >
+                {{ t('settings.model.oauthLogin') }}
+              </button>
+              <button
+                v-else
+                class="btn-oauth btn-oauth-revoke"
+                type="button"
+                @click="$emit('oauthRevoke')"
+              >
+                {{ t('settings.model.oauthDisconnect') }}
+              </button>
+            </div>
+            <div class="field-hint">{{ t('settings.model.oauthHint') }}</div>
+          </div>
+          <!-- API Key 输入区域（非 OAuth 时显示） -->
+          <div v-else class="form-group">
             <label class="form-label">{{ t('settings.model.apiKey') }}</label>
             <input
               v-model="form.apiKey"
@@ -137,6 +167,8 @@ defineEmits<{
   close: []
   save: []
   toggleAdvanced: []
+  oauthLogin: []
+  oauthRevoke: []
 }>()
 </script>
 
@@ -175,6 +207,16 @@ defineEmits<{
 .toggle-slider::before { content: ''; position: absolute; height: 16px; width: 16px; left: 3px; bottom: 3px; background: white; border-radius: 50%; transition: 0.2s; }
 .toggle-switch input:checked + .toggle-slider { background: var(--mc-primary); }
 .toggle-switch input:checked + .toggle-slider::before { transform: translateX(18px); }
+
+.oauth-group { margin-top: 4px; }
+.oauth-status-row { display: flex; align-items: center; gap: 12px; margin-top: 6px; }
+.oauth-badge { display: inline-flex; align-items: center; padding: 4px 10px; border-radius: 8px; font-size: 13px; font-weight: 600; }
+.oauth-connected { background: rgba(34, 197, 94, 0.12); color: #22c55e; }
+.oauth-disconnected { background: rgba(156, 163, 175, 0.12); color: var(--mc-text-tertiary); }
+.btn-oauth { border: none; border-radius: 10px; padding: 8px 16px; font-size: 13px; font-weight: 600; cursor: pointer; background: var(--mc-primary); color: white; transition: all 0.15s; }
+.btn-oauth:hover { background: var(--mc-primary-hover); }
+.btn-oauth-revoke { background: rgba(239, 68, 68, 0.1); color: #ef4444; }
+.btn-oauth-revoke:hover { background: rgba(239, 68, 68, 0.2); }
 
 @media (max-width: 900px) {
   .form-grid { grid-template-columns: 1fr; }

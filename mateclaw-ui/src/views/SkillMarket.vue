@@ -1,46 +1,49 @@
 <template>
-  <div class="page-container">
-    <div class="page-header">
-      <div>
-        <h1 class="page-title">{{ t('skills.title') }}</h1>
-        <p class="page-desc">{{ t('skills.desc') }}</p>
-      </div>
-      <div class="header-actions">
-        <button class="btn-secondary" @click="handleRefreshRuntime" :disabled="refreshing">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/>
-            <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
-          </svg>
-          {{ refreshing ? t('skills.refreshing') : t('skills.refreshRuntime') }}
-        </button>
-        <button class="btn-secondary" @click="showImportDialog = true">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
-          </svg>
-          {{ t('skills.importSkill') }}
-        </button>
-        <button class="btn-primary" @click="openCreateModal">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
-          </svg>
-          {{ t('skills.newSkill') }}
-        </button>
-      </div>
-    </div>
+  <div class="mc-page-shell">
+    <div class="mc-page-frame">
+      <div class="mc-page-inner skills-page">
+        <div class="mc-page-header">
+          <div>
+            <div class="mc-page-kicker">Capabilities</div>
+            <h1 class="mc-page-title">{{ t('skills.title') }}</h1>
+            <p class="mc-page-desc">{{ t('skills.desc') }}</p>
+          </div>
+          <div class="header-actions">
+            <button class="btn-secondary" @click="handleRefreshRuntime" :disabled="refreshing">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/>
+                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+              </svg>
+              {{ refreshing ? t('skills.refreshing') : t('skills.refreshRuntime') }}
+            </button>
+            <button class="btn-secondary" @click="showImportDialog = true">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+              </svg>
+              {{ t('skills.importSkill') }}
+            </button>
+            <button class="btn-primary" @click="openCreateModal">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+              </svg>
+              {{ t('skills.newSkill') }}
+            </button>
+          </div>
+        </div>
 
-    <!-- 分类 Tab -->
-    <div class="category-tabs">
-      <button v-for="tab in categoryTabs" :key="tab.value" class="cat-tab"
-        :class="{ active: activeCategory === tab.value }" @click="activeCategory = tab.value">
-        <span class="cat-icon">{{ tab.icon }}</span>
-        {{ tab.label }}
-        <span class="cat-count">{{ getCategoryCount(tab.value) }}</span>
-      </button>
-    </div>
+        <!-- 分类 Tab -->
+        <div class="category-tabs mc-surface-card">
+          <button v-for="tab in categoryTabs" :key="tab.value" class="cat-tab"
+            :class="{ active: activeCategory === tab.value }" @click="activeCategory = tab.value">
+            <span class="cat-icon">{{ tab.icon }}</span>
+            {{ tab.label }}
+            <span class="cat-count">{{ getCategoryCount(tab.value) }}</span>
+          </button>
+        </div>
 
-    <!-- 技能列表 -->
-    <div class="skill-grid" v-if="filteredSkills.length > 0">
-      <div v-for="skill in filteredSkills" :key="skill.id" class="skill-card"
+        <!-- 技能列表 -->
+        <div class="skill-grid" v-if="filteredSkills.length > 0">
+          <div v-for="skill in filteredSkills" :key="skill.id" class="skill-card mc-surface-card"
         :class="{ disabled: !skill.enabled }">
         <div class="skill-header">
           <div class="skill-icon-wrap" :class="getSkillIconBg(skill.skillType)">
@@ -67,7 +70,18 @@
           <span class="runtime-badge" :class="getRuntimeBadgeClass(skill)">
             {{ getRuntimeLabel(skill) }}
           </span>
-          <!-- Security Badge -->
+          <!-- RFC-023: AI Synthesized Badge -->
+          <span v-if="skill.sourceConversationId" class="runtime-badge rt-synthesized" title="Auto-synthesized from conversation">
+            🤖 AI
+          </span>
+          <!-- Security Scan Status (RFC-023) -->
+          <span v-if="skill.securityScanStatus === 'FAILED'" class="runtime-badge rt-blocked">
+            🛡️ Scan Failed
+          </span>
+          <span v-else-if="skill.securityScanStatus === 'PASSED'" class="runtime-badge rt-ready">
+            ✓ Scanned
+          </span>
+          <!-- Security Badge (runtime) -->
           <span v-if="getSecurityBadge(skill)" class="runtime-badge" :class="getSecurityBadge(skill)?.cls">
             {{ getSecurityBadge(skill)?.label }}
           </span>
@@ -110,20 +124,22 @@
             </button>
           </div>
         </div>
-      </div>
-    </div>
+          </div>
+        </div>
 
-    <div v-else class="empty-state">
-      <div class="empty-icon">🛠️</div>
-      <h3>{{ t('skills.empty') }}</h3>
-      <p>{{ t('skills.emptyDesc') }}</p>
+        <div v-else class="empty-state mc-surface-card">
+          <div class="empty-icon">🛠️</div>
+          <h3>{{ t('skills.empty') }}</h3>
+          <p>{{ t('skills.emptyDesc') }}</p>
+        </div>
+      </div>
     </div>
 
     <!-- Import Hub Dialog -->
     <ImportHubDialog v-model:visible="showImportDialog" @installed="loadAll" />
 
     <!-- Modal -->
-    <div v-if="showModal" class="modal-overlay" @click.self="closeModal">
+    <div v-if="showModal" class="modal-overlay">
       <div class="modal">
         <div class="modal-header">
           <h2>{{ editingSkill ? t('skills.modal.configureTitle') : t('skills.modal.newTitle') }}</h2>
@@ -504,21 +520,18 @@ function getSkillTypeLabel(type: string) {
 </script>
 
 <style scoped>
-.page-container { height: 100%; overflow-y: auto; padding: 24px; background: var(--mc-bg); }
-.page-header { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 24px; }
-.page-title { font-size: 20px; font-weight: 700; color: var(--mc-text-primary); margin: 0 0 4px; }
-.page-desc { font-size: 14px; color: var(--mc-text-secondary); margin: 0; }
-.header-actions { display: flex; gap: 8px; align-items: center; }
-.btn-primary { display: flex; align-items: center; gap: 6px; padding: 8px 16px; background: var(--mc-primary); color: white; border: none; border-radius: 8px; font-size: 14px; font-weight: 500; cursor: pointer; transition: background 0.15s; }
+.skills-page { gap: 18px; }
+.header-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.btn-primary { display: flex; align-items: center; gap: 6px; padding: 10px 16px; background: linear-gradient(135deg, var(--mc-primary), var(--mc-primary-hover)); color: white; border: none; border-radius: 14px; font-size: 14px; font-weight: 600; cursor: pointer; transition: background 0.15s; box-shadow: var(--mc-shadow-soft); }
 .btn-primary:hover { background: var(--mc-primary-hover); }
 .btn-primary:disabled { background: var(--mc-border); cursor: not-allowed; }
-.btn-secondary { display: flex; align-items: center; gap: 6px; padding: 8px 16px; background: var(--mc-bg-elevated); color: var(--mc-text-primary); border: 1px solid var(--mc-border); border-radius: 8px; font-size: 14px; cursor: pointer; }
+.btn-secondary { display: flex; align-items: center; gap: 6px; padding: 9px 14px; background: var(--mc-bg-elevated); color: var(--mc-text-primary); border: 1px solid var(--mc-border); border-radius: 12px; font-size: 14px; cursor: pointer; }
 .btn-secondary:hover { background: var(--mc-bg-sunken); }
 .btn-secondary:disabled { opacity: 0.6; cursor: not-allowed; }
 
 /* 分类 Tab */
-.category-tabs { display: flex; gap: 8px; margin-bottom: 20px; flex-wrap: wrap; }
-.cat-tab { display: flex; align-items: center; gap: 6px; padding: 8px 16px; border: 1px solid var(--mc-border); background: var(--mc-bg-elevated); border-radius: 8px; font-size: 13px; color: var(--mc-text-secondary); cursor: pointer; transition: all 0.15s; }
+.category-tabs { display: flex; gap: 8px; flex-wrap: wrap; padding: 14px; }
+.cat-tab { display: flex; align-items: center; gap: 6px; padding: 9px 16px; border: 1px solid var(--mc-border); background: var(--mc-bg-muted); border-radius: 999px; font-size: 13px; color: var(--mc-text-secondary); cursor: pointer; transition: all 0.15s; font-weight: 600; }
 .cat-tab:hover { background: var(--mc-bg-sunken); }
 .cat-tab.active { background: var(--mc-primary-bg); border-color: var(--mc-primary); color: var(--mc-primary); font-weight: 500; }
 .cat-icon { font-size: 14px; }
@@ -526,19 +539,19 @@ function getSkillTypeLabel(type: string) {
 .cat-tab.active .cat-count { background: rgba(217, 119, 87, 0.2); color: var(--mc-primary); }
 
 /* 技能网格 */
-.skill-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; }
-.skill-card { background: var(--mc-bg-elevated); border: 1px solid var(--mc-border); border-radius: 12px; padding: 16px; transition: all 0.15s; display: flex; flex-direction: column; }
-.skill-card:hover { border-color: var(--mc-primary-light); box-shadow: 0 4px 12px rgba(217, 119, 87, 0.08); }
+.skill-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 18px; }
+.skill-card { padding: 18px; transition: all 0.15s; display: flex; flex-direction: column; min-height: 280px; }
+.skill-card:hover { border-color: var(--mc-primary-light); box-shadow: var(--mc-shadow-medium); transform: translateY(-2px); }
 .skill-card.disabled { opacity: 0.6; }
 .skill-header { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 10px; }
-.skill-icon-wrap { width: 40px; height: 40px; border-radius: 10px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.skill-icon-wrap { width: 44px; height: 44px; border-radius: 14px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
 .bg-blue { background: var(--mc-primary-bg); }
 .bg-purple { background: var(--mc-primary-bg); }
 .bg-green { background: var(--mc-primary-bg); }
 .bg-gray { background: var(--mc-bg-sunken); }
 .skill-icon { font-size: 20px; }
 .skill-meta { flex: 1; overflow: hidden; }
-.skill-name { font-size: 15px; font-weight: 600; color: var(--mc-text-primary); margin: 0 0 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.skill-name { font-size: 16px; font-weight: 700; color: var(--mc-text-primary); margin: 0 0 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .skill-meta-row { display: flex; align-items: center; gap: 6px; }
 .skill-type-badge { padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 500; }
 .badge-blue { background: var(--mc-primary-bg); color: var(--mc-primary); }
@@ -564,6 +577,8 @@ function getSkillTypeLabel(type: string) {
 .rt-fallback { background: var(--mc-primary-bg); color: var(--mc-primary-hover); }
 .rt-error { background: var(--mc-danger-bg); color: var(--mc-danger); }
 .rt-blocked { background: var(--mc-danger-bg); color: var(--mc-danger); font-weight: 600; }
+.rt-synthesized { background: #f0f0ff; color: #6366f1; }
+:root.dark .rt-synthesized { background: rgba(99, 102, 241, 0.15); color: #818cf8; }
 .rt-sec-warning { background: var(--mc-primary-bg); color: var(--mc-primary-hover); }
 .rt-deps-missing { background: var(--mc-primary-bg); color: var(--mc-primary-hover); }
 .rt-disabled { background: var(--mc-bg-sunken); color: var(--mc-text-tertiary); }
@@ -581,7 +596,7 @@ function getSkillTypeLabel(type: string) {
 .skill-footer { display: flex; align-items: center; justify-content: space-between; border-top: 1px solid var(--mc-border-light); padding-top: 12px; }
 .skill-author { font-size: 12px; color: var(--mc-text-tertiary); }
 .skill-actions { display: flex; gap: 6px; }
-.skill-btn { display: flex; align-items: center; gap: 4px; padding: 5px 10px; border: 1px solid var(--mc-border); background: var(--mc-bg-elevated); border-radius: 6px; font-size: 12px; color: var(--mc-text-primary); cursor: pointer; transition: all 0.15s; }
+.skill-btn { display: flex; align-items: center; gap: 4px; padding: 7px 11px; border: 1px solid var(--mc-border); background: var(--mc-bg-muted); border-radius: 10px; font-size: 12px; color: var(--mc-text-primary); cursor: pointer; transition: all 0.15s; font-weight: 600; }
 .skill-btn:hover { background: var(--mc-bg-sunken); }
 .skill-btn.danger:hover { background: var(--mc-danger-bg); border-color: var(--mc-danger); color: var(--mc-danger); }
 
@@ -610,4 +625,10 @@ function getSkillTypeLabel(type: string) {
 .form-textarea { resize: vertical; font-family: inherit; }
 .form-textarea.code { font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace; font-size: 13px; background: var(--mc-bg-sunken); }
 .modal-footer { display: flex; justify-content: flex-end; gap: 10px; padding: 16px 24px; border-top: 1px solid var(--mc-border-light); }
+
+@media (max-width: 900px) {
+  .header-actions {
+    width: 100%;
+  }
+}
 </style>

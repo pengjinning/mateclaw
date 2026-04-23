@@ -1,0 +1,150 @@
+import { defineStore } from 'pinia'
+import { ref } from 'vue'
+import { wikiApi } from '@/api/index'
+
+export interface WikiKB {
+  id: number
+  name: string
+  description: string
+  agentId: number | null
+  configContent: string
+  sourceDirectory: string | null
+  status: string
+  pageCount: number
+  rawCount: number
+  createTime: string
+  updateTime: string
+}
+
+export interface WikiRawMaterial {
+  id: number
+  kbId: number
+  title: string
+  sourceType: string
+  fileSize: number
+  processingStatus: string
+  lastProcessedAt: string | null
+  errorMessage: string | null
+  createTime: string
+  // RFC-012 M2 v2 UI：两阶段消化进度字段（后端在 route 后写 total，每页完成后 +1 done）
+  progressPhase: string | null
+  progressTotal: number
+  progressDone: number
+}
+
+export interface WikiPage {
+  id: number
+  kbId: number
+  slug: string
+  title: string
+  content: string | null
+  summary: string
+  outgoingLinks: string
+  sourceRawIds: string
+  version: number
+  lastUpdatedBy: string
+  createTime: string
+  updateTime: string
+}
+
+export const useWikiStore = defineStore('wiki', () => {
+  const knowledgeBases = ref<WikiKB[]>([])
+  const currentKB = ref<WikiKB | null>(null)
+  const rawMaterials = ref<WikiRawMaterial[]>([])
+  const pages = ref<WikiPage[]>([])
+  const currentPage = ref<WikiPage | null>(null)
+  const loading = ref(false)
+
+  async function fetchKnowledgeBases() {
+    loading.value = true
+    try {
+      const res: any = await wikiApi.listKBs()
+      knowledgeBases.value = res.data || []
+    } catch (e) {
+      console.error('Failed to fetch knowledge bases', e)
+    } finally {
+      loading.value = false
+    }
+  }
+
+  async function selectKB(id: number) {
+    const res: any = await wikiApi.getKB(id)
+    currentKB.value = res.data || res
+    await Promise.all([fetchRawMaterials(id), fetchPages(id)])
+  }
+
+  async function createKB(data: { name: string; description?: string; agentId?: number }) {
+    const res: any = await wikiApi.createKB(data)
+    const kb = res.data || res
+    knowledgeBases.value.unshift(kb)
+    return kb
+  }
+
+  async function deleteKB(id: number) {
+    await wikiApi.deleteKB(id)
+    knowledgeBases.value = knowledgeBases.value.filter((kb) => kb.id !== id)
+    if (currentKB.value?.id === id) {
+      currentKB.value = null
+      rawMaterials.value = []
+      pages.value = []
+    }
+  }
+
+  async function fetchRawMaterials(kbId: number) {
+    const res: any = await wikiApi.listRaw(kbId)
+    rawMaterials.value = res.data || []
+  }
+
+  async function fetchPages(kbId: number) {
+    const res: any = await wikiApi.listPages(kbId)
+    pages.value = res.data || []
+  }
+
+  async function loadPage(kbId: number, slug: string) {
+    const res: any = await wikiApi.getPage(kbId, slug)
+    currentPage.value = res.data || res
+  }
+
+  async function addRawText(kbId: number, title: string, content: string) {
+    const res: any = await wikiApi.addRawText(kbId, { title, content })
+    const raw = res.data || res
+    rawMaterials.value.unshift(raw)
+    return raw
+  }
+
+  async function uploadRawFile(kbId: number, file: File) {
+    const formData = new FormData()
+    formData.append('file', file)
+    const res: any = await wikiApi.uploadRaw(kbId, formData)
+    const raw = res.data || res
+    rawMaterials.value.unshift(raw)
+    return raw
+  }
+
+  async function scanDirectory(kbId: number) {
+    const res: any = await wikiApi.scanDirectory(kbId)
+    const result = res.data || res
+    // 扫描后刷新材料列表
+    await fetchRawMaterials(kbId)
+    return result
+  }
+
+  return {
+    knowledgeBases,
+    currentKB,
+    rawMaterials,
+    pages,
+    currentPage,
+    loading,
+    fetchKnowledgeBases,
+    selectKB,
+    createKB,
+    deleteKB,
+    fetchRawMaterials,
+    fetchPages,
+    loadPage,
+    addRawText,
+    uploadRawFile,
+    scanDirectory,
+  }
+})

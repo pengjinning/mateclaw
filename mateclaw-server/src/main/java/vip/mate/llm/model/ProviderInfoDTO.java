@@ -26,4 +26,7 @@ public class ProviderInfoDTO {
     private String apiKey;
     private String baseUrl;
     private Map<String, Object> generateKwargs;
+    private String authType;
+    private Boolean oauthConnected;
+    private Long oauthExpiresAt;
 }

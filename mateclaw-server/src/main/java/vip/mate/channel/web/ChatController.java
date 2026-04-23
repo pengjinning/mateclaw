@@ -17,11 +17,13 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import org.springframework.context.ApplicationEventPublisher;
 import vip.mate.common.result.R;
 import vip.mate.agent.AgentService;
+import vip.mate.agent.model.AgentEntity;
 import vip.mate.approval.ApprovalService;
 import vip.mate.approval.PendingApproval;
 import vip.mate.memory.event.ConversationCompletedEvent;
 import vip.mate.workspace.conversation.ConversationService;
 import vip.mate.workspace.conversation.model.MessageContentPart;
+import vip.mate.workspace.conversation.model.MessageEntity;
 
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
@@ -73,6 +75,7 @@ public class ChatController {
     @PostMapping(value = "/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter chatStream(
             @RequestBody ChatStreamRequest request,
+            @RequestHeader(value = "X-Workspace-Id", required = false) Long workspaceId,
             Authentication auth) {
 
         String conversationId = request.getConversationId() != null ? request.getConversationId() : "default";
@@ -124,6 +127,26 @@ public class ChatController {
         }
         String username = auth.getName();
         log.info("SSE chat: agentId={}, conversationId={}, user={}", agentId, conversationId, username);
+
+        // ---- Workspace 边界校验：确保 agent 属于当前 workspace ----
+        if (agentId != null) {
+            AgentEntity agent = agentService.getAgent(agentId);
+            if (agent != null && agent.getWorkspaceId() != null) {
+                long wsId = workspaceId != null ? workspaceId : 1L;
+                if (!agent.getWorkspaceId().equals(wsId)) {
+                    log.warn("Chat workspace mismatch: agent {} belongs to workspace {}, request workspace {}",
+                            agentId, agent.getWorkspaceId(), wsId);
+                    try {
+                        sendEvent(emitter, "error", Map.of("message", "Agent 不属于当前工作区"));
+                        sendEvent(emitter, "done", Map.of("status", "completed"));
+                    } catch (IOException e) {
+                        log.warn("SSE workspace error send failed: {}", e.getMessage());
+                    }
+                    emitter.complete();
+                    return emitter;
+                }
+            }
+        }
 
         // ---- 审批命令拦截：/approve、/deny 走 SSE 流式 replay ----
         String normalizedMsg = message.trim().toLowerCase();
@@ -189,11 +212,13 @@ public class ChatController {
 
                     if ("denied".equals(decision)) {
                         String denyMsg = "用户拒绝执行工具 " + pending.getToolName();
-                        conversationService.saveMessage(conversationId, "assistant", denyMsg);
+                        MessageEntity savedAssistant = conversationService.saveMessage(conversationId, "assistant", denyMsg);
                         broadcastEvent(conversationId, "message_start", Map.of("role", "assistant"));
                         broadcastEvent(conversationId, "content_delta", Map.of("delta", denyMsg));
                         broadcastEvent(conversationId, "message_complete", Map.of("status", "completed"));
-                        broadcastEvent(conversationId, "done", Map.of("status", "completed"));
+                        broadcastEvent(conversationId, "done", buildDonePayload(
+                                conversationId, "completed", savedAssistant, 0, 0, true,
+                                conversationService.getMessageCount(conversationId)));
                         // deny 是正常 turn 终结，用户可能在 awaiting_approval 阶段排了消息
                         ChatStreamTracker.CompletionResult denyCr = streamTracker.completeAndConsumeIfLast(conversationId);
                         if (denyCr.allDone() && denyCr.queuedInput() != null) {
@@ -240,10 +265,11 @@ public class ChatController {
                             .doOnComplete(() -> {
                                 if (!finalized.compareAndSet(false, true)) return;
                                 try {
+                                    MessageEntity savedAssistant = null;
                                     List<MessageContentPart> parts = accumulator.toAssistantParts();
                                     String text = accumulator.getContent();
                                     if (!text.isBlank() || !parts.isEmpty()) {
-                                        conversationService.saveMessage(conversationId, "assistant", text, parts,
+                                        savedAssistant = conversationService.saveMessage(conversationId, "assistant", text, parts,
                                                 "completed",
                                                 accumulator.getPromptTokens(),
                                                 accumulator.getCompletionTokens(),
@@ -257,12 +283,8 @@ public class ChatController {
                                             "hasContent", !text.isBlank()
                                     ));
                                     int msgCount = conversationService.getMessageCount(conversationId);
-                                    broadcastEvent(conversationId, "done", Map.of(
-                                            "conversationId", conversationId,
-                                            "status", "completed",
-                                            "persisted", true,
-                                            "messageCount", msgCount
-                                    ));
+                                    broadcastEvent(conversationId, "done", buildDonePayload(
+                                            conversationId, "completed", savedAssistant, 0, 0, true, msgCount));
                                 } catch (Exception e) {
                                     log.warn("SSE replay complete error: {}", e.getMessage());
                                 } finally {
@@ -296,12 +318,13 @@ public class ChatController {
                                 }
 
                                 try {
+                                    MessageEntity savedAssistant = null;
                                     List<MessageContentPart> replayParts = accumulator.toAssistantParts();
                                     String replayText = accumulator.getContent();
                                     if (!replayText.isBlank() || !replayParts.isEmpty()) {
                                         String savedText = replayText.isBlank() && isUserStop
                                                 ? (replayIsFollowup ? "[已中断]" : "[已停止生成]") : replayText;
-                                        conversationService.saveMessage(conversationId, "assistant", savedText, replayParts,
+                                        savedAssistant = conversationService.saveMessage(conversationId, "assistant", savedText, replayParts,
                                                 errStatus,
                                                 accumulator.getPromptTokens(),
                                                 accumulator.getCompletionTokens(),
@@ -309,7 +332,7 @@ public class ChatController {
                                                 accumulator.getRuntimeProviderId(),
                                                 accumulator.toMetadataJson());
                                     } else if (isUserStop) {
-                                        conversationService.saveMessage(conversationId, "assistant",
+                                        savedAssistant = conversationService.saveMessage(conversationId, "assistant",
                                                 replayIsFollowup ? "[已中断]" : "[已停止生成]", null, errStatus);
                                     }
 
@@ -330,15 +353,13 @@ public class ChatController {
                                                 "hasContent", !replayText.isBlank()
                                         ));
                                         int stoppedMsgCount = conversationService.getMessageCount(conversationId);
-                                        broadcastEvent(conversationId, "done", Map.of(
-                                                "conversationId", conversationId,
-                                                "status", "stopped",
-                                                "persisted", true,
-                                                "messageCount", stoppedMsgCount
-                                        ));
+                                        broadcastEvent(conversationId, "done", buildDonePayload(
+                                                conversationId, "stopped", savedAssistant, 0, 0, true, stoppedMsgCount));
                                     } else {
-                                        broadcastEvent(conversationId, "error", Map.of("message",
-                                                e.getMessage() != null ? e.getMessage() : "replay error"));
+                                        broadcastEvent(conversationId, "error", buildErrorPayload(
+                                                conversationId,
+                                                e.getMessage() != null ? e.getMessage() : "replay error",
+                                                savedAssistant));
                                     }
                                 } catch (Exception ex) {
                                     log.warn("SSE replay error finalize failed: {}", ex.getMessage());
@@ -382,7 +403,7 @@ public class ChatController {
             StreamAccumulator accumulator = new StreamAccumulator();
             AtomicBoolean finalized = new AtomicBoolean(false);
             try {
-                conversationService.getOrCreateConversation(conversationId, agentId, username);
+                conversationService.getOrCreateConversation(conversationId, agentId, username, workspaceId);
                 List<MessageContentPart> requestParts = normalizeRequestParts(request);
                 String promptText = buildPromptText(message, requestParts);
                 conversationService.saveMessage(conversationId, "user", message, requestParts);
@@ -397,7 +418,7 @@ public class ChatController {
                 ));
 
                 streamTracker.incrementFlux(conversationId);
-                Disposable disposable = agentService.chatStructuredStream(agentId, promptText, conversationId, username)
+                Disposable disposable = agentService.chatStructuredStream(agentId, promptText, conversationId, username, request.getThinkingLevel())
                         .doOnNext(delta -> {
                             if (emitterDone.get()) return;
                             try {
@@ -424,12 +445,13 @@ public class ChatController {
                                 persistStatus = isInterruptFollowup ? "interrupted" : "stopped";
                             }
                             try {
+                                MessageEntity savedAssistant = null;
                                 List<MessageContentPart> assistantParts = accumulator.toAssistantParts();
                                 String assistantText = accumulator.getContent();
                                 if (!assistantText.isBlank() || !assistantParts.isEmpty()) {
                                     String savedText = assistantText.isBlank() && wasStopped
                                             ? (isInterruptFollowup ? "[已中断]" : "[已停止生成]") : assistantText;
-                                    conversationService.saveMessage(conversationId, "assistant", savedText, assistantParts,
+                                    savedAssistant = conversationService.saveMessage(conversationId, "assistant", savedText, assistantParts,
                                             persistStatus,
                                             accumulator.getPromptTokens(),
                                             accumulator.getCompletionTokens(),
@@ -437,7 +459,7 @@ public class ChatController {
                                             accumulator.getRuntimeProviderId(),
                                             accumulator.toMetadataJson());
                                 } else if (wasStopped) {
-                                    conversationService.saveMessage(conversationId, "assistant",
+                                    savedAssistant = conversationService.saveMessage(conversationId, "assistant",
                                             isInterruptFollowup ? "[已中断]" : "[已停止生成]", null, persistStatus);
                                 }
                                 // 发布对话完成事件（仅正常完成时，停止/中断不触发记忆提取）
@@ -468,14 +490,9 @@ public class ChatController {
                                             "hasContent", !assistantText.isBlank()
                                     ));
                                     int msgCount = conversationService.getMessageCount(conversationId);
-                                    broadcastEvent(conversationId, "done", Map.of(
-                                            "conversationId", conversationId,
-                                            "status", persistStatus,
-                                            "promptTokens", accumulator.getPromptTokens(),
-                                            "completionTokens", accumulator.getCompletionTokens(),
-                                            "persisted", true,
-                                            "messageCount", msgCount
-                                    ));
+                                    broadcastEvent(conversationId, "done", buildDonePayload(
+                                            conversationId, persistStatus, savedAssistant,
+                                            accumulator.getPromptTokens(), accumulator.getCompletionTokens(), true, msgCount));
                                 }
                             } catch (Exception e) {
                                 log.warn("SSE complete error: {}", e.getMessage());
@@ -512,12 +529,13 @@ public class ChatController {
 
                             log.info("SSE stream cancelled ({}): conversationId={}", status, conversationId);
                             try {
+                                MessageEntity savedAssistant = null;
                                 List<MessageContentPart> assistantParts = accumulator.toAssistantParts();
                                 String assistantText = accumulator.getContent();
                                 if (!assistantText.isBlank() || !assistantParts.isEmpty()) {
                                     String savedText = assistantText.isBlank()
                                             ? (isInterruptFollowup ? "[已中断]" : "[已停止生成]") : assistantText;
-                                    conversationService.saveMessage(conversationId, "assistant", savedText, assistantParts,
+                                    savedAssistant = conversationService.saveMessage(conversationId, "assistant", savedText, assistantParts,
                                             status,
                                             accumulator.getPromptTokens(),
                                             accumulator.getCompletionTokens(),
@@ -525,7 +543,7 @@ public class ChatController {
                                             accumulator.getRuntimeProviderId(),
                                             accumulator.toMetadataJson());
                                 } else {
-                                    conversationService.saveMessage(conversationId, "assistant",
+                                    savedAssistant = conversationService.saveMessage(conversationId, "assistant",
                                             isInterruptFollowup ? "[已中断]" : "[已停止生成]", null, status);
                                 }
 
@@ -546,12 +564,8 @@ public class ChatController {
                                             "hasContent", !assistantText.isBlank()
                                     ));
                                     int stoppedMsgCount = conversationService.getMessageCount(conversationId);
-                                    broadcastEvent(conversationId, "done", Map.of(
-                                            "conversationId", conversationId,
-                                            "status", "stopped",
-                                            "persisted", true,
-                                            "messageCount", stoppedMsgCount
-                                    ));
+                                    broadcastEvent(conversationId, "done", buildDonePayload(
+                                            conversationId, "stopped", savedAssistant, 0, 0, true, stoppedMsgCount));
                                 }
                             } catch (Exception e) {
                                 log.warn("SSE stop finalize error: {}", e.getMessage());
@@ -601,10 +615,11 @@ public class ChatController {
                                 log.info("SSE doOnError saving: conversationId={}, status={}, textLen={}, partsCount={}",
                                         conversationId, status, assistantText.length(), assistantParts.size());
                                 String errorMsg = e.getMessage() != null ? e.getMessage() : "unknown error";
+                                MessageEntity savedAssistant = null;
                                 if (!assistantText.isBlank() || !assistantParts.isEmpty()) {
                                     String savedText = assistantText.isBlank() && isUserStop
                                             ? (isInterruptFollowup ? "[已中断]" : "[已停止生成]") : assistantText;
-                                    conversationService.saveMessage(conversationId, "assistant", savedText, assistantParts,
+                                    savedAssistant = conversationService.saveMessage(conversationId, "assistant", savedText, assistantParts,
                                             status,
                                             accumulator.getPromptTokens(),
                                             accumulator.getCompletionTokens(),
@@ -612,10 +627,10 @@ public class ChatController {
                                             accumulator.getRuntimeProviderId(),
                                             accumulator.toMetadataJson());
                                 } else if (isUserStop) {
-                                    conversationService.saveMessage(conversationId, "assistant",
+                                    savedAssistant = conversationService.saveMessage(conversationId, "assistant",
                                             isInterruptFollowup ? "[已中断]" : "[已停止生成]", null, status);
                                 } else {
-                                    conversationService.saveMessage(conversationId, "assistant", "[错误] " + errorMsg, null, "failed");
+                                    savedAssistant = conversationService.saveMessage(conversationId, "assistant", "[错误] " + errorMsg, null, "failed");
                                 }
 
                                 if (isInterruptFollowup) {
@@ -635,17 +650,10 @@ public class ChatController {
                                             "hasContent", !assistantText.isBlank()
                                     ));
                                     int stoppedMsgCount = conversationService.getMessageCount(conversationId);
-                                    broadcastEvent(conversationId, "done", Map.of(
-                                            "conversationId", conversationId,
-                                            "status", "stopped",
-                                            "persisted", true,
-                                            "messageCount", stoppedMsgCount
-                                    ));
+                                    broadcastEvent(conversationId, "done", buildDonePayload(
+                                            conversationId, "stopped", savedAssistant, 0, 0, true, stoppedMsgCount));
                                 } else {
-                                    broadcastEvent(conversationId, "error", Map.of(
-                                            "message", errorMsg,
-                                            "conversationId", conversationId
-                                    ));
+                                    broadcastEvent(conversationId, "error", buildErrorPayload(conversationId, errorMsg, savedAssistant));
                                 }
                             } catch (Exception ioException) {
                                 log.error("SSE doOnError save/broadcast failed: conversationId={}, error={}",
@@ -785,13 +793,14 @@ public class ChatController {
     public R<String> chat(
             @RequestParam Long agentId,
             @RequestBody ChatRequest request,
+            @RequestHeader(value = "X-Workspace-Id", required = false) Long workspaceId,
             Authentication auth) {
 
         String username = auth != null ? auth.getName() : null;
         if (username == null) {
             return R.fail("未登录，请先登录");
         }
-        conversationService.getOrCreateConversation(request.getConversationId(), agentId, username);
+        conversationService.getOrCreateConversation(request.getConversationId(), agentId, username, workspaceId);
         conversationService.saveMessage(request.getConversationId(), "user", request.getMessage(), request.getContentParts());
 
         String promptText = buildPromptText(request.getMessage(), request.getContentParts());
@@ -913,6 +922,8 @@ public class ChatController {
         private List<MessageContentPart> contentParts;
         /** true 表示断线重连，不发送新消息，只附着到已有的流 */
         private Boolean reconnect;
+        /** 思考深度：off / low / medium / high / max，null 表示跟随 Agent 默认 */
+        private String thinkingLevel;
     }
 
     /**
@@ -988,10 +999,11 @@ public class ChatController {
                 .doOnComplete(() -> {
                     if (!finalized.compareAndSet(false, true)) return;
                     try {
+                        MessageEntity savedAssistant = null;
                         List<MessageContentPart> parts = accumulator.toAssistantParts();
                         String text = accumulator.getContent();
                         if (!text.isBlank() || !parts.isEmpty()) {
-                            conversationService.saveMessage(conversationId, "assistant", text, parts,
+                            savedAssistant = conversationService.saveMessage(conversationId, "assistant", text, parts,
                                     "completed",
                                     accumulator.getPromptTokens(),
                                     accumulator.getCompletionTokens(),
@@ -1004,11 +1016,10 @@ public class ChatController {
                                 "hasThinking", !accumulator.getThinking().isBlank(),
                                 "hasContent", !text.isBlank()
                         ));
-                        broadcastEvent(conversationId, "done", Map.of(
-                                "status", "completed",
-                                "promptTokens", accumulator.getPromptTokens(),
-                                "completionTokens", accumulator.getCompletionTokens()
-                        ));
+                        broadcastEvent(conversationId, "done", buildDonePayload(
+                                conversationId, "completed", savedAssistant,
+                                accumulator.getPromptTokens(), accumulator.getCompletionTokens(), true,
+                                conversationService.getMessageCount(conversationId)));
                     } catch (Exception e) {
                         log.warn("SSE queued complete error: {}", e.getMessage());
                     } finally {
@@ -1032,10 +1043,11 @@ public class ChatController {
                     log.error("SSE queued stream error: conversationId={}, cause={}", conversationId, e.getMessage());
                     // 持久化已累积的 assistant 消息（修复：原逻辑未保存导致回答丢失）
                     try {
+                        MessageEntity savedAssistant = null;
                         List<MessageContentPart> parts = accumulator.toAssistantParts();
                         String text = accumulator.getContent();
                         if (!text.isBlank() || !parts.isEmpty()) {
-                            conversationService.saveMessage(conversationId, "assistant", text, parts,
+                            savedAssistant = conversationService.saveMessage(conversationId, "assistant", text, parts,
                                     "failed",
                                     accumulator.getPromptTokens(),
                                     accumulator.getCompletionTokens(),
@@ -1044,14 +1056,16 @@ public class ChatController {
                                     accumulator.toMetadataJson());
                         } else {
                             String errorMsg = e.getMessage() != null ? e.getMessage() : "queued stream error";
-                            conversationService.saveMessage(conversationId, "assistant",
+                            savedAssistant = conversationService.saveMessage(conversationId, "assistant",
                                     "[错误] " + errorMsg, null, "failed");
                         }
+                        broadcastEvent(conversationId, "error", buildErrorPayload(
+                                conversationId,
+                                e.getMessage() != null ? e.getMessage() : "queued stream error",
+                                savedAssistant));
                     } catch (Exception saveEx) {
                         log.error("SSE queued doOnError save failed: {}", saveEx.getMessage());
                     }
-                    broadcastEvent(conversationId, "error", Map.of(
-                            "message", e.getMessage() != null ? e.getMessage() : "queued stream error"));
                     ChatStreamTracker.CompletionResult cr = streamTracker.completeAndConsumeIfLast(conversationId);
                     if (cr.allDone()) {
                         if (cr.queuedInput() != null) {
@@ -1084,6 +1098,32 @@ public class ChatController {
             payload = "{\"message\":\"serialization_error\"}";
         }
         streamTracker.broadcast(conversationId, name, payload);
+    }
+
+    private Map<String, Object> buildDonePayload(String conversationId, String status, MessageEntity savedAssistant,
+                                                 int promptTokens, int completionTokens,
+                                                 boolean persisted, Integer messageCount) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        if (conversationId != null && !conversationId.isBlank()) payload.put("conversationId", conversationId);
+        payload.put("status", status);
+        if (savedAssistant != null && savedAssistant.getId() != null) {
+            payload.put("assistantMessageId", savedAssistant.getId());
+        }
+        if (promptTokens > 0) payload.put("promptTokens", promptTokens);
+        if (completionTokens > 0) payload.put("completionTokens", completionTokens);
+        payload.put("persisted", persisted);
+        if (messageCount != null) payload.put("messageCount", messageCount);
+        return payload;
+    }
+
+    private Map<String, Object> buildErrorPayload(String conversationId, String message, MessageEntity savedAssistant) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("message", message);
+        if (conversationId != null && !conversationId.isBlank()) payload.put("conversationId", conversationId);
+        if (savedAssistant != null && savedAssistant.getId() != null) {
+            payload.put("assistantMessageId", savedAssistant.getId());
+        }
+        return payload;
     }
 
     private List<MessageContentPart> normalizeRequestParts(ChatStreamRequest request) {
@@ -1192,24 +1232,42 @@ public class ChatController {
                 || lower.contains("client abort") || lower.contains("closed");
     }
 
+    /**
+     * 流式累积器 — 收集 StreamDelta 事件，持久化到 DB。
+     * <p>
+     * 维护两份数据：
+     * <ul>
+     *   <li>{@code toolCalls} — 兼容旧逻辑（执行面板等 UI 使用）</li>
+     *   <li>{@code segments} — 按事件到达顺序记录的有序时间线（前端分段渲染用）</li>
+     * </ul>
+     * 两份数据从同一事件流构建，保证一致。segments 保留了 thinking → tools → content
+     * 的真实交错顺序，toolCalls 是 segments 中 tool_call 类型的平铺视图。
+     */
     private final class StreamAccumulator {
         private final StringBuilder content = new StringBuilder();
         private final StringBuilder thinking = new StringBuilder();
         private final List<Map<String, Object>> toolCalls = new ArrayList<>();
+        /** 有序事件时间线 — 前端分段渲染的权威数据源 */
+        private final List<Map<String, Object>> segments = new ArrayList<>();
+        private final List<Map<String, Object>> browserActions = new ArrayList<>();
+        private final List<String> warnings = new ArrayList<>();
+        private final List<Map<String, Object>> planStepResults = new ArrayList<>();
+        private int segCounter = 0;
         private int promptTokens = 0;
         private int completionTokens = 0;
         private String runtimeModelName = "";
         private String runtimeProviderId = "";
-        /** 标记本次流是否因工具审批挂起而终止 */
         private boolean awaitingApproval = false;
+        private String currentPhase = "";
+        private Long planId = null;
+        private List<String> planSteps = List.of();
+        private Integer currentPlanStep = null;
+        private Map<String, Object> pendingApproval = null;
 
         synchronized void accept(AgentService.StreamDelta delta, String conversationId) {
-            if (delta == null) {
-                return;
-            }
-            // 事件类型：直接广播为独立 SSE 事件名，不进入内容累积
+            if (delta == null) return;
+
             if (delta.isEvent()) {
-                // 拦截内部 usage 事件，不广播给前端
                 if ("_usage_final".equals(delta.eventType())) {
                     Map<String, Object> data = delta.eventData();
                     promptTokens = ((Number) data.getOrDefault("promptTokens", 0)).intValue();
@@ -1221,10 +1279,12 @@ public class ChatController {
                 if ("phase".equals(delta.eventType())) {
                     String phase = String.valueOf(delta.eventData().getOrDefault("phase", ""));
                     if (!phase.isBlank()) {
+                        currentPhase = phase;
                         streamTracker.updatePhase(conversationId, phase);
+                        // phase 切换时关闭 running 的 content/thinking segment，保留边界
+                        finalizeRunningSegments("content", "thinking");
                     }
                 }
-                // 累积工具调用事件，用于持久化到消息历史
                 accumulateToolEvent(delta.eventType(), delta.eventData(), conversationId);
                 try {
                     broadcastEvent(conversationId, delta.eventType(), delta.eventData());
@@ -1233,17 +1293,39 @@ public class ChatController {
                 }
                 return;
             }
+
+            // content_delta
             if (delta.content() != null && !delta.content().isBlank()) {
                 content.append(delta.content());
                 streamTracker.updatePhase(conversationId, "drafting_answer");
                 if (!delta.persistenceOnly()) {
                     broadcastEvent(conversationId, "content_delta", Map.of("delta", delta.content()));
                 }
+                // segments: 追加到当前 running content segment，或创建新的
+                var seg = findLastRunning("content");
+                if (seg != null) {
+                    seg.put("text", seg.getOrDefault("text", "") + delta.content());
+                } else {
+                    finalizeRunningSegments("thinking");
+                    var s = newSegment("content");
+                    s.put("text", delta.content());
+                    segments.add(s);
+                }
             }
+
+            // thinking_delta
             if (delta.thinking() != null && !delta.thinking().isBlank()) {
                 thinking.append(delta.thinking());
                 if (!delta.persistenceOnly()) {
                     broadcastEvent(conversationId, "thinking_delta", Map.of("delta", delta.thinking()));
+                }
+                var seg = findLastRunning("thinking");
+                if (seg != null) {
+                    seg.put("thinkingText", seg.getOrDefault("thinkingText", "") + delta.thinking());
+                } else {
+                    var s = newSegment("thinking");
+                    s.put("thinkingText", delta.thinking());
+                    segments.add(s);
                 }
             }
         }
@@ -1253,15 +1335,78 @@ public class ChatController {
         private void accumulateToolEvent(String eventType, Map<String, Object> data, String conversationId) {
             if ("tool_approval_requested".equals(eventType)) {
                 awaitingApproval = true;
+                currentPhase = "awaiting_approval";
+                pendingApproval = new LinkedHashMap<>();
+                pendingApproval.put("pendingId", data.getOrDefault("pendingId", ""));
+                pendingApproval.put("toolName", data.getOrDefault("toolName", ""));
+                pendingApproval.put("arguments", data.getOrDefault("arguments", ""));
+                pendingApproval.put("reason", data.getOrDefault("reason", ""));
+                pendingApproval.put("status", "pending_approval");
+                if (data.containsKey("findings")) pendingApproval.put("findings", data.get("findings"));
+                if (data.containsKey("maxSeverity")) pendingApproval.put("maxSeverity", data.get("maxSeverity"));
+                if (data.containsKey("summary")) pendingApproval.put("summary", data.get("summary"));
                 streamTracker.updatePhase(conversationId, "awaiting_approval");
+            } else if ("tool_approval_resolved".equals(eventType)) {
+                if (pendingApproval != null) {
+                    pendingApproval.put("status",
+                            "approved".equals(String.valueOf(data.getOrDefault("decision", ""))) ? "approved" : "denied");
+                }
+            } else if ("plan_created".equals(eventType)) {
+                Object rawPlanId = data.get("planId");
+                if (rawPlanId instanceof Number n) {
+                    planId = n.longValue();
+                } else if (rawPlanId != null) {
+                    try { planId = Long.valueOf(String.valueOf(rawPlanId)); } catch (Exception ignored) {}
+                }
+                Object steps = data.get("steps");
+                if (steps instanceof List<?> list) {
+                    planSteps = list.stream().map(String::valueOf).toList();
+                    planStepResults.clear();
+                    for (int i = 0; i < planSteps.size(); i++) {
+                        planStepResults.add(null);
+                    }
+                }
+                currentPlanStep = 0;
+            } else if ("plan_step_started".equals(eventType)) {
+                Object idx = data.get("index");
+                if (idx instanceof Number n) {
+                    currentPlanStep = n.intValue();
+                }
+            } else if ("plan_step_completed".equals(eventType)) {
+                Object idx = data.get("index");
+                if (idx instanceof Number n) {
+                    int index = n.intValue();
+                    currentPlanStep = index;
+                    ensurePlanStepCapacity(index + 1);
+                    Map<String, Object> stepResult = new LinkedHashMap<>();
+                    stepResult.put("result", data.getOrDefault("result", ""));
+                    stepResult.put("status", "completed");
+                    planStepResults.set(index, stepResult);
+                }
+            } else if ("browser_action".equals(eventType)) {
+                browserActions.add(new LinkedHashMap<>(data));
+            } else if ("warning".equals(eventType)) {
+                String warning = String.valueOf(data.getOrDefault("message",
+                        data.getOrDefault("delta", "")));
+                if (!warning.isBlank()) {
+                    warnings.add(warning);
+                }
             } else if ("tool_call_started".equals(eventType)) {
+                // toolCalls（兼容）
                 Map<String, Object> tc = new LinkedHashMap<>();
                 tc.put("name", data.getOrDefault("toolName", ""));
                 tc.put("arguments", data.getOrDefault("arguments", ""));
                 tc.put("status", "running");
                 toolCalls.add(tc);
+                // segments: 关闭 running thinking/content，插入 tool_call
+                finalizeRunningSegments("thinking", "content");
+                var seg = newSegment("tool_call");
+                seg.put("toolName", data.getOrDefault("toolName", ""));
+                seg.put("toolArgs", data.getOrDefault("arguments", ""));
+                segments.add(seg);
             } else if ("tool_call_completed".equals(eventType)) {
                 String toolName = String.valueOf(data.getOrDefault("toolName", ""));
+                // toolCalls（兼容）
                 for (int i = toolCalls.size() - 1; i >= 0; i--) {
                     Map<String, Object> tc = toolCalls.get(i);
                     if ("running".equals(tc.get("status")) && toolName.equals(tc.get("name"))) {
@@ -1271,17 +1416,57 @@ public class ChatController {
                         break;
                     }
                 }
+                // segments: 标记对应 tool_call 完成
+                for (int i = segments.size() - 1; i >= 0; i--) {
+                    var seg = segments.get(i);
+                    if ("tool_call".equals(seg.get("type")) && "running".equals(seg.get("status"))
+                            && toolName.equals(seg.get("toolName"))) {
+                        seg.put("status", "completed");
+                        seg.put("toolResult", data.getOrDefault("result", ""));
+                        seg.put("toolSuccess", data.getOrDefault("success", true));
+                        break;
+                    }
+                }
             }
         }
 
-        String getContent() {
-            return content.toString().trim();
+        private void ensurePlanStepCapacity(int size) {
+            while (planStepResults.size() < size) {
+                planStepResults.add(null);
+            }
         }
 
-        String getThinking() {
-            return thinking.toString().trim();
+        // ==================== Segment helpers ====================
+
+        private Map<String, Object> newSegment(String type) {
+            Map<String, Object> seg = new LinkedHashMap<>();
+            seg.put("id", type.substring(0, 2) + "-" + segCounter++);
+            seg.put("type", type);
+            seg.put("status", "running");
+            return seg;
         }
 
+        private Map<String, Object> findLastRunning(String type) {
+            for (int i = segments.size() - 1; i >= 0; i--) {
+                var seg = segments.get(i);
+                if (type.equals(seg.get("type")) && "running".equals(seg.get("status"))) return seg;
+            }
+            return null;
+        }
+
+        private void finalizeRunningSegments(String... types) {
+            var typeSet = java.util.Set.of(types);
+            for (var seg : segments) {
+                if ("running".equals(seg.get("status")) && typeSet.contains(seg.get("type"))) {
+                    seg.put("status", "completed");
+                }
+            }
+        }
+
+        // ==================== 原有访问器 ====================
+
+        String getContent() { return content.toString().trim(); }
+        String getThinking() { return thinking.toString().trim(); }
         int getPromptTokens() { return promptTokens; }
         int getCompletionTokens() { return completionTokens; }
         String getRuntimeModelName() { return runtimeModelName; }
@@ -1311,28 +1496,48 @@ public class ChatController {
             return parts;
         }
 
-        /**
-         * 将所有仍为 running 的 tool calls 标记为 completed（流结束时调用）。
-         * 防止历史消息中出现永远转圈的工具调用。
-         */
         void finalizeToolCalls() {
             for (Map<String, Object> tc : toolCalls) {
-                if ("running".equals(tc.get("status"))) {
-                    tc.put("status", "completed");
-                }
+                if ("running".equals(tc.get("status"))) tc.put("status", "completed");
             }
         }
 
         /**
-         * 生成 metadata JSON：包含 toolCalls 及其他元数据
+         * 生成 metadata JSON：包含 toolCalls + segments。
+         * toolCalls 保留兼容旧 UI，segments 是按事件顺序的完整时间线。
          */
         synchronized String toMetadataJson() {
-            // 确保所有 tool calls 都不是 running 状态
             finalizeToolCalls();
+            finalizeRunningSegments("thinking", "content", "tool_call");
             try {
                 Map<String, Object> metadata = new LinkedHashMap<>();
                 if (!toolCalls.isEmpty()) {
                     metadata.put("toolCalls", toolCalls);
+                }
+                if (!segments.isEmpty()) {
+                    metadata.put("segments", segments);
+                }
+                if (!currentPhase.isBlank()) {
+                    metadata.put("currentPhase", currentPhase);
+                }
+                if (planId != null || !planSteps.isEmpty() || currentPlanStep != null) {
+                    Map<String, Object> plan = new LinkedHashMap<>();
+                    if (planId != null) plan.put("planId", planId);
+                    if (!planSteps.isEmpty()) plan.put("steps", planSteps);
+                    if (currentPlanStep != null) plan.put("currentStep", currentPlanStep);
+                    if (planStepResults.stream().anyMatch(java.util.Objects::nonNull)) {
+                        plan.put("stepResults", planStepResults);
+                    }
+                    metadata.put("plan", plan);
+                }
+                if (pendingApproval != null && !pendingApproval.isEmpty()) {
+                    metadata.put("pendingApproval", pendingApproval);
+                }
+                if (!browserActions.isEmpty()) {
+                    metadata.put("browserActions", browserActions);
+                }
+                if (!warnings.isEmpty()) {
+                    metadata.put("warnings", warnings);
                 }
                 return objectMapper.writeValueAsString(metadata);
             } catch (Exception e) {

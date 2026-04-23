@@ -131,6 +131,30 @@ export interface PendingApprovalMeta {
   summary?: string
 }
 
+/** 单个展示分段（Claude Code 风格分段式渲染） */
+export interface MessageSegment {
+  id: string
+  type: 'thinking' | 'tool_call' | 'content' | 'phase' | 'approval' | 'plan'
+  status: 'running' | 'completed' | 'error'
+  /** type=thinking */
+  thinkingText?: string
+  /** type=tool_call */
+  toolName?: string
+  toolArgs?: string
+  toolResult?: string
+  toolSuccess?: boolean
+  /** type=content */
+  text?: string
+  /** type=phase */
+  phaseName?: string
+  /** type=approval */
+  approval?: PendingApprovalMeta
+  /** type=plan */
+  plan?: PlanMeta
+  /** 时间戳 */
+  timestamp?: number
+}
+
 export interface MessageMetadata {
   currentPhase?: string
   toolCalls?: ToolCallMeta[]
@@ -140,6 +164,18 @@ export interface MessageMetadata {
   runningToolName?: string
   /** 服务端警告列表 */
   warnings?: string[]
+  /** 分段式展示数据（新版渲染用） */
+  segments?: MessageSegment[]
+  /** 浏览器执行操作记录 */
+  browserActions?: Array<{
+    action: string
+    success: boolean
+    url?: string
+    title?: string
+    screenshot?: string
+    durationMs: number
+    timestamp: number
+  }>
 }
 
 export interface MessageContentPart {
@@ -172,6 +208,10 @@ export interface Skill {
   builtin?: boolean
   tags?: string
   createTime: string
+  /** RFC-023: 来源对话 ID（AI 合成时记录） */
+  sourceConversationId?: string
+  /** RFC-023: 安全扫描状态 (PASSED / FAILED / null) */
+  securityScanStatus?: string
 }
 
 /** 运行时解析状态（来自 /runtime/status） */
@@ -294,6 +334,7 @@ export interface ChannelFieldDef {
   placeholder: string
   required?: boolean
   sensitive?: boolean
+  readOnly?: boolean
   tooltip?: string
   type: 'text' | 'password' | 'select' | 'switch' | 'number'
   options?: { label: string; value: string }[]
@@ -355,6 +396,19 @@ export const CHANNEL_FIELD_DEFS: Record<string, ChannelFieldDef[]> = {
     { key: 'client_secret', label: 'AppSecret', placeholder: 'xxxxxxxxxxxxxxxx', required: true, sensitive: true, type: 'password', tooltip: 'QQ 开放平台机器人的 AppSecret' },
     { key: 'markdown_enabled', label: 'Markdown 消息', placeholder: '', type: 'switch', defaultValue: true, tooltip: '发送消息时使用 Markdown 格式（部分场景下 QQ 可能不支持，可关闭回退到纯文本）' },
     { key: 'max_reconnect_attempts', label: '最大重连次数', placeholder: '100', type: 'number', defaultValue: 100, tooltip: 'WebSocket 断线后最大重连次数' },
+  ],
+  slack: [
+    { key: 'bot_token', label: 'Bot Token', placeholder: 'xoxb-xxxxxxxxxxxx-xxxxxxxxxxxx', required: true, sensitive: true, type: 'password', tooltip: 'Slack Bot User OAuth Token（在 Slack App → OAuth & Permissions 获取）' },
+    { key: 'app_token', label: 'App Token', placeholder: 'xapp-xxxxxxxxxxxx', required: true, sensitive: true, type: 'password', tooltip: 'Slack App-Level Token（需要 connections:write scope，在 Slack App → Basic Information → App-Level Tokens 生成）' },
+    { key: 'signing_secret', label: 'Signing Secret', placeholder: 'xxxxxxxxxxxxxxxx', sensitive: true, type: 'password', tooltip: 'Slack App Signing Secret（用于 Webhook 模式验证请求签名，Socket Mode 可选）' },
+  ],
+  webchat: [
+    { key: 'api_key', label: 'API Key', placeholder: '保存后由平台自动生成', required: true, sensitive: true, readOnly: true, type: 'password', tooltip: '由平台自动生成的嵌入式 WebChat 渠道密钥，创建后可复制使用' },
+    { key: 'title', label: '标题', placeholder: 'MateClaw', type: 'text', defaultValue: 'MateClaw', tooltip: '聊天面板顶部显示的标题' },
+    { key: 'placeholder', label: '输入框占位文案', placeholder: 'Type a message...', type: 'text', defaultValue: 'Type a message...', tooltip: '输入框默认提示文案' },
+    { key: 'primary_color', label: '主题色', placeholder: '#409eff', type: 'text', defaultValue: '#409eff', tooltip: '聊天气泡与头部使用的主色，建议使用十六进制颜色值' },
+    { key: 'welcome_message', label: '欢迎语', placeholder: '你好，我可以帮你处理什么？', type: 'text', tooltip: '前端 SDK 初始化后可读取并展示的欢迎语（当前主要供配置接口返回）' },
+    { key: 'allowed_origins', label: '允许嵌入域名', placeholder: 'https://example.com, https://app.example.com', type: 'text', tooltip: '预留给嵌入来源白名单校验的域名列表，多个域名用逗号分隔' },
   ],
 }
 
@@ -499,11 +553,31 @@ export interface SystemSettings {
   tavilyBaseUrl: string
   serperApiKeyMasked?: string
   tavilyApiKeyMasked?: string
+  // Keyless 搜索 provider
+  duckduckgoEnabled: boolean
+  searxngBaseUrl: string
+  // 视频生成配置
+  videoEnabled?: boolean
+  videoProvider?: string
+  videoFallbackEnabled?: boolean
+  zhipuApiKey?: string
+  zhipuBaseUrl?: string
+  zhipuApiKeyMasked?: string
+  falApiKey?: string
+  falApiKeyMasked?: string
+  klingAccessKey?: string
+  klingSecretKey?: string
+  klingAccessKeyMasked?: string
+  klingSecretKeyMasked?: string
 }
 
 export interface ProviderModelInfo {
   id: string
   name: string
+  /** Discovery probe result (backend `probeOk` field). True = verified reachable, false = probe failed, undefined = not probed */
+  probeOk?: boolean
+  /** Short error message when probeOk=false */
+  probeError?: string
 }
 
 export interface ProviderInfo {
@@ -525,6 +599,9 @@ export interface ProviderInfo {
   apiKey?: string
   baseUrl?: string
   generateKwargs?: Record<string, unknown>
+  authType?: string
+  oauthConnected?: boolean
+  oauthExpiresAt?: number
 }
 
 export interface ActiveModelsInfo {

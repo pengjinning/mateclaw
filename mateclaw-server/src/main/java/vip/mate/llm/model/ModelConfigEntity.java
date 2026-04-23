@@ -47,6 +47,14 @@ public class ModelConfigEntity {
 
     private Boolean isDefault;
 
+    /**
+     * 模型类型：chat（默认，LLM 对话） / embedding（文本向量化）
+     * <p>
+     * 参考 Dify 的 ModelType 抽象：允许同一 Provider 下同时管理 chat 和 embedding 两类模型，
+     * API Key 共用（存于 mate_model_provider）。
+     */
+    private String modelType;
+
     @TableField(fill = FieldFill.INSERT)
     private LocalDateTime createTime;
 

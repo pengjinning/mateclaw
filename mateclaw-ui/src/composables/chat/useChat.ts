@@ -12,14 +12,17 @@ import { ref, computed } from 'vue'
 import { useMessages } from './useMessages'
 import { useStream } from './useStream'
 import { useMessageQueue } from './useMessageQueue'
-import type { Message, MessageContentPart, StreamPhase, HeartbeatData, QueuedMessage, PhaseEventData } from '@/types'
+import type { Message, MessageContentPart, MessageSegment, StreamPhase, HeartbeatData, QueuedMessage, PhaseEventData } from '@/types'
 import { classifyBackendError, type ChatErrorInfo } from '@/types/chatError'
+import { http } from '@/api'
 
 export interface UseChatOptions {
   /** API 基础 URL */
   baseUrl: string
   /** 认证 Token */
   token?: string
+  /** 当前思考深度（响应式 ref），off 时抑制 thinking 展示 */
+  thinkingLevel?: import('vue').Ref<string>
   /**
    * 统一回调：流结束后（done/error/stopped 都会触发）。
    * 前端应在此回调中做持久化历史收口（reconcile）。
@@ -72,6 +75,8 @@ export interface UseChatReturn {
   clearMessages: () => void
   /** 重连到运行中的流 */
   reconnectStream: (conversationId: string) => Promise<void>
+  /** 彻底重置流上下文 — 切换/新建会话时调用 */
+  resetForNewConversation: () => void
 }
 
 export interface SendMessageOptions {
@@ -83,10 +88,13 @@ export interface SendMessageOptions {
   attachments?: MessageContentPart[]
   /** 消息内容 */
   contentParts?: MessageContentPart[]
+  /** 思考深度：off / low / medium / high / max */
+  thinkingLevel?: string
 }
 
 export function useChat(options: UseChatOptions): UseChatReturn {
   const { baseUrl, token, onStreamEnd } = options
+  const thinkingLevelRef = options.thinkingLevel
 
   /**
    * 带认证的 fetch 封装 — 从 localStorage 读取 token（与 useStream / http.ts 一致）
@@ -108,9 +116,46 @@ export function useChat(options: UseChatOptions): UseChatReturn {
   let stopFallbackTimer: ReturnType<typeof setTimeout> | null = null
   const streamPhase = ref<StreamPhase>('idle')
   const phaseInfo = ref<PhaseEventData | null>(null)
+
+  /** 分段式展示数据：当前助手消息的所有分段 */
+  const currentSegments = ref<MessageSegment[]>([])
+  const segIdCounter = { value: 0 }
+  const genSegId = () => `seg-${Date.now()}-${segIdCounter.value++}`
+
+  /** 当前 turn 的唯一标识 — 确保 flushSegmentsToMessage 不会把旧 turn 的 segments 写到新消息 */
+  let activeTurnId = ''
+
+  /** 重置当前 turn 的流式状态 — 必须在每次创建新 assistant placeholder 之前调用 */
+  function resetCurrentTurnState() {
+    currentSegments.value = []
+    segIdCounter.value = 0
+    activeTurnId = `turn-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
+  }
+
+  /** 将当前 segments 同步到助手消息的 metadata 中（实时渲染用） */
+  const flushSegmentsToMessage = () => {
+    if (!currentAssistantId.value || currentSegments.value.length === 0) return
+    const msg = getMessage(currentAssistantId.value)
+    if (!msg) return
+    // 保护：只写入当前 turn 创建的消息，避免旧 turn segments 污染新消息
+    if ((msg as any)._turnId && (msg as any)._turnId !== activeTurnId) return
+    const metadata = parseMetadata((msg as any).metadata)
+    updateMessage(currentAssistantId.value, {
+      ...msg,
+      metadata: { ...metadata, segments: [...currentSegments.value] }
+    } as any)
+  }
   const heartbeat = ref<HeartbeatData | null>(null)
   /** Track which conversation the current stream belongs to */
   let streamConversationId = ''
+  /** 判断事件是否属于已过期的对话（防止旧流事件污染新会话） */
+  function isStaleEvent(data: any): boolean {
+    const eventConvId = data?.conversationId
+    if (eventConvId && streamConversationId && eventConvId !== streamConversationId) {
+      return true
+    }
+    return false
+  }
   /** 已处理的 approval pendingId 集合（幂等去重） */
   const processedApprovalIds = new Set<string>()
 
@@ -121,13 +166,56 @@ export function useChat(options: UseChatOptions): UseChatReturn {
     if (!metadata) return {}
     if (typeof metadata === 'string') {
       try {
-        return JSON.parse(metadata)
+        let parsed = JSON.parse(metadata)
+        // 处理双重 JSON 编码（DB metadata 是字符串，Jackson 可能再次转义）
+        if (typeof parsed === 'string') {
+          try { parsed = JSON.parse(parsed) } catch { /* ignore */ }
+        }
+        return parsed
       } catch (e) {
         console.warn('[useChat] Failed to parse metadata:', e)
         return {}
       }
     }
     return metadata
+  }
+
+  /**
+   * SSE 以 error/done 结束但审批实际上已失效时，收口残留的 awaiting_approval UI 状态。
+   * 必须用 updateMessage 触发响应式更新，不能只改嵌套字段。
+   */
+  const expirePendingApprovals = (finalStatus: 'completed' | 'failed' | 'stopped') => {
+    for (const m of messages.value) {
+      if (m.role !== 'assistant') continue
+      const metadata = parseMetadata((m as any).metadata)
+      const pendingApproval = metadata?.pendingApproval
+      const hasPendingApproval = pendingApproval?.status === 'pending_approval'
+      const isAwaitingApprovalMsg = m.status === 'awaiting_approval' || metadata?.currentPhase === 'awaiting_approval'
+      if (!hasPendingApproval && !isAwaitingApprovalMsg) continue
+      if (m.id === undefined || m.id === null) continue
+
+      const toolCalls = Array.isArray(metadata?.toolCalls)
+        ? metadata.toolCalls.map((tc: any) => (
+            tc?.status === 'running' || tc?.status === 'awaiting_approval'
+              ? { ...tc, status: 'completed' }
+              : tc
+          ))
+        : metadata?.toolCalls
+
+      updateMessage(m.id, {
+        ...m,
+        status: m.status === 'awaiting_approval' ? finalStatus : m.status,
+        metadata: {
+          ...metadata,
+          currentPhase: undefined,
+          runningToolName: undefined,
+          toolCalls,
+          pendingApproval: hasPendingApproval
+            ? { ...pendingApproval, status: 'expired' }
+            : pendingApproval,
+        },
+      } as any)
+    }
   }
 
   // 消息管理
@@ -151,33 +239,71 @@ export function useChat(options: UseChatOptions): UseChatReturn {
   // 消息队列
   const messageQueue = useMessageQueue()
 
-  // 流连接
+  // 流连接（注入 auth + workspace header，与 axios interceptor 保持一致）
+  const streamHeaders: Record<string, string> = {}
+  if (token) {
+    streamHeaders['Authorization'] = `Bearer ${token}`
+  }
+  const wsId = localStorage.getItem('mc-workspace-id')
+  if (wsId) {
+    streamHeaders['X-Workspace-Id'] = wsId
+  }
   const stream = useStream({
     url: `${baseUrl}/api/v1/chat/stream`,
-    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    headers: streamHeaders,
   })
 
   // ===== SSE 事件处理器 =====
 
   stream.on('content_delta', (data) => {
+    if (isStaleEvent(data)) return
     if (currentAssistantId.value) {
       appendMessageContent(currentAssistantId.value, data.delta || '', 'text')
       if (['thinking', 'reasoning', 'drafting_answer', 'preparing_context'].includes(streamPhase.value)) {
         streamPhase.value = 'streaming'
       }
+      // 分段：追加到当前 content segment 或创建新的
+      const segs = currentSegments.value
+      let contentSeg = segs.findLast((s: MessageSegment) => s.type === 'content' && s.status === 'running')
+      if (!contentSeg) {
+        // 关闭之前的 thinking segment
+        const thinkingSeg = segs.findLast((s: MessageSegment) => s.type === 'thinking' && s.status === 'running')
+        if (thinkingSeg) thinkingSeg.status = 'completed'
+        contentSeg = { id: genSegId(), type: 'content', status: 'running', text: '', timestamp: Date.now() }
+        segs.push(contentSeg)
+        flushSegmentsToMessage() // 新 content segment 创建时同步一次
+      }
+      contentSeg.text = (contentSeg.text || '') + (data.delta || '')
     }
   })
 
   stream.on('thinking_delta', (data) => {
+    if (isStaleEvent(data)) return
+    // thinkingLevel=off 时抑制 thinking 展示
+    if (options.thinkingLevel?.value === 'off') return
     if (currentAssistantId.value) {
       appendMessageContent(currentAssistantId.value, data.delta || '', 'thinking')
       if (streamPhase.value !== 'summarizing_observations') {
-        streamPhase.value = 'thinking'
+        streamPhase.value = options.thinkingLevel?.value === 'off' ? 'streaming' : 'thinking'
       }
+      // 分段：所有 thinking 合并到一个 segment（不因 tool_call 中断而创建多个）
+      const segs = currentSegments.value
+      // 优先复用已有的 thinking segment（无论 running 还是 completed）
+      let thinkSeg = segs.find((s: MessageSegment) => s.type === 'thinking')
+      if (!thinkSeg) {
+        thinkSeg = { id: genSegId(), type: 'thinking', status: 'running', thinkingText: '', timestamp: Date.now() }
+        // 插入到开头（thinking 始终在最上方）
+        segs.unshift(thinkSeg)
+        flushSegmentsToMessage()
+      }
+      // 新的 thinking 到来，重新设为 running
+      thinkSeg.status = 'running'
+      thinkSeg.thinkingText = (thinkSeg.thinkingText || '') + (data.delta || '')
     }
   })
 
   stream.on('message_start', (data) => {
+    if (isStaleEvent(data)) return
     if (data?.role !== 'assistant') return
     const currentMsg = currentAssistantId.value ? getMessage(currentAssistantId.value) : null
     if (currentMsg?.role === 'assistant') {
@@ -187,14 +313,15 @@ export function useChat(options: UseChatOptions): UseChatReturn {
       return
     }
 
-    const assistantMessage = createAssistantMessage('')
-    if (streamConversationId) {
-      assistantMessage.conversationId = streamConversationId
-    }
+    // 没有 placeholder 时才创建（正常路径 placeholder 已在 sendMessage 中创建）
+    resetCurrentTurnState()
+    const assistantMessage = createAssistantMessage('', streamConversationId)
+    ;(assistantMessage as any)._turnId = activeTurnId
     currentAssistantId.value = assistantMessage.id as string
   })
 
   stream.on('warning', (data) => {
+    if (isStaleEvent(data)) return
     console.warn('[Chat] Warning from server:', data.delta || data.message || data)
     if (currentAssistantId.value) {
       const msg = getMessage(currentAssistantId.value)
@@ -211,6 +338,7 @@ export function useChat(options: UseChatOptions): UseChatReturn {
   })
 
   stream.on('message_complete', (data) => {
+    if (isStaleEvent(data)) return
     if (currentAssistantId.value) {
       const msg = getMessage(currentAssistantId.value)
       if (msg?.status === 'failed') {
@@ -242,14 +370,31 @@ export function useChat(options: UseChatOptions): UseChatReturn {
       setMessageStatus(currentAssistantId.value, data.status || 'completed')
       // 关键修复：不在这里清除 currentAssistantId
     }
+
+    // 分段：标记所有 running segments 为 completed，并持久化到 message metadata
+    if (currentAssistantId.value && currentSegments.value.length > 0) {
+      currentSegments.value.forEach((s: MessageSegment) => { if (s.status === 'running') s.status = 'completed' })
+      const msg = getMessage(currentAssistantId.value)
+      if (msg) {
+        const metadata = parseMetadata((msg as any).metadata)
+        updateMessage(currentAssistantId.value, {
+          ...msg,
+          metadata: { ...metadata, segments: [...currentSegments.value] }
+        } as any)
+      }
+    }
+
+    // === 自动 TTS：message_complete 且 status=completed 时触发 ===
+    if (data.status === 'completed' && data.hasContent && currentAssistantId.value) {
+      const msg = getMessage(currentAssistantId.value)
+      if (msg?.content && streamConversationId) {
+        triggerAutoTts(streamConversationId, msg.content)
+      }
+    }
   })
 
   stream.on('done', (data) => {
-    console.log('[useChat] done event received:', {
-      status: data.status,
-      promptTokens: data.promptTokens,
-      completionTokens: data.completionTokens,
-    })
+    if (isStaleEvent(data)) return
 
     if (currentAssistantId.value) {
       const existingMsg = getMessage(currentAssistantId.value)
@@ -257,12 +402,16 @@ export function useChat(options: UseChatOptions): UseChatReturn {
         setMessageStatus(currentAssistantId.value, data.status || 'completed')
       }
 
-      // 更新 token 信息
+      // 更新 token 信息 + 用持久化 id 替换本地临时 id（关键：让 reconcile 能匹配）
       const msgIndex = messages.value.findIndex(m => m.id === currentAssistantId.value)
       if (msgIndex >= 0) {
         const msg = messages.value[msgIndex]
         if (data.promptTokens !== undefined) msg.promptTokens = data.promptTokens
         if (data.completionTokens !== undefined) msg.completionTokens = data.completionTokens
+        // 用后端持久化 id 替换本地临时 id，使 reconcile 时能按 id 匹配
+        if (data.assistantMessageId) {
+          msg.id = data.assistantMessageId
+        }
         messages.value[msgIndex] = { ...msg }
       }
       currentAssistantId.value = null
@@ -272,6 +421,7 @@ export function useChat(options: UseChatOptions): UseChatReturn {
       : data.status === 'stopped' ? 'stopped' : 'completed'
     if (data.status !== 'awaiting_approval') {
       phaseInfo.value = null
+      expirePendingApprovals(data.status === 'stopped' ? 'stopped' : 'completed')
     }
 
     // 兜底清理排队状态（如果 queued_input_started 已经处理了则这里是 no-op）
@@ -298,6 +448,7 @@ export function useChat(options: UseChatOptions): UseChatReturn {
 
   let errorFired = false
   stream.on('error', (data) => {
+    if (isStaleEvent(data)) return
     const errorInfo: ChatErrorInfo = data.errorInfo
       || (data.errorType ? classifyBackendError(data) : { category: 'unknown', retryable: true, timestamp: Date.now() })
     if (currentAssistantId.value) {
@@ -318,6 +469,7 @@ export function useChat(options: UseChatOptions): UseChatReturn {
     phaseInfo.value = null
     // 错误时清理排队状态，避免脏残留
     messageQueue.clear()
+    expirePendingApprovals('failed')
 
     if (errorFired) return
     errorFired = true
@@ -333,6 +485,7 @@ export function useChat(options: UseChatOptions): UseChatReturn {
   // ===== Agent 事件处理 =====
 
   stream.on('tool_call_started', (data) => {
+    if (isStaleEvent(data)) return
     streamPhase.value = 'executing_tool'
     if (currentAssistantId.value) {
       const msg = getMessage(currentAssistantId.value)
@@ -350,10 +503,21 @@ export function useChat(options: UseChatOptions): UseChatReturn {
           metadata: { ...metadata, toolCalls, currentPhase: 'executing_tool', runningToolName: data.toolName }
         } as any)
       }
+      // 分段：关闭之前的 thinking/content segment，创建新的 tool_call segment
+      const segs = currentSegments.value
+      const runningSeg = segs.findLast((s: MessageSegment) => s.status === 'running' && (s.type === 'thinking' || s.type === 'content'))
+      if (runningSeg) runningSeg.status = 'completed'
+      segs.push({
+        id: genSegId(), type: 'tool_call', status: 'running',
+        toolName: data.toolName, toolArgs: data.arguments,
+        timestamp: data.timestamp || Date.now(),
+      })
+      flushSegmentsToMessage()
     }
   })
 
   stream.on('tool_call_completed', (data) => {
+    if (isStaleEvent(data)) return
     if (currentAssistantId.value) {
       const msg = getMessage(currentAssistantId.value)
       if (msg) {
@@ -373,10 +537,47 @@ export function useChat(options: UseChatOptions): UseChatReturn {
           metadata: { ...metadata, toolCalls, runningToolName: undefined }
         } as any)
       }
+      // 分段：找到对应的 running tool_call segment 并标记完成
+      const segs = currentSegments.value
+      const toolSeg = segs.findLast((s: MessageSegment) =>
+        s.type === 'tool_call' && s.status === 'running' && s.toolName === data.toolName)
+      if (toolSeg) {
+        toolSeg.status = data.success !== false ? 'completed' : 'error'
+        toolSeg.toolResult = data.result
+        toolSeg.toolSuccess = data.success
+      }
+      flushSegmentsToMessage()
+    }
+  })
+
+  // ===== Browser 执行事件 =====
+
+  stream.on('browser_action', (data) => {
+    if (isStaleEvent(data)) return
+    if (currentAssistantId.value) {
+      const msg = getMessage(currentAssistantId.value)
+      if (msg) {
+        const metadata = parseMetadata((msg as any).metadata)
+        const browserActions = [...(metadata?.browserActions || [])]
+        browserActions.push({
+          action: data.action,
+          success: data.success,
+          url: data.url,
+          title: data.title,
+          screenshot: data.screenshot,
+          durationMs: data.durationMs,
+          timestamp: data.timestamp || Date.now()
+        })
+        updateMessage(currentAssistantId.value, {
+          ...msg,
+          metadata: { ...metadata, browserActions }
+        } as any)
+      }
     }
   })
 
   stream.on('phase', (data) => {
+    if (isStaleEvent(data)) return
     const phase = data.phase as StreamPhase
     if (phase) {
       streamPhase.value = phase
@@ -396,7 +597,88 @@ export function useChat(options: UseChatOptions): UseChatReturn {
     }
   })
 
+  // ===== Agent 委派事件 =====
+  stream.on('delegation_start', (data) => {
+    if (isStaleEvent(data)) return
+    streamPhase.value = 'executing_tool'
+    if (currentAssistantId.value) {
+      const segs = currentSegments.value
+      // 关闭之前的 thinking/content segment
+      const runningSeg = segs.findLast((s: MessageSegment) => s.status === 'running')
+      if (runningSeg) runningSeg.status = 'completed'
+
+      if (data.parallel && Array.isArray(data.children)) {
+        // 并行模式：为每个子任务创建一个 delegation segment
+        for (const child of data.children) {
+          segs.push({
+            id: genSegId(),
+            type: 'tool_call',
+            status: 'running',
+            toolName: `→ ${child.childAgentName || 'Agent'}`,
+            toolArgs: child.task || '',
+            timestamp: Date.now()
+          })
+        }
+      } else {
+        // 单任务模式
+        segs.push({
+          id: genSegId(),
+          type: 'tool_call',
+          status: 'running',
+          toolName: `→ ${data.childAgentName || 'Agent'}`,
+          toolArgs: data.task || '',
+          timestamp: Date.now()
+        })
+      }
+      flushSegmentsToMessage()
+    }
+  })
+
+  stream.on('delegation_progress', (data) => {
+    if (isStaleEvent(data)) return
+    if (currentAssistantId.value && data.originalEvent === 'tool_call_started') {
+      const segs = currentSegments.value
+      // 按 childAgentName 匹配对应的 delegation segment（并行时多个）
+      const childName = data.childAgentName || ''
+      const delegSeg = segs.findLast((s: MessageSegment) =>
+        s.type === 'tool_call' && s.status === 'running' && s.toolName === `→ ${childName}`)
+        || segs.findLast((s: MessageSegment) => s.type === 'tool_call' && s.status === 'running' && s.toolName?.startsWith('→'))
+      if (delegSeg) {
+        const childData = typeof data.data === 'string' ? data.data : JSON.stringify(data.data)
+        delegSeg.toolArgs = (delegSeg.toolArgs || '') + '\n  [子任务] ' + childData
+      }
+    }
+  })
+
+  stream.on('delegation_end', (data) => {
+    if (isStaleEvent(data)) return
+    if (currentAssistantId.value) {
+      const segs = currentSegments.value
+      if (data.parallel) {
+        // 并行模式：关闭所有 running 的 delegation segments
+        const totalMs = data.totalDurationMs ? Math.round(data.totalDurationMs / 1000) : 0
+        segs.filter((s: MessageSegment) => s.type === 'tool_call' && s.status === 'running' && s.toolName?.startsWith('→'))
+          .forEach((s: MessageSegment) => {
+            s.status = 'completed'
+            s.toolName = (s.toolName || '') + (data.success ? ' ✓' : ' ✗')
+          })
+      } else {
+        // 单任务模式
+        const delegSeg = segs.findLast((s: MessageSegment) => s.type === 'tool_call' && s.status === 'running' && s.toolName?.startsWith('→'))
+        if (delegSeg) {
+          delegSeg.status = 'completed'
+          delegSeg.toolName = (delegSeg.toolName || '') + (data.success ? ' ✓' : ' ✗')
+          if (data.durationMs) {
+            delegSeg.toolArgs = (delegSeg.toolArgs || '') + `\n  耗时: ${Math.round(data.durationMs / 1000)}s`
+          }
+        }
+      }
+      flushSegmentsToMessage()
+    }
+  })
+
   stream.on('plan_created', (data) => {
+    if (isStaleEvent(data)) return
     if (currentAssistantId.value) {
       const msg = getMessage(currentAssistantId.value)
       if (msg) {
@@ -413,6 +695,7 @@ export function useChat(options: UseChatOptions): UseChatReturn {
   })
 
   stream.on('plan_step_started', (data) => {
+    if (isStaleEvent(data)) return
     if (currentAssistantId.value) {
       const msg = getMessage(currentAssistantId.value)
       if (msg) {
@@ -431,6 +714,7 @@ export function useChat(options: UseChatOptions): UseChatReturn {
   })
 
   stream.on('plan_step_completed', (data) => {
+    if (isStaleEvent(data)) return
     if (currentAssistantId.value) {
       const msg = getMessage(currentAssistantId.value)
       if (msg) {
@@ -454,9 +738,10 @@ export function useChat(options: UseChatOptions): UseChatReturn {
   // ===== 工具审批事件（带幂等去重） =====
 
   stream.on('tool_approval_requested', (data) => {
+    if (isStaleEvent(data)) return
     // 幂等去重：同一 pendingId 只处理一次
     if (data.pendingId && processedApprovalIds.has(data.pendingId)) {
-      console.log('[useChat] Duplicate approval request ignored:', data.pendingId)
+      // duplicate approval ignored
       return
     }
     if (data.pendingId) processedApprovalIds.add(data.pendingId)
@@ -471,7 +756,9 @@ export function useChat(options: UseChatOptions): UseChatReturn {
       }
     }
     if (!targetId) {
-      const placeholder = createAssistantMessage('')
+      resetCurrentTurnState()
+      const placeholder = createAssistantMessage('', streamConversationId)
+      ;(placeholder as any)._turnId = activeTurnId
       targetId = placeholder.id as string
       currentAssistantId.value = targetId
     }
@@ -508,6 +795,7 @@ export function useChat(options: UseChatOptions): UseChatReturn {
   })
 
   stream.on('tool_approval_resolved', (data) => {
+    if (isStaleEvent(data)) return
     const targetMsg = messages.value.findLast((m) => {
       if (m.role !== 'assistant') return false
       const metadata = parseMetadata((m as any).metadata)
@@ -572,7 +860,6 @@ export function useChat(options: UseChatOptions): UseChatReturn {
     // 避免在 interrupt 请求仍在途中时误清尚未到达后端的消息
     if (data.queueLength === 0 && messageQueue.hasQueued.value
         && messageQueue.queuedMessage.value?.status === 'sending') {
-      console.log('[useChat] heartbeat queueLength=0, clearing stale local queue (had', messageQueue.queueSize.value, ')')
       messageQueue.clear()
     }
   })
@@ -584,7 +871,7 @@ export function useChat(options: UseChatOptions): UseChatReturn {
   })
 
   stream.on('turn_interrupted', (data) => {
-    console.log('[useChat] Turn interrupted, hasQueuedMessage:', data.hasQueuedMessage)
+    if (isStaleEvent(data)) return
     // 当前 turn 已中断，等待后端自动启动排队消息
     // 如果后端会自动续跑，前端不需要做额外操作
     // 如果后端没有排队消息但前端有（应该不会发生），则前端发送
@@ -594,28 +881,112 @@ export function useChat(options: UseChatOptions): UseChatReturn {
   })
 
   stream.on('queued_input_accepted', (data) => {
-    console.log('[useChat] Queued input accepted:', data.queuedMessage)
     // 后端已确认接收排队消息，标记为 sending（允许 heartbeat 兜底清理）
     messageQueue.markSending()
     streamPhase.value = 'queued'
   })
 
   stream.on('queued_input_started', (data) => {
-    console.log('[useChat] Queued input started:', data.message)
+    if (isStaleEvent(data)) return
     // 后端已开始处理排队消息
     // 1. 先用排队的内容创建用户消息（此时上一轮回答已完成，顺序正确）
     const queued = messageQueue.dequeue()
     const messageContent = data.message || queued?.content || ''
     if (messageContent) {
-      const userMessage = createUserMessage(messageContent, queued?.contentParts)
-      userMessage.conversationId = data.conversationId || streamConversationId
+      const convId = data.conversationId || streamConversationId
+      createUserMessage(messageContent, queued?.contentParts, convId)
     }
     // 2. 再创建 assistant 占位消息
-    const assistantMessage = createAssistantMessage('')
-    assistantMessage.conversationId = data.conversationId || streamConversationId
+    resetCurrentTurnState()
+    const convId2 = data.conversationId || streamConversationId
+    const assistantMessage = createAssistantMessage('', convId2)
+    ;(assistantMessage as any)._turnId = activeTurnId
     currentAssistantId.value = assistantMessage.id as string
-    streamPhase.value = 'thinking'
+    streamPhase.value = options.thinkingLevel?.value === 'off' ? 'streaming' : 'thinking'
     phaseInfo.value = null
+  })
+
+  // ===== 异步任务完成事件（视频生成、图片生成等） =====
+  stream.on('async_task_completed', (data) => {
+    if (isStaleEvent(data)) return
+    if (data.success && streamConversationId) {
+      let mediaPart: MessageContentPart | null = null
+      if (data.videoUrl) {
+        mediaPart = {
+          type: 'video',
+          fileUrl: data.videoUrl,
+          fileName: `video_${data.taskId}.mp4`,
+          contentType: 'video/mp4',
+        } as MessageContentPart
+      } else if (data.imageUrl) {
+        mediaPart = {
+          type: 'image',
+          fileUrl: data.imageUrl,
+          fileName: `image_${data.taskId}.png`,
+          contentType: 'image/png',
+        } as MessageContentPart
+      }
+
+      if (!mediaPart) return
+
+      // 优先附加到当前 assistant 消息（避免图片跑到文字回复上方）
+      if (currentAssistantId.value) {
+        const msg = getMessage(currentAssistantId.value)
+        if (msg) {
+          const existingParts = (msg as any).contentParts || []
+          updateMessage(currentAssistantId.value, {
+            contentParts: [...existingParts, mediaPart],
+          } as any)
+          return
+        }
+      }
+
+      // 回退：Agent 已结束，新建独立消息
+      addMessage({
+        role: 'assistant',
+        content: '',
+        contentParts: [mediaPart],
+        status: 'completed',
+        conversationId: streamConversationId,
+      })
+    }
+  })
+
+  // ===== TTS 自动朗读 =====
+  let ttsAutoModeCache: string | null = null
+  let ttsCacheExpiry = 0
+
+  async function triggerAutoTts(conversationId: string, text: string) {
+    try {
+      // 缓存 settings 5 分钟，避免每条消息都请求
+      const now = Date.now()
+      if (!ttsAutoModeCache || now > ttsCacheExpiry) {
+        const res: any = await http.get('/system-settings')
+        ttsAutoModeCache = res.data?.ttsAutoMode || 'off'
+        ttsCacheExpiry = now + 5 * 60 * 1000
+      }
+      if (ttsAutoModeCache !== 'always') return
+      // 调用后端合成，后端会通过 SSE tts_ready 广播
+      http.post('/tts/synthesize', { conversationId, text }).catch(() => {})
+    } catch {
+      // 静默失败
+    }
+  }
+
+  // ===== TTS 自动朗读：监听 tts_ready 事件 =====
+  stream.on('tts_ready', (data) => {
+    if (data.audioUrl) {
+      const token = localStorage.getItem('token') || ''
+      fetch(data.audioUrl, { headers: { Authorization: `Bearer ${token}` } })
+        .then(res => res.blob())
+        .then(blob => {
+          const url = URL.createObjectURL(blob)
+          const audio = new Audio(url)
+          audio.onended = () => URL.revokeObjectURL(url)
+          audio.play().catch(() => URL.revokeObjectURL(url))
+        })
+        .catch(() => {})
+    }
   })
 
   // ===== 发送消息（支持运行中继续发送） =====
@@ -637,29 +1008,38 @@ export function useChat(options: UseChatOptions): UseChatReturn {
       clearTimeout(stopFallbackTimer)
       stopFallbackTimer = null
     }
+    // 切换会话时断开旧流，防止旧事件污染新会话
+    if (streamConversationId && streamConversationId !== conversationId) {
+      stream.disconnect()
+      currentAssistantId.value = null
+    }
     error.value = null
     errorFired = false
     streamConversationId = conversationId
-    streamPhase.value = 'thinking'
+    streamPhase.value = thinkingLevelRef?.value === 'off' ? 'streaming' : 'thinking'
     phaseInfo.value = null
 
     try {
       if (!isApprovalCommand) {
-        const userMessage = createUserMessage(content, contentParts)
-        userMessage.conversationId = conversationId
+        createUserMessage(content, contentParts, conversationId)
       }
 
-      const assistantMessage = createAssistantMessage('')
-      assistantMessage.conversationId = conversationId
+      resetCurrentTurnState()
+      const assistantMessage = createAssistantMessage('', conversationId)
+      ;(assistantMessage as any)._turnId = activeTurnId
       currentAssistantId.value = assistantMessage.id as string
 
       // contentParts 已由 buildOutgoingParts 包含 file entries，不要重复合并 attachments
-      await stream.connect({
+      const body: Record<string, any> = {
         agentId,
         message: content,
         conversationId,
         contentParts,
-      })
+      }
+      if (options.thinkingLevel) {
+        body.thinkingLevel = options.thinkingLevel
+      }
+      await stream.connect(body)
     } catch (e) {
       error.value = e instanceof Error ? e : new Error(String(e))
       streamPhase.value = 'idle'
@@ -701,12 +1081,12 @@ export function useChat(options: UseChatOptions): UseChatReturn {
       } else {
         // 没有活跃的流，直接发送
         messageQueue.clear()
-        const userMessage = createUserMessage(content, options.contentParts)
-        userMessage.conversationId = conversationId
-        const assistantMessage = createAssistantMessage('')
-        assistantMessage.conversationId = conversationId
+        createUserMessage(content, options.contentParts, conversationId)
+        resetCurrentTurnState()
+        const assistantMessage = createAssistantMessage('', conversationId)
+        ;(assistantMessage as any)._turnId = activeTurnId
         currentAssistantId.value = assistantMessage.id as string
-        streamPhase.value = 'thinking'
+        streamPhase.value = thinkingLevelRef?.value === 'off' ? 'streaming' : 'thinking'
         phaseInfo.value = null
         await stream.connect({
           agentId,
@@ -721,8 +1101,7 @@ export function useChat(options: UseChatOptions): UseChatReturn {
       // 回退为本地可见消息 + 清队列，避免消息静默丢失。
       const failedQueued = messageQueue.dequeue()
       if (failedQueued) {
-        const userMessage = createUserMessage(failedQueued.content, failedQueued.contentParts)
-        userMessage.conversationId = conversationId
+        createUserMessage(failedQueued.content, failedQueued.contentParts, conversationId)
       }
       error.value = new Error('Failed to queue message, please resend')
     }
@@ -735,6 +1114,21 @@ export function useChat(options: UseChatOptions): UseChatReturn {
   // 这样 done 事件能正常到达，onStreamEnd 被触发，消息状态和会话列表都能正确更新。
   // 加一个 fallback timeout（3 秒），防止 done 事件因网络问题永远不到达。
   const stopGeneration = async () => {
+    // 在任何 await 之前冻结标识符 + 安装 fallback timer，防止 resetForNewConversation 并发清空后丢失上下文
+    const convId = streamConversationId
+    const assistantId = currentAssistantId.value
+
+    // 仅在前端确实在生成时才触发停止（含 SSE 接收中 / reconnect 中 / 审批等待中）。
+    // 否则只是"旁观者"身份，不能把对方（渠道用户）的 agent run 也一起杀掉。
+    const activelyStreaming = isGenerating.value
+        || streamPhase.value === 'reconnecting'
+        || streamPhase.value === 'awaiting_approval'
+
+    if (!activelyStreaming) {
+      // 没有真正在流 → 什么都不做，让调用方直接走 resetForNewConversation
+      return
+    }
+
     // 先取消排队消息
     messageQueue.clear()
 
@@ -742,30 +1136,19 @@ export function useChat(options: UseChatOptions): UseChatReturn {
     streamPhase.value = 'stopped'
     phaseInfo.value = null
 
-    if (streamConversationId) {
-      try {
-        await fetchWithAuth(`${baseUrl}/api/v1/chat/${streamConversationId}/stop`, {
-          method: 'POST',
-        })
-      } catch (e) {
-        console.warn('[useChat] Stop API failed:', e)
-      }
-    }
-
-    // 不立即 disconnect —— 等 done 事件自然到达（后端 doOnCancel 会广播 done）
-    // 设置 fallback timeout：如果 3 秒内 done 事件没到达，强制清理
-    const convId = streamConversationId
-    const assistantId = currentAssistantId.value
+    // 在 await 之前安装 fallback timer，确保即使 resetForNewConversation 并发执行也不会遗漏
     if (stopFallbackTimer) clearTimeout(stopFallbackTimer)
     stopFallbackTimer = setTimeout(() => {
       stopFallbackTimer = null
       console.warn('[useChat] Stop fallback: done event not received within 3s, force cleanup')
-      stream.disconnect()
+      // 只有当 stream 仍属于旧会话时才 disconnect，防止误杀新会话的流
+      if (streamConversationId === convId || !streamConversationId) {
+        stream.disconnect()
+      }
       if (currentAssistantId.value === assistantId && assistantId) {
         setMessageStatus(assistantId, 'stopped')
         currentAssistantId.value = null
       }
-      // 强制触发 onStreamEnd 以刷新会话列表
       onStreamEnd?.({
         conversationId: convId,
         reason: 'stopped',
@@ -781,6 +1164,15 @@ export function useChat(options: UseChatOptions): UseChatReturn {
       if (stopFallbackTimer) { clearTimeout(stopFallbackTimer); stopFallbackTimer = null }
       unsubscribeError()
     })
+
+    // 发送后端 stop 请求（fire-and-forget，不阻塞 resetForNewConversation）
+    if (convId) {
+      fetchWithAuth(`${baseUrl}/api/v1/chat/${convId}/stop`, {
+        method: 'POST',
+      }).catch(e => {
+        console.warn('[useChat] Stop API failed:', e)
+      })
+    }
   }
 
   // 取消排队消息
@@ -803,16 +1195,30 @@ export function useChat(options: UseChatOptions): UseChatReturn {
 
     // 清除残留的 stop fallback timer
     if (stopFallbackTimer) { clearTimeout(stopFallbackTimer); stopFallbackTimer = null }
-    console.log('[useChat] Reconnecting to stream:', conversationId)
     streamPhase.value = 'reconnecting'
     streamConversationId = conversationId
     error.value = null
     errorFired = false
     phaseInfo.value = null
 
-    // 创建 assistant 占位消息用于接收重连后的流数据
-    const assistantMessage = createAssistantMessage('')
-    assistantMessage.conversationId = conversationId
+    resetCurrentTurnState()
+
+    // 清理尾部的空 assistant 消息（来自上一轮被误杀的 run 留下的空壳，或 placeholder 遗留），
+    // 避免与即将重连产生的 streaming 气泡共存形成"重复两条"假象。
+    while (messages.value.length > 0) {
+      const tail = messages.value[messages.value.length - 1]
+      if (tail && tail.role === 'assistant'
+          && tail.conversationId === conversationId
+          && !tail.content
+          && (!tail.contentParts || tail.contentParts.length === 0)) {
+        messages.value.pop()
+      } else {
+        break
+      }
+    }
+
+    const assistantMessage = createAssistantMessage('', conversationId)
+    ;(assistantMessage as any)._turnId = activeTurnId
     currentAssistantId.value = assistantMessage.id as string
 
     try {
@@ -863,6 +1269,23 @@ export function useChat(options: UseChatOptions): UseChatReturn {
     })
   }
 
+  /** 彻底重置流上下文 — 切换/新建会话时调用，确保旧流状态不污染新会话 */
+  const resetForNewConversation = () => {
+    stream.disconnect()
+    streamConversationId = ''
+    currentAssistantId.value = null
+    currentSegments.value = []
+    segIdCounter.value = 0
+    streamPhase.value = 'idle'
+    phaseInfo.value = null
+    error.value = null
+    messageQueue.clear()
+    if (stopFallbackTimer) {
+      clearTimeout(stopFallbackTimer)
+      stopFallbackTimer = null
+    }
+  }
+
   return {
     messages,
     isGenerating,
@@ -880,6 +1303,7 @@ export function useChat(options: UseChatOptions): UseChatReturn {
     addMessage,
     clearMessages,
     reconnectStream,
+    resetForNewConversation,
   }
 }
 

@@ -1,95 +1,83 @@
 <template>
   <div class="page-container">
-    <div class="page-header">
-      <div>
-        <h1 class="page-title">{{ t('datasources.title') }}</h1>
-        <p class="page-desc">{{ t('datasources.desc') }}</p>
+    <div class="page-shell">
+      <div class="page-header">
+        <div class="page-lead">
+          <div class="page-kicker">{{ t('datasources.kicker') }}</div>
+          <h1 class="page-title">{{ t('datasources.title') }}</h1>
+          <p class="page-desc">{{ t('datasources.desc') }}</p>
+        </div>
+        <button class="btn-primary" @click="openCreateModal">
+          <el-icon><Plus /></el-icon>
+          {{ t('datasources.addButton') }}
+        </button>
       </div>
-      <button class="btn-primary" @click="openCreateModal">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
-        </svg>
-        {{ t('datasources.addButton') }}
-      </button>
-    </div>
 
-    <!-- 数据源列表 -->
-    <div class="tools-table-wrap">
-      <table class="tools-table">
+      <!-- 数据源列表 -->
+        <div class="table-wrap">
+          <table class="data-table">
         <thead>
           <tr>
             <th>{{ t('datasources.columns.name') }}</th>
-            <th>{{ t('datasources.columns.type') }}</th>
             <th>{{ t('datasources.columns.connection') }}</th>
             <th>{{ t('datasources.columns.status') }}</th>
             <th>{{ t('datasources.columns.actions') }}</th>
           </tr>
         </thead>
         <tbody>
-          <tr v-for="ds in datasources" :key="ds.id" class="tool-row">
-            <!-- 名称 + 描述 -->
+          <tr v-for="ds in datasources" :key="ds.id" class="data-row">
             <td>
               <div class="tool-info">
                 <div class="tool-icon-wrap" :class="{ 'icon-ok': ds.lastTestOk === true, 'icon-fail': ds.lastTestOk === false }">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>
-                  </svg>
+                  <el-icon><Coin /></el-icon>
                 </div>
                 <div>
-                  <div class="tool-name">{{ ds.name }}</div>
-                  <div class="tool-desc" v-if="ds.description">{{ ds.description }}</div>
+                  <div class="tool-name" :title="ds.name">{{ ds.name }}</div>
+                  <div class="tool-type-inline">
+                    <span class="type-badge" :class="'type-' + ds.dbType">{{ dbTypeLabel(ds.dbType) }}</span>
+                  </div>
+                  <div class="tool-desc" v-if="ds.description" :title="ds.description">{{ ds.description }}</div>
                 </div>
               </div>
             </td>
-            <!-- 类型 -->
-            <td>
-              <span class="type-badge" :class="'type-' + ds.dbType">{{ dbTypeLabel(ds.dbType) }}</span>
-            </td>
-            <!-- 连接信息 -->
             <td>
               <div class="conn-info">
-                <code class="conn-host">{{ ds.host }}:{{ ds.port }}</code>
-                <span class="conn-db">{{ ds.databaseName }}<template v-if="ds.schemaName"> / {{ ds.schemaName }}</template></span>
+                <code class="conn-host" :title="`${ds.host}:${ds.port}`">{{ ds.host }}:{{ ds.port }}</code>
+                <span class="conn-db" :title="`${ds.databaseName}${ds.schemaName ? ` / ${ds.schemaName}` : ''}`">{{ ds.databaseName }}<template v-if="ds.schemaName"> / {{ ds.schemaName }}</template></span>
               </div>
             </td>
-            <!-- 状态 -->
             <td>
               <div class="status-cell">
                 <span class="status-dot" :class="statusClass(ds)"></span>
+                <span class="status-label">{{ ds.lastTestOk === true ? t('datasources.messages.testSuccess') : ds.lastTestOk === false ? t('datasources.messages.testFailed') : 'Pending' }}</span>
                 <label class="toggle-switch">
                   <input type="checkbox" :checked="ds.enabled" @change="toggleDs(ds)" />
                   <span class="toggle-slider"></span>
                 </label>
               </div>
             </td>
-            <!-- 操作 -->
             <td>
               <div class="row-actions">
+                <button class="row-btn" @click="openDetailModal(ds)" :title="t('common.view')">
+                  <el-icon><View /></el-icon>
+                </button>
                 <button class="row-btn test-btn" @click="testConnection(ds)" :disabled="testing === ds.id" :title="t('datasources.testButton')">
-                  <svg v-if="testing !== ds.id" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/>
-                  </svg>
+                  <el-icon v-if="testing !== ds.id"><Select /></el-icon>
                   <span v-else class="spinner"></span>
                 </button>
                 <button class="row-btn" @click="openEditModal(ds)" :title="t('common.edit')">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
-                    <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
-                  </svg>
+                  <el-icon><EditPen /></el-icon>
                 </button>
                 <button class="row-btn danger" @click="deleteDs(ds.id)" :title="t('common.delete')">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <polyline points="3 6 5 6 21 6"/>
-                    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
-                  </svg>
+                  <el-icon><Delete /></el-icon>
                 </button>
               </div>
             </td>
           </tr>
           <tr v-if="datasources.length === 0">
-            <td colspan="5" class="empty-row">
+            <td colspan="4" class="empty-row">
               <div class="empty-state">
-                <span class="empty-icon">🗄</span>
+                <el-icon class="empty-icon"><Coin /></el-icon>
                 <p>{{ t('datasources.empty') }}</p>
                 <button class="btn-primary" style="margin-top: 8px" @click="openCreateModal">
                   {{ t('datasources.addButton') }}
@@ -98,22 +86,61 @@
             </td>
           </tr>
         </tbody>
-      </table>
+          </table>
+        </div>
     </div>
 
-    <!-- Modal -->
-    <div v-if="showModal" class="modal-overlay" @click.self="closeModal">
+    <div v-if="detailDs" class="modal-overlay">
+      <div class="modal">
+        <div class="modal-header">
+          <h2>{{ detailDs.name }}</h2>
+          <button class="modal-close" @click="closeDetailModal">
+            <el-icon><CloseBold /></el-icon>
+          </button>
+        </div>
+        <div class="modal-body detail-grid">
+          <div class="detail-item">
+            <div class="detail-label">{{ t('datasources.columns.type') }}</div>
+            <div class="detail-value">{{ dbTypeLabel(detailDs.dbType) }}</div>
+          </div>
+          <div class="detail-item">
+            <div class="detail-label">{{ t('datasources.columns.status') }}</div>
+            <div class="detail-value">{{ detailDs.enabled ? 'Enabled' : 'Disabled' }}</div>
+          </div>
+          <div class="detail-item">
+            <div class="detail-label">{{ t('datasources.fields.host') }}</div>
+            <div class="detail-value mono">{{ detailDs.host }}:{{ detailDs.port }}</div>
+          </div>
+          <div class="detail-item">
+            <div class="detail-label">{{ t('datasources.fields.databaseName') }}</div>
+            <div class="detail-value">{{ detailDs.databaseName }}</div>
+            <div v-if="detailDs.schemaName" class="detail-subvalue">{{ detailDs.schemaName }}</div>
+          </div>
+          <div class="detail-item">
+            <div class="detail-label">{{ t('datasources.fields.username') }}</div>
+            <div class="detail-value">{{ detailDs.username || '-' }}</div>
+          </div>
+          <div class="detail-item">
+            <div class="detail-label">{{ t('datasources.fields.extraParams') }}</div>
+            <div class="detail-value detail-block">{{ detailDs.extraParams || '-' }}</div>
+          </div>
+          <div class="detail-item detail-item-full" v-if="detailDs.description">
+            <div class="detail-label">{{ t('datasources.fields.description') }}</div>
+            <div class="detail-value detail-block">{{ detailDs.description }}</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="showModal" class="modal-overlay">
       <div class="modal">
         <div class="modal-header">
           <h2>{{ editingDs ? t('datasources.modal.editTitle') : t('datasources.modal.newTitle') }}</h2>
           <button class="modal-close" @click="closeModal">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-            </svg>
+            <el-icon><CloseBold /></el-icon>
           </button>
         </div>
         <div class="modal-body">
-          <!-- 基本信息 -->
           <div class="form-section-title">{{ t('datasources.sections.basic') }}</div>
           <div class="form-grid">
             <div class="form-group">
@@ -135,7 +162,6 @@
             </div>
           </div>
 
-          <!-- 连接信息 -->
           <div class="form-section-title">{{ t('datasources.sections.connection') }}</div>
           <div class="form-grid">
             <div class="form-group" style="flex: 2">
@@ -156,7 +182,6 @@
             </div>
           </div>
 
-          <!-- 认证信息 -->
           <div class="form-section-title">{{ t('datasources.sections.auth') }}</div>
           <div class="form-grid">
             <div class="form-group">
@@ -168,17 +193,16 @@
               <div class="password-wrap">
                 <input v-model="form.password" :type="showPassword ? 'text' : 'password'" class="form-input" autocomplete="new-password" :placeholder="t('datasources.placeholders.password')" />
                 <button class="password-toggle" @click="showPassword = !showPassword" type="button">
-                  <svg v-if="!showPassword" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
-                  <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+                  <el-icon v-if="!showPassword"><View /></el-icon>
+                  <el-icon v-else><Hide /></el-icon>
                 </button>
               </div>
             </div>
           </div>
 
-          <!-- 高级配置 -->
           <div class="form-section-title advanced-toggle" @click="showAdvanced = !showAdvanced">
             {{ t('datasources.sections.advanced') }}
-            <svg :class="{ rotated: showAdvanced }" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+            <el-icon :class="{ rotated: showAdvanced }"><ArrowDown /></el-icon>
           </div>
           <div class="form-grid" v-if="showAdvanced">
             <div class="form-group full-width">
@@ -188,10 +212,9 @@
             </div>
           </div>
 
-          <!-- 连接测试结果 -->
           <div v-if="modalTestResult !== null" class="test-result" :class="modalTestResult ? 'test-ok' : 'test-fail'">
-            <svg v-if="modalTestResult" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-            <svg v-else width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
+            <el-icon v-if="modalTestResult"><CircleCheckFilled /></el-icon>
+            <el-icon v-else><CircleCloseFilled /></el-icon>
             {{ modalTestResult ? t('datasources.messages.testSuccess') : t('datasources.messages.testFailed') }}
           </div>
         </div>
@@ -213,6 +236,19 @@
 import { ref, computed, onMounted, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import {
+  ArrowDown,
+  CircleCheckFilled,
+  CircleCloseFilled,
+  CloseBold,
+  Coin,
+  Delete,
+  EditPen,
+  Hide,
+  Plus,
+  Select,
+  View,
+} from '@element-plus/icons-vue'
 import { datasourceApi } from '@/api/index'
 
 const { t } = useI18n()
@@ -237,6 +273,7 @@ interface Datasource {
 const datasources = ref<Datasource[]>([])
 const showModal = ref(false)
 const editingDs = ref<Datasource | null>(null)
+const detailDs = ref<Datasource | null>(null)
 const testing = ref<number | string | null>(null)
 const showPassword = ref(false)
 const showAdvanced = ref(false)
@@ -307,6 +344,14 @@ function closeModal() {
   modalTestResult.value = null
 }
 
+function openDetailModal(ds: Datasource) {
+  detailDs.value = ds
+}
+
+function closeDetailModal() {
+  detailDs.value = null
+}
+
 async function saveDs() {
   try {
     let saved: any
@@ -317,11 +362,8 @@ async function saveDs() {
     }
     closeModal()
     await loadDatasources()
-    // 保存成功后自动触发测试连接
     const id = saved?.data?.id
-    if (id) {
-      autoTestAfterSave(id)
-    }
+    if (id) autoTestAfterSave(id)
   } catch (e: any) { ElMessage.error(e?.message || t('datasources.messages.saveFailed')) }
 }
 
@@ -332,13 +374,12 @@ async function autoTestAfterSave(id: number | string) {
     const ok = res.data?.success
     ElMessage({ type: ok ? 'success' : 'warning', message: ok ? t('datasources.messages.testSuccess') : t('datasources.messages.testFailed') })
     await loadDatasources()
-  } catch { /* ignore */ }
-  finally { testing.value = null }
+  } catch {
+  } finally { testing.value = null }
 }
 
 async function testInModal() {
   if (!editingDs.value) {
-    // 新建模式：先保存再测试
     try {
       const saved: any = await datasourceApi.create(form.value)
       editingDs.value = saved.data
@@ -349,7 +390,6 @@ async function testInModal() {
       return
     }
   } else {
-    // 编辑模式：先保存更新
     try {
       await datasourceApi.update(editingDs.value.id, form.value)
       await loadDatasources()
@@ -398,116 +438,153 @@ async function testConnection(ds: Datasource) {
 </script>
 
 <style scoped>
-.page-container { height: 100%; overflow-y: auto; padding: 24px; background: var(--mc-bg); }
-.page-header { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 24px; }
-.page-title { font-size: 20px; font-weight: 700; color: var(--mc-text-primary); margin: 0 0 4px; }
+/* ===== Shell ===== */
+.page-container { height: 100%; overflow-y: auto; }
+.page-shell { padding: 24px; }
+
+/* ===== Header ===== */
+.page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
+.page-lead { display: flex; flex-direction: column; gap: 6px; }
+.page-kicker {
+  display: inline-flex; width: fit-content;
+  padding: 4px 10px; border-radius: 999px;
+  font-size: 11px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--mc-primary); background: var(--mc-primary-bg);
+}
+.page-title { font-size: clamp(24px, 3.5vw, 36px); font-weight: 800; color: var(--mc-text-primary); margin: 0; }
 .page-desc { font-size: 14px; color: var(--mc-text-secondary); margin: 0; }
-.btn-primary { display: flex; align-items: center; gap: 6px; padding: 8px 16px; background: var(--mc-primary); color: white; border: none; border-radius: 8px; font-size: 14px; font-weight: 500; cursor: pointer; }
+
+/* ===== Buttons ===== */
+.btn-primary { display: flex; align-items: center; gap: 6px; padding: 9px 16px; background: var(--mc-primary); color: #fff; border: none; border-radius: 10px; font-size: 14px; font-weight: 600; cursor: pointer; white-space: nowrap; }
 .btn-primary:hover { background: var(--mc-primary-hover); }
-.btn-primary:disabled { background: var(--mc-border); cursor: not-allowed; }
+.btn-primary:disabled { opacity: .4; cursor: not-allowed; }
 .btn-secondary { padding: 8px 16px; background: var(--mc-bg-elevated); color: var(--mc-text-primary); border: 1px solid var(--mc-border); border-radius: 8px; font-size: 14px; cursor: pointer; }
 .btn-secondary:hover { background: var(--mc-bg-sunken); }
 .btn-test { display: flex; align-items: center; gap: 6px; padding: 8px 16px; background: transparent; color: var(--mc-primary); border: 1px solid var(--mc-primary); border-radius: 8px; font-size: 14px; font-weight: 500; cursor: pointer; min-width: 90px; justify-content: center; }
 .btn-test:hover { background: var(--mc-primary-bg); }
-.btn-test:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-test:disabled { opacity: .4; cursor: not-allowed; }
 
-/* Table */
-.tools-table-wrap { background: var(--mc-bg-elevated); border: 1px solid var(--mc-border); border-radius: 12px; overflow: hidden; }
-.tools-table { width: 100%; border-collapse: collapse; }
-.tools-table th { padding: 12px 16px; text-align: left; font-size: 12px; font-weight: 600; color: var(--mc-text-secondary); text-transform: uppercase; letter-spacing: 0.05em; background: var(--mc-bg-sunken); border-bottom: 1px solid var(--mc-border); }
-.tool-row { border-bottom: 1px solid var(--mc-border-light); transition: background 0.1s; }
-.tool-row:hover { background: var(--mc-bg-sunken); }
-.tool-row:last-child { border-bottom: none; }
-.tools-table td { padding: 14px 16px; font-size: 14px; color: var(--mc-text-primary); }
+/* ===== Table — one surface, no nesting ===== */
+.table-wrap {
+  background: var(--mc-bg-elevated);
+  border: 1px solid var(--mc-border);
+  border-radius: 16px;
+  overflow: hidden;
+}
+.data-table { width: 100%; border-collapse: collapse; }
+.data-table th {
+  padding: 10px 16px; text-align: left;
+  font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--mc-text-tertiary);
+  background: var(--mc-bg-sunken);
+  border-bottom: 1px solid var(--mc-border);
+  white-space: nowrap;
+}
+.data-row { border-bottom: 1px solid var(--mc-border-light); transition: background .12s; }
+.data-row:last-child { border-bottom: none; }
+.data-row:hover { background: var(--mc-bg-sunken); }
+.data-table td { padding: 12px 16px; font-size: 14px; color: var(--mc-text-primary); vertical-align: middle; }
+
+/* ===== Name cell ===== */
 .tool-info { display: flex; align-items: center; gap: 10px; }
-.tool-icon-wrap { width: 32px; height: 32px; background: var(--mc-bg-sunken); border-radius: 8px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; color: var(--mc-text-secondary); }
-.tool-icon-wrap.icon-ok { background: #e8f5e9; color: #2e7d32; }
-.tool-icon-wrap.icon-fail { background: #fce4ec; color: #c62828; }
-.tool-name { font-weight: 500; color: var(--mc-text-primary); }
-.tool-desc { font-size: 12px; color: var(--mc-text-tertiary); margin-top: 1px; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tool-icon-wrap { width: 32px; height: 32px; background: var(--mc-bg-sunken); border-radius: 8px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; color: var(--mc-text-tertiary); }
+.tool-icon-wrap.icon-ok { color: #2e7d32; background: color-mix(in srgb, #2e7d32 10%, transparent); }
+.tool-icon-wrap.icon-fail { color: var(--mc-danger, #ef4444); background: color-mix(in srgb, var(--mc-danger, #ef4444) 10%, transparent); }
+.tool-name { font-weight: 600; color: var(--mc-text-primary); }
+.tool-type-inline { margin-top: 4px; }
+.tool-desc { font-size: 12px; color: var(--mc-text-tertiary); margin-top: 1px; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-/* Connection info */
+/* ===== Connection cell ===== */
 .conn-info { display: flex; flex-direction: column; gap: 2px; }
-.conn-host { background: var(--mc-bg-sunken); padding: 2px 8px; border-radius: 4px; font-size: 12px; color: var(--mc-text-primary); display: inline-block; }
-.conn-db { font-size: 12px; color: var(--mc-text-tertiary); }
+.conn-host { display: inline-block; max-width: 180px; background: var(--mc-bg-sunken); padding: 2px 8px; border-radius: 6px; font-size: 12px; color: var(--mc-text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.conn-db { font-size: 12px; color: var(--mc-text-tertiary); max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-/* Type badge */
-.type-badge { padding: 3px 10px; border-radius: 10px; font-size: 12px; font-weight: 500; }
-.type-mysql { background: #e8f4fd; color: #1a73e8; }
-.type-postgresql { background: #e8f0fe; color: #336791; }
-.type-clickhouse { background: #fff8e1; color: #e6a817; }
-.type-mariadb { background: #fce4ec; color: #c0392b; }
+/* ===== Type badge ===== */
+.type-badge { padding: 2px 8px; border-radius: 6px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--mc-text-tertiary); background: var(--mc-bg-sunken); }
+.type-mysql { color: #1a73e8; background: color-mix(in srgb, #1a73e8 10%, transparent); }
+.type-postgresql { color: #336791; background: color-mix(in srgb, #336791 10%, transparent); }
+.type-clickhouse { color: #e6a817; background: color-mix(in srgb, #e6a817 10%, transparent); }
+.type-mariadb { color: #c0392b; background: color-mix(in srgb, #c0392b 10%, transparent); }
 
-/* Status */
+/* ===== Status cell ===== */
 .status-cell { display: flex; align-items: center; gap: 8px; }
-.status-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
-.dot-ok { background: #4caf50; box-shadow: 0 0 4px rgba(76,175,80,0.4); }
-.dot-fail { background: #f44336; box-shadow: 0 0 4px rgba(244,67,54,0.4); }
-.dot-unknown { background: var(--mc-border); }
-.dot-disabled { background: var(--mc-border); opacity: 0.5; }
+.status-label { font-size: 13px; font-weight: 500; color: var(--mc-text-secondary); white-space: nowrap; }
+.status-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+.dot-ok { background: #34d399; box-shadow: 0 0 4px rgba(52,211,153,.45); }
+.dot-fail { background: var(--mc-danger, #ef4444); box-shadow: 0 0 4px rgba(239,68,68,.4); }
+.dot-unknown { background: var(--mc-text-tertiary); opacity: .4; }
+.dot-disabled { background: var(--mc-text-tertiary); opacity: .3; }
 
-/* Toggle */
+/* ===== Toggle ===== */
 .toggle-switch { position: relative; display: inline-block; width: 36px; height: 20px; cursor: pointer; }
 .toggle-switch input { opacity: 0; width: 0; height: 0; }
-.toggle-slider { position: absolute; inset: 0; background: var(--mc-border); border-radius: 20px; transition: 0.2s; }
-.toggle-slider::before { content: ''; position: absolute; width: 14px; height: 14px; left: 3px; top: 3px; background: var(--mc-bg-elevated); border-radius: 50%; transition: 0.2s; }
+.toggle-slider { position: absolute; inset: 0; background: var(--mc-border); border-radius: 20px; transition: .2s; }
+.toggle-slider::before { content: ''; position: absolute; width: 14px; height: 14px; left: 3px; top: 3px; background: var(--mc-bg-elevated); border-radius: 50%; transition: .2s; }
 .toggle-switch input:checked + .toggle-slider { background: var(--mc-primary); }
 .toggle-switch input:checked + .toggle-slider::before { transform: translateX(16px); }
 
-/* Actions */
-.row-actions { display: flex; gap: 4px; }
-.row-btn { width: 28px; height: 28px; border: 1px solid var(--mc-border); background: var(--mc-bg-elevated); border-radius: 6px; cursor: pointer; display: flex; align-items: center; justify-content: center; color: var(--mc-text-secondary); transition: all 0.15s; }
-.row-btn:hover { background: var(--mc-bg-sunken); }
-.row-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-.row-btn.danger:hover { background: var(--mc-danger-bg); border-color: var(--mc-danger); color: var(--mc-danger); }
+/* ===== Row actions ===== */
+.row-actions { display: flex; gap: 5px; }
+.row-btn { width: 30px; height: 30px; border: 1px solid var(--mc-border); border-radius: 8px; background: transparent; cursor: pointer; display: flex; align-items: center; justify-content: center; color: var(--mc-text-tertiary); transition: all .12s; }
+.row-btn:hover { background: var(--mc-bg-sunken); color: var(--mc-text-primary); }
+.row-btn:disabled { opacity: .3; cursor: not-allowed; }
+.row-btn.danger:hover { background: color-mix(in srgb, var(--mc-danger, #ef4444) 10%, transparent); border-color: var(--mc-danger); color: var(--mc-danger); }
 .row-btn.test-btn:hover { border-color: var(--mc-primary); color: var(--mc-primary); }
 
-/* Spinner */
-.spinner { width: 12px; height: 12px; border: 2px solid var(--mc-border); border-top-color: var(--mc-primary); border-radius: 50%; animation: spin 0.6s linear infinite; display: inline-block; }
+/* ===== Spinner ===== */
+.spinner { width: 12px; height: 12px; border: 2px solid var(--mc-border); border-top-color: var(--mc-primary); border-radius: 50%; animation: spin .6s linear infinite; display: inline-block; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-/* Empty */
-.empty-row { padding: 40px !important; }
-.empty-state { display: flex; flex-direction: column; align-items: center; gap: 8px; color: var(--mc-text-tertiary); }
+/* ===== Empty state ===== */
+.empty-row { padding: 48px 16px !important; }
+.empty-state { display: flex; flex-direction: column; align-items: center; gap: 6px; color: var(--mc-text-tertiary); }
 .empty-icon { font-size: 32px; }
 .empty-state p { font-size: 14px; margin: 0; }
 
-/* Modal */
-.modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.4); display: flex; align-items: center; justify-content: center; z-index: 1000; padding: 20px; }
-.modal { background: var(--mc-bg-elevated); border: 1px solid var(--mc-border); border-radius: 16px; width: 100%; max-width: 580px; max-height: 90vh; display: flex; flex-direction: column; box-shadow: 0 20px 60px rgba(0,0,0,0.15); }
-.modal-header { display: flex; align-items: center; justify-content: space-between; padding: 20px 24px; border-bottom: 1px solid var(--mc-border-light); }
-.modal-header h2 { font-size: 18px; font-weight: 600; color: var(--mc-text-primary); margin: 0; }
-.modal-close { width: 32px; height: 32px; border: none; background: none; cursor: pointer; color: var(--mc-text-tertiary); display: flex; align-items: center; justify-content: center; border-radius: 6px; }
+/* ===== Modal ===== */
+.modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.45); display: flex; align-items: center; justify-content: center; z-index: 1000; padding: 20px; }
+.modal { background: var(--mc-bg-elevated); border: 1px solid var(--mc-border); border-radius: 14px; width: 100%; max-width: 580px; max-height: 90vh; display: flex; flex-direction: column; box-shadow: 0 16px 48px rgba(0,0,0,.18); }
+.modal-header { display: flex; align-items: center; justify-content: space-between; padding: 18px 22px; border-bottom: 1px solid var(--mc-border-light); }
+.modal-header h2 { font-size: 17px; font-weight: 600; color: var(--mc-text-primary); margin: 0; }
+.modal-close { width: 28px; height: 28px; border: none; background: none; cursor: pointer; color: var(--mc-text-tertiary); display: flex; align-items: center; justify-content: center; border-radius: 6px; }
 .modal-close:hover { background: var(--mc-bg-sunken); }
-.modal-body { flex: 1; overflow-y: auto; padding: 20px 24px; }
+.modal-body { flex: 1; overflow-y: auto; padding: 18px 22px; }
+.modal-footer { display: flex; align-items: center; gap: 8px; padding: 14px 22px; border-top: 1px solid var(--mc-border-light); }
 
-/* Form sections */
-.form-section-title { font-size: 13px; font-weight: 600; color: var(--mc-text-secondary); text-transform: uppercase; letter-spacing: 0.05em; margin: 20px 0 10px; padding-bottom: 6px; border-bottom: 1px solid var(--mc-border-light); }
-.form-section-title:first-child { margin-top: 0; }
-.advanced-toggle { cursor: pointer; display: flex; align-items: center; gap: 4px; user-select: none; }
-.advanced-toggle svg { transition: transform 0.2s; }
-.advanced-toggle svg.rotated { transform: rotate(180deg); }
+/* Detail grid */
+.detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.detail-item { display: flex; flex-direction: column; gap: 4px; }
+.detail-item-full { grid-column: 1 / -1; }
+.detail-label { font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--mc-text-tertiary); }
+.detail-value { font-size: 14px; color: var(--mc-text-primary); word-break: break-word; }
+.detail-subvalue { font-size: 12px; color: var(--mc-text-tertiary); }
+.detail-block { padding: 8px 12px; border-radius: 8px; background: var(--mc-bg-sunken); font-family: 'SF Mono', 'Fira Code', monospace; font-size: 13px; white-space: pre-wrap; }
 
 /* Form */
-.form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-.form-group { display: flex; flex-direction: column; gap: 6px; }
+.form-section-title { font-size: 13px; font-weight: 600; color: var(--mc-text-secondary); text-transform: uppercase; letter-spacing: .05em; margin: 20px 0 10px; padding-bottom: 6px; border-bottom: 1px solid var(--mc-border-light); }
+.form-section-title:first-child { margin-top: 0; }
+.advanced-toggle { cursor: pointer; display: flex; align-items: center; gap: 4px; user-select: none; }
+.advanced-toggle svg { transition: transform .2s; }
+.advanced-toggle svg.rotated { transform: rotate(180deg); }
+.form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.form-group { display: flex; flex-direction: column; gap: 4px; }
 .form-group.full-width { grid-column: 1 / -1; }
 .form-label { font-size: 13px; font-weight: 500; color: var(--mc-text-secondary); }
 .form-input { padding: 8px 12px; border: 1px solid var(--mc-border); border-radius: 8px; font-size: 14px; color: var(--mc-text-primary); outline: none; background: var(--mc-bg-sunken); width: 100%; }
-.form-input:focus { border-color: var(--mc-primary); box-shadow: 0 0 0 2px rgba(217,119,87,0.1); }
+.form-input:focus { border-color: var(--mc-primary); box-shadow: 0 0 0 2px rgba(217,119,87,.12); }
 .form-hint { font-size: 11px; color: var(--mc-text-tertiary); margin-top: 2px; }
-
-/* Password field */
 .password-wrap { position: relative; }
 .password-wrap .form-input { padding-right: 36px; }
 .password-toggle { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); border: none; background: none; cursor: pointer; color: var(--mc-text-tertiary); padding: 4px; display: flex; align-items: center; justify-content: center; }
 .password-toggle:hover { color: var(--mc-text-secondary); }
-
-/* Test result in modal */
 .test-result { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-radius: 8px; font-size: 13px; font-weight: 500; margin-top: 16px; }
-.test-ok { background: #e8f5e9; color: #2e7d32; }
-.test-fail { background: #fce4ec; color: #c62828; }
+.test-ok { background: color-mix(in srgb, #2e7d32 10%, transparent); color: #2e7d32; }
+.test-fail { background: color-mix(in srgb, var(--mc-danger, #ef4444) 10%, transparent); color: var(--mc-danger, #ef4444); }
 
-/* Footer */
-.modal-footer { display: flex; align-items: center; gap: 10px; padding: 16px 24px; border-top: 1px solid var(--mc-border-light); }
+/* Responsive */
+@media (max-width: 900px) {
+  .page-header { flex-direction: column; }
+  .btn-primary { width: 100%; justify-content: center; }
+  .detail-grid { grid-template-columns: 1fr; }
+}
 </style>

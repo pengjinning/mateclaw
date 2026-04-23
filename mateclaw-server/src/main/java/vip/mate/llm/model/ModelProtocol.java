@@ -5,6 +5,7 @@ import java.util.Arrays;
 public enum ModelProtocol {
 
     OPENAI_COMPATIBLE("openai-compatible", "OpenAIChatModel"),
+    OPENAI_CHATGPT("openai-chatgpt", "ChatGPTChatModel"),
     ANTHROPIC_MESSAGES("anthropic-messages", "AnthropicChatModel"),
     GEMINI_NATIVE("gemini-native", "GeminiChatModel"),
     DASHSCOPE_NATIVE("dashscope-native", "DashScopeChatModel");

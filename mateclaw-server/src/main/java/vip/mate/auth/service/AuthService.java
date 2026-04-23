@@ -51,11 +51,11 @@ public class AuthService {
                 .eq(UserEntity::getEnabled, true));
 
         if (user == null || !passwordEncoder.matches(request.getPassword(), user.getPassword())) {
-            throw new MateClawException("用户名或密码错误");
+            throw new MateClawException("err.auth.invalid_credentials", "用户名或密码错误");
         }
 
         String token = generateToken(user);
-        return new LoginResponse(token, user.getUsername(), user.getNickname(), user.getRole());
+        return new LoginResponse(user.getId(), token, user.getUsername(), user.getNickname(), user.getRole());
     }
 
     /**
@@ -74,9 +74,12 @@ public class AuthService {
         Long count = userMapper.selectCount(new LambdaQueryWrapper<UserEntity>()
                 .eq(UserEntity::getUsername, user.getUsername()));
         if (count > 0) {
-            throw new MateClawException("用户名已存在: " + user.getUsername());
+            throw new MateClawException("err.auth.username_exists", "用户名已存在: " + user.getUsername());
         }
-        user.setPassword(passwordEncoder.encode(user.getPassword()));
+        if (user.getPassword() == null || user.getPassword().isBlank()) {
+            throw new MateClawException("err.auth.password_required", "Password is required");
+        }
+        user.setPassword(passwordEncoder.encode(user.getPassword().trim()));
         user.setEnabled(true);
         if (user.getRole() == null) {
             user.setRole("user");
@@ -87,15 +90,31 @@ public class AuthService {
     }
 
     /**
+     * Reset password (admin operation — no old password required).
+     * Used when an admin wants to set/reset a member's password.
+     */
+    public void resetPassword(Long userId, String newPassword) {
+        if (newPassword == null || newPassword.isBlank()) {
+            throw new MateClawException("err.auth.password_required", "Password is required");
+        }
+        UserEntity user = userMapper.selectById(userId);
+        if (user == null) {
+            throw new MateClawException("err.auth.user_not_found", "用户不存在");
+        }
+        user.setPassword(passwordEncoder.encode(newPassword.trim()));
+        userMapper.updateById(user);
+    }
+
+    /**
      * 修改密码
      */
     public void changePassword(Long userId, String oldPassword, String newPassword) {
         UserEntity user = userMapper.selectById(userId);
         if (user == null) {
-            throw new MateClawException("用户不存在");
+            throw new MateClawException("err.auth.user_not_found", "用户不存在");
         }
         if (!passwordEncoder.matches(oldPassword, user.getPassword())) {
-            throw new MateClawException("原密码错误");
+            throw new MateClawException("err.auth.wrong_password", "原密码错误");
         }
         user.setPassword(passwordEncoder.encode(newPassword));
         userMapper.updateById(user);
@@ -160,6 +179,13 @@ public class AuthService {
     public UserEntity findByUsername(String username) {
         return userMapper.selectOne(new LambdaQueryWrapper<UserEntity>()
                 .eq(UserEntity::getUsername, username));
+    }
+
+    /**
+     * 根据 ID 查询用户
+     */
+    public UserEntity findById(Long userId) {
+        return userMapper.selectById(userId);
     }
 
     private String generateToken(UserEntity user) {

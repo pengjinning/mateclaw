@@ -9,11 +9,21 @@ import vip.mate.approval.PendingApproval;
 import vip.mate.channel.model.ChannelEntity;
 import vip.mate.channel.notification.ApprovalNotificationService;
 import vip.mate.channel.service.ChannelService;
+import vip.mate.channel.web.ChatStreamTracker;
 import org.springframework.context.ApplicationEventPublisher;
 import vip.mate.memory.event.ConversationCompletedEvent;
+import vip.mate.tts.TtsService;
 import vip.mate.workspace.conversation.ConversationService;
 import vip.mate.workspace.conversation.model.MessageContentPart;
+import vip.mate.workspace.conversation.model.MessageEntity;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.*;
@@ -41,6 +51,9 @@ public class ChannelMessageRouter {
     private final ApprovalService approvalService;
     private final ApprovalNotificationService approvalNotificationService;
     private final ApplicationEventPublisher eventPublisher;
+    private final TtsService ttsService;
+    private final ObjectMapper objectMapper;
+    private final ChatStreamTracker streamTracker;
 
     /** 队列条目：封装消息及其路由上下文 */
     private record QueueEntry(ChannelMessage message, ChannelAdapter adapter, ChannelEntity channelEntity) {}
@@ -82,7 +95,10 @@ public class ChannelMessageRouter {
                                 ChannelSessionStore channelSessionStore,
                                 ApprovalService approvalService,
                                 ApprovalNotificationService approvalNotificationService,
-                                ApplicationEventPublisher eventPublisher) {
+                                ApplicationEventPublisher eventPublisher,
+                                TtsService ttsService,
+                                ObjectMapper objectMapper,
+                                ChatStreamTracker streamTracker) {
         this.agentService = agentService;
         this.conversationService = conversationService;
         this.channelService = channelService;
@@ -90,6 +106,9 @@ public class ChannelMessageRouter {
         this.approvalService = approvalService;
         this.approvalNotificationService = approvalNotificationService;
         this.eventPublisher = eventPublisher;
+        this.ttsService = ttsService;
+        this.objectMapper = objectMapper;
+        this.streamTracker = streamTracker;
     }
 
     // ==================== 防抖辅助类 ====================
@@ -378,8 +397,8 @@ public class ChannelMessageRouter {
             }
             // ======= 审批拦截层结束 =======
 
-            // 确保会话存在
-            conversationService.getOrCreateSharedConversation(conversationId, agentId);
+            // 确保会话存在（workspace 感知）
+            conversationService.getOrCreateSharedConversation(conversationId, agentId, channelEntity.getWorkspaceId());
 
             // 更新渠道会话存储（用于主动推送）
             String replyTarget = resolveReplyTarget(message);
@@ -401,31 +420,75 @@ public class ChannelMessageRouter {
             List<MessageContentPart> parts = message.getContentParts();
             conversationService.saveMessage(conversationId, "user", message.getContent(), parts);
 
-            // 构建 prompt
-            String promptText = buildPromptFromParts(message.getContent(), parts);
+            // 构建 prompt（语音输入时注入场景提示词）
+            String promptText = buildPromptFromParts(message.getContent(), parts, message.getInputMode());
 
-            // 流式路径：渠道实现了 StreamingChannelAdapter 则委托渠道渲染流式事件
-            if (adapter instanceof StreamingChannelAdapter streamingAdapter) {
-                processWithStreaming(message, streamingAdapter, conversationId, agentId, promptText);
-            } else {
-                // 同步路径：直接获取完整回复
-                String reply = agentService.chat(agentId, promptText, conversationId);
-
-                // 检查 chat 过程中是否产生了审批 pending
-                PendingApproval newPending = approvalService.findPendingByConversation(conversationId);
-                if (newPending != null) {
-                    // 有审批需求：不保存 LLM 的审批占位回复到 DB，直接从 pending 元数据构建通知
-                    String approvalNotice = buildApprovalNotice(newPending);
-                    adapter.renderAndSend(replyTarget, approvalNotice);
-                    log.info("[{}] Approval triggered during chat, sent notice (NOT saved to DB): tool={}",
-                            adapter.getChannelType(), newPending.getToolName());
+            // 注册到 ChatStreamTracker：让 graph 节点广播的事件（phase / content_delta / tool_call_* 等）
+            // 能被 ChatConsole observer 订阅到。不注册 → broadcast() 会因 state==null 短路丢弃。
+            // 同步 DB stream_status 让侧栏列表可以识别"该渠道对话正在运行"，从而触发 selectConversation 的 reconnect 分支。
+            streamTracker.register(conversationId);
+            streamTracker.incrementFlux(conversationId);
+            conversationService.updateStreamStatus(conversationId, "running");
+            // 捕获已保存 assistant 的 DB id，供 finally 的 done 事件带出来 —— 前端 useChat.done 处理器
+            // 依赖 data.assistantMessageId 把本地流式 placeholder 的 client-uuid 升级为 DB id，这样
+            // 紧接着 refreshCurrentConversationMessages 的 reconcile 能按 id 干净匹配，不会走"认领"兜底
+            // 导致气泡丢失。
+            Long savedAssistantId = null;
+            try {
+                // 流式路径：渠道实现了 StreamingChannelAdapter 则委托渠道渲染流式事件
+                if (adapter instanceof StreamingChannelAdapter streamingAdapter) {
+                    savedAssistantId = processWithStreaming(message, streamingAdapter, conversationId, agentId, promptText, channelEntity);
                 } else {
-                    // 正常回复：保存并发送
-                    conversationService.saveMessage(conversationId, "assistant", reply);
-                    publishConversationCompletedEvent(agentId, conversationId, message.getContent(), reply);
-                    adapter.renderAndSend(replyTarget, reply);
-                    log.info("[{}] Reply sent to {}: {}chars",
-                            adapter.getChannelType(), replyTarget, reply.length());
+                    // 同步路径：直接获取完整回复
+                    String reply = agentService.chat(agentId, promptText, conversationId);
+
+                    // 检查 chat 过程中是否产生了审批 pending
+                    PendingApproval newPending = approvalService.findPendingByConversation(conversationId);
+                    if (newPending != null) {
+                        // 有审批需求：不保存 LLM 的审批占位回复到 DB，直接从 pending 元数据构建通知
+                        String approvalNotice = buildApprovalNotice(newPending);
+                        adapter.renderAndSend(replyTarget, approvalNotice);
+                        log.info("[{}] Approval triggered during chat, sent notice (NOT saved to DB): tool={}",
+                                adapter.getChannelType(), newPending.getToolName());
+                    } else {
+                        // 正常回复：保存并发送
+                        MessageEntity saved = conversationService.saveMessage(conversationId, "assistant", reply);
+                        savedAssistantId = saved != null ? saved.getId() : null;
+                        publishConversationCompletedEvent(agentId, conversationId, message.getContent(), reply);
+                        adapter.renderAndSend(replyTarget, reply);
+                        log.info("[{}] Reply sent to {}: {}chars",
+                                adapter.getChannelType(), replyTarget, reply.length());
+
+                        // 给 observer 推送完整的 assistant 消息以便前端一次性渲染为气泡
+                        // （在 content_delta 事件可能没开的同步路径下作为兜底）
+                        Map<String, Object> msgCompletePayload = new HashMap<>();
+                        msgCompletePayload.put("conversationId", conversationId);
+                        msgCompletePayload.put("content", reply);
+                        if (savedAssistantId != null) {
+                            msgCompletePayload.put("assistantMessageId", savedAssistantId);
+                        }
+                        msgCompletePayload.put("timestamp", System.currentTimeMillis());
+                        streamTracker.broadcastObject(conversationId, "message_complete", msgCompletePayload);
+
+                        // 语音回复：异步 TTS 合成并追加发送（先文本后语音，不阻塞）
+                        maybeGenerateVoiceReply(message, adapter, replyTarget, conversationId, reply, channelEntity);
+                    }
+                }
+            } finally {
+                // 广播 done 事件让 observer 前端收尾（HashMap 允许 null 值缺失，Map.of 不允许）
+                Map<String, Object> donePayload = new HashMap<>();
+                donePayload.put("conversationId", conversationId);
+                donePayload.put("status", "completed");
+                if (savedAssistantId != null) {
+                    donePayload.put("assistantMessageId", savedAssistantId);
+                }
+                donePayload.put("timestamp", System.currentTimeMillis());
+                streamTracker.broadcastObject(conversationId, "done", donePayload);
+                streamTracker.completeAndConsumeIfLast(conversationId);
+                try {
+                    conversationService.updateStreamStatus(conversationId, "idle");
+                } catch (Exception e) {
+                    log.debug("Failed to reset stream_status for {}: {}", conversationId, e.getMessage());
                 }
             }
 
@@ -452,8 +515,9 @@ public class ChannelMessageRouter {
      * - StreamingChannelAdapter 负责渲染（AI Card / 卡片更新 / 文本累积等）
      * - Router 负责后续的审批检查、消息持久化、事件发布
      */
-    private void processWithStreaming(ChannelMessage message, StreamingChannelAdapter streamingAdapter,
-                                      String conversationId, Long agentId, String promptText) {
+    private Long processWithStreaming(ChannelMessage message, StreamingChannelAdapter streamingAdapter,
+                                      String conversationId, Long agentId, String promptText,
+                                      ChannelEntity channelEntity) {
         String channelType = streamingAdapter.getChannelType();
         log.info("[{}] Streaming processing started: conversationId={}", channelType, conversationId);
 
@@ -473,9 +537,17 @@ public class ChannelMessageRouter {
                 log.info("[{}] Approval triggered during streaming (NOT saved to DB): tool={}",
                         channelType, newPending.getToolName());
             } else if (finalContent != null && !finalContent.isBlank()) {
-                conversationService.saveMessage(conversationId, "assistant", finalContent);
+                MessageEntity saved = conversationService.saveMessage(conversationId, "assistant", finalContent);
                 publishConversationCompletedEvent(agentId, conversationId, promptText, finalContent);
                 log.info("[{}] Streaming completed: contentLen={}", channelType, finalContent.length());
+
+                // 流式回复完成后也触发语音回复
+                String replyTarget = resolveReplyTarget(message);
+                if (replyTarget != null) {
+                    maybeGenerateVoiceReply(message, streamingAdapter, replyTarget,
+                            conversationId, finalContent, channelEntity);
+                }
+                return saved != null ? saved.getId() : null;
             }
 
         } catch (Exception e) {
@@ -488,6 +560,7 @@ public class ChannelMessageRouter {
                 log.error("[{}] Failed to send streaming error message: {}", channelType, sendErr.getMessage());
             }
         }
+        return null;
     }
 
     // ==================== 审批重放 ====================
@@ -566,11 +639,11 @@ public class ChannelMessageRouter {
         String conversationId = buildConversationId(message);
         String username = message.getSenderName() != null ? message.getSenderName() : message.getSenderId();
 
-        conversationService.getOrCreateConversation(conversationId, agentId, username);
+        conversationService.getOrCreateConversation(conversationId, agentId, username, channelEntity.getWorkspaceId());
         List<MessageContentPart> parts = message.getContentParts();
         conversationService.saveMessage(conversationId, "user", message.getContent(), parts);
 
-        String promptText = buildPromptFromParts(message.getContent(), parts);
+        String promptText = buildPromptFromParts(message.getContent(), parts, message.getInputMode());
         return agentService.chatStream(agentId, promptText, conversationId);
     }
 
@@ -615,6 +688,10 @@ public class ChannelMessageRouter {
         channelExecutors.clear();
         channelQueues.clear();
         sessionLocks.clear();
+
+        // 4. 关闭语音回复线程池
+        voiceReplyExecutor.shutdownNow();
+
         log.info("ChannelMessageRouter shutdown complete");
     }
 
@@ -644,8 +721,9 @@ public class ChannelMessageRouter {
     /**
      * 从 contentParts 构建完整 prompt 文本。
      * 文本直接拼接；媒体类型生成描述性占位符，让 Agent 知道用户发送了什么。
+     * 语音输入时注入场景提示词，引导 Agent 用简短口语化方式回复。
      */
-    private String buildPromptFromParts(String fallbackContent, List<MessageContentPart> parts) {
+    private String buildPromptFromParts(String fallbackContent, List<MessageContentPart> parts, String inputMode) {
         if (parts == null || parts.isEmpty()) {
             return fallbackContent != null ? fallbackContent : "";
         }
@@ -662,7 +740,14 @@ public class ChannelMessageRouter {
             }
         }
         String result = sb.toString().trim();
-        return result.isEmpty() ? (fallbackContent != null ? fallbackContent : "") : result;
+        if (result.isEmpty()) {
+            return fallbackContent != null ? fallbackContent : "";
+        }
+        // 语音场景：注入提示词让 Agent 回复更简短口语化
+        if ("voice".equals(inputMode)) {
+            result = "[用户通过语音输入，请用简短口语化的方式回复]\n" + result;
+        }
+        return result;
     }
 
     private void appendLine(StringBuilder sb, String text) {
@@ -680,5 +765,113 @@ public class ChannelMessageRouter {
 
     private String safe(String s) {
         return s == null ? "" : s;
+    }
+
+    // ==================== 语音回复（TTS）====================
+
+    /** TTS 异步工作线程池 */
+    private final ExecutorService voiceReplyExecutor = Executors.newFixedThreadPool(2, r -> {
+        Thread t = new Thread(r, "voice-reply-worker");
+        t.setDaemon(true);
+        return t;
+    });
+
+    /**
+     * 根据消息上下文和渠道配置，判断是否需要生成语音回复。
+     * 若需要，异步合成 TTS 并通过渠道发送音频文件。
+     * <p>
+     * 设计原则（借鉴 OpenClaw）：
+     * - 文本先行，语音异步追加，不阻塞用户体验
+     * - 短回复（<10字）跳过 TTS（不值得合成）
+     * - TTS 失败静默降级，不影响已发出的文本回复
+     */
+    private void maybeGenerateVoiceReply(ChannelMessage message, ChannelAdapter adapter,
+                                          String replyTarget, String conversationId,
+                                          String replyText, ChannelEntity channelEntity) {
+        if (!shouldGenerateVoiceReply(message, channelEntity, replyText)) {
+            return;
+        }
+
+        voiceReplyExecutor.submit(() -> {
+            try {
+                // 读取渠道级语音配置
+                Map<String, Object> channelConfig = parseChannelConfig(channelEntity.getConfigJson());
+                String voiceName = channelConfig.getOrDefault("voice_name", "").toString();
+                double voiceSpeed = 1.0;
+                Object speedObj = channelConfig.get("voice_speed");
+                if (speedObj instanceof Number n) voiceSpeed = n.doubleValue();
+
+                // 调用 TtsService 合成
+                Map<String, Object> result = ttsService.synthesize(
+                        conversationId, replyText,
+                        voiceName.isBlank() ? null : voiceName,
+                        voiceSpeed, "mp3");
+
+                if (!Boolean.TRUE.equals(result.get("success"))) {
+                    log.debug("[voice-reply] TTS synthesis failed: {}", result.get("error"));
+                    return;
+                }
+
+                // 构建音频 MessageContentPart
+                String audioUrl = (String) result.get("audioUrl");
+                String fileName = Paths.get(audioUrl).getFileName().toString();
+                Path audioPath = Paths.get("data", "chat-uploads", conversationId, fileName);
+
+                if (!Files.exists(audioPath)) {
+                    log.warn("[voice-reply] TTS output file not found: {}", audioPath);
+                    return;
+                }
+
+                MessageContentPart audioPart = new MessageContentPart();
+                audioPart.setType("audio");
+                audioPart.setFileName(fileName);
+                audioPart.setPath(audioPath.toString());
+                audioPart.setContentType("audio/mpeg");
+
+                adapter.sendContentParts(replyTarget, List.of(audioPart));
+                log.info("[voice-reply] Sent to {} via {}: {} ({}KB)",
+                        replyTarget, adapter.getChannelType(), fileName,
+                        Files.size(audioPath) / 1024);
+
+            } catch (Exception e) {
+                // 静默降级：TTS 失败不影响已发出的文本回复
+                log.warn("[voice-reply] Failed for conversation {}: {}", conversationId, e.getMessage());
+            }
+        });
+    }
+
+    /**
+     * 判断是否需要为此消息生成语音回复
+     */
+    private boolean shouldGenerateVoiceReply(ChannelMessage message, ChannelEntity channelEntity,
+                                              String replyText) {
+        // 1. TTS 全局开关
+        if (!ttsService.isTtsEnabled()) return false;
+
+        // 2. 回复内容过短或为空，跳过 TTS（借鉴 OpenClaw: <10字不合成）
+        if (replyText == null || replyText.trim().length() < 10) return false;
+
+        // 3. 读取渠道级语音回复模式
+        Map<String, Object> channelConfig = parseChannelConfig(channelEntity.getConfigJson());
+        String voiceMode = channelConfig.getOrDefault("voice_reply_mode", "off").toString();
+
+        if ("off".equals(voiceMode)) return false;
+        if ("always".equals(voiceMode)) return true;
+
+        // 4. auto 模式：仅当用户通过语音输入时回语音
+        return "auto".equals(voiceMode) && "voice".equals(message.getInputMode());
+    }
+
+    /**
+     * 解析 Channel 的 configJson 为 Map
+     */
+    private Map<String, Object> parseChannelConfig(String configJson) {
+        if (configJson == null || configJson.isBlank()) return Map.of();
+        try {
+            return objectMapper.readValue(configJson, new TypeReference<>() {});
+        } catch (Exception e) {
+            log.debug("[voice-reply] Failed to parse channel config: {}", e.getMessage());
+            return Map.of();
+        }
     }
 }

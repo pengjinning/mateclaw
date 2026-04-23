@@ -34,22 +34,63 @@ public class ConversationController {
      */
     @Operation(summary = "获取会话列表")
     @GetMapping
-    public R<List<ConversationVO>> list(Authentication auth) {
+    public R<List<ConversationVO>> list(
+            Authentication auth,
+            @RequestHeader(value = "X-Workspace-Id", required = false) Long workspaceId) {
         String username = auth != null ? auth.getName() : "anonymous";
-        return R.ok(conversationService.listConversations(username));
+        return R.ok(conversationService.listConversations(username, workspaceId));
     }
 
     /**
-     * 获取指定会话的消息历史
+     * 获取指定会话的消息历史（支持分页）。
+     * <p>
+     * 不传 limit 时返回全部消息（向后兼容）。
+     * 传 limit 时返回最新 limit 条 + hasMore 标志。
+     * 传 beforeId + limit 时返回该 ID 之前的 limit 条（上拉加载更早消息）。
      */
-    @Operation(summary = "获取会话消息历史")
+    @Operation(summary = "获取会话消息历史（支持分页）")
     @GetMapping("/{conversationId}/messages")
-    public R<List<MessageVO>> listMessages(@PathVariable String conversationId, Authentication auth) {
+    public R<?> listMessages(@PathVariable String conversationId,
+                             @RequestParam(required = false) Long beforeId,
+                             @RequestParam(required = false) Integer limit,
+                             Authentication auth) {
         String username = auth != null ? auth.getName() : "anonymous";
         if (!conversationService.isConversationOwner(conversationId, username)) {
             return R.fail("无权访问该会话");
         }
-        return R.ok(conversationService.listMessageViews(conversationId));
+
+        // 向后兼容：不传 limit 则返回全部消息（旧前端行为）
+        if (limit == null || limit <= 0) {
+            return R.ok(conversationService.listMessageViews(conversationId));
+        }
+
+        // 分页模式
+        java.util.List<vip.mate.workspace.conversation.model.MessageEntity> messages;
+        boolean hasMore;
+
+        if (beforeId != null) {
+            // 上拉加载：取 beforeId 之前的 limit+1 条，多取一条用于判断 hasMore
+            messages = conversationService.listMessagesBefore(conversationId, beforeId, limit + 1);
+            hasMore = messages.size() > limit;
+            if (hasMore) {
+                messages = messages.subList(messages.size() - limit, messages.size());
+            }
+        } else {
+            // 初始加载：最新 limit 条
+            long total = conversationService.countMessages(conversationId);
+            messages = conversationService.listRecentMessages(conversationId, limit);
+            hasMore = total > limit;
+        }
+
+        java.util.List<vip.mate.workspace.conversation.vo.MessageVO> views = messages.stream()
+                .map(m -> vip.mate.workspace.conversation.vo.MessageVO.from(
+                        m, conversationService.parseMessageParts(m), conversationService.renderMessageContent(m)))
+                .toList();
+
+        return R.ok(java.util.Map.of(
+                "messages", views,
+                "hasMore", hasMore
+        ));
     }
 
     /**
@@ -63,6 +104,24 @@ public class ConversationController {
             return R.fail("无权操作该会话");
         }
         conversationService.deleteConversation(conversationId);
+        return R.ok();
+    }
+
+    /**
+     * 重命名会话
+     */
+    @Operation(summary = "重命名会话")
+    @PutMapping("/{conversationId}/title")
+    public R<Void> rename(@PathVariable String conversationId, @RequestBody Map<String, String> body, Authentication auth) {
+        String username = auth != null ? auth.getName() : "anonymous";
+        if (!conversationService.isConversationOwner(conversationId, username)) {
+            return R.fail("无权操作该会话");
+        }
+        String title = body.getOrDefault("title", "").trim();
+        if (title.isEmpty() || title.length() > 100) {
+            return R.fail("标题不合法");
+        }
+        conversationService.renameConversation(conversationId, title);
         return R.ok();
     }
 

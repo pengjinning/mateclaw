@@ -32,6 +32,17 @@ export type SSEEventType =
   | 'turn_interrupted'
   | 'queued_input_accepted'
   | 'queued_input_started'
+  // 异步任务事件
+  | 'async_task_progress'
+  | 'async_task_completed'
+  // TTS 事件
+  | 'tts_ready'
+  // 浏览器执行事件
+  | 'browser_action'
+  // Agent 委派事件
+  | 'delegation_start'
+  | 'delegation_progress'
+  | 'delegation_end'
 
 export interface SSEEvent {
   type: SSEEventType

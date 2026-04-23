@@ -341,13 +341,16 @@ public class StateGraphReActAgent extends BaseAgent implements StructuredStreamC
 
         // 上下文窗口管理：裁剪超出模型 context window 的历史（含当前消息预算）
         if (conversationWindowManager != null) {
+            Long parsedAgentId = null;
+            try { parsedAgentId = Long.valueOf(agentId); } catch (Exception ignored) {}
             historyMessages = conversationWindowManager.fitToWindow(
                     historyMessages,
                     systemPrompt != null ? systemPrompt : "",
                     userMessage,
                     maxInputTokens,
                     chatModel,
-                    conversationId);
+                    conversationId,
+                    parsedAgentId);
         }
 
         List<Message> messages = new ArrayList<>(historyMessages);
@@ -359,10 +362,14 @@ public class StateGraphReActAgent extends BaseAgent implements StructuredStreamC
         inputs.put(USER_MESSAGE, userMessage);
         inputs.put(CONVERSATION_ID, conversationId);
         inputs.put(AGENT_ID, agentId != null ? agentId : "");
+        inputs.put(WORKSPACE_BASE_PATH, workspaceBasePath != null ? workspaceBasePath : "");
         inputs.put(SYSTEM_PROMPT, systemPrompt != null ? systemPrompt : "你是一个有帮助的AI助手。");
         inputs.put(MESSAGES, messages);
-        // 迭代控制
-        inputs.put(MAX_ITERATIONS, maxIterations);
+        // 迭代控制：深度思考模式允许更多迭代（思考需要更多轮工具调用）
+        String thinkingLevel = vip.mate.agent.ThinkingLevelHolder.get();
+        boolean thinkingOn = thinkingLevel != null && !"off".equalsIgnoreCase(thinkingLevel);
+        int effectiveMaxIterations = thinkingOn ? maxIterations + 5 : maxIterations;
+        inputs.put(MAX_ITERATIONS, effectiveMaxIterations);
         inputs.put(CURRENT_ITERATION, 0);
         // 初始化新字段
         inputs.put(TOOL_CALL_COUNT, 0);

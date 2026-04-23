@@ -39,6 +39,16 @@ public class ModelProviderEntity {
 
     private Boolean requireApiKey;
 
+    private String authType;
+
+    private String oauthAccessToken;
+
+    private String oauthRefreshToken;
+
+    private Long oauthExpiresAt;
+
+    private String oauthAccountId;
+
     @TableField(fill = FieldFill.INSERT)
     private LocalDateTime createTime;
 

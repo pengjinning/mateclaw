@@ -59,11 +59,16 @@ export function classifyHttpError(status: number, body?: any): ChatErrorInfo {
  * 后端通过 SSE error 事件的 errorType 字段传递
  */
 const BACKEND_ERROR_TYPE_MAP: Record<string, { category: ChatErrorCategory; retryable: boolean }> = {
-  RATE_LIMIT:     { category: 'rate_limit',          retryable: true },
-  SERVER_ERROR:   { category: 'server_error',        retryable: true },
-  PROMPT_TOO_LONG:{ category: 'bad_request',         retryable: false },
-  AUTH_ERROR:     { category: 'auth_expired',        retryable: false },
-  UNKNOWN:        { category: 'unknown',             retryable: true },
+  RATE_LIMIT:           { category: 'rate_limit',          retryable: true },
+  SERVER_ERROR:         { category: 'server_error',        retryable: true },
+  PROMPT_TOO_LONG:      { category: 'bad_request',         retryable: false },
+  AUTH_ERROR:           { category: 'auth_expired',        retryable: false },
+  // 后端 ErrorType.CLIENT_ERROR 对应 HTTP 400 类错误（比如模型不支持 tools、参数格式错误）。
+  // 归类到 bad_request，配合 MessageBubble 优先展示 rawMessage，
+  // 让后端 extractUserFriendlyError 返回的具体中文提示能真正显示出来。
+  CLIENT_ERROR:         { category: 'bad_request',         retryable: false },
+  THINKING_BLOCK_ERROR: { category: 'bad_request',         retryable: true },
+  UNKNOWN:              { category: 'unknown',             retryable: true },
 }
 
 /**

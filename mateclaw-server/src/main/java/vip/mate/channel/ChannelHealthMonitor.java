@@ -5,6 +5,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
@@ -12,10 +13,14 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * 渠道健康监控
  * <p>
- * 每 5 分钟检查所有活跃渠道适配器的健康状态：
+ * 每 1 分钟（RFC-024 Change 2）检查所有活跃渠道适配器：
  * - 连接状态为 ERROR 超过 5 分钟 → 触发重启
- * - 连接状态为 CONNECTED 但超过 1 小时无事件 → 标记 stale 并重启
+ * - 连接状态为 CONNECTED 但超过 {@link ChannelAdapter#stalenessThreshold()} 无事件 → stale 重启
  * - 每渠道每小时最多 10 次重启，cooldown 2 分钟
+ * <p>
+ * <b>RFC-024</b>：stale 阈值改为读 adapter 自声明（默认 60min，WeChat 类长轮询 5min），
+ * 检查频率从 5min 降到 1min，让短阈值能真正生效；
+ * 配合 {@code AbstractChannelAdapter.touchActivity()} 精准刷新活跃时间。
  *
  * @author MateClaw Team
  */
@@ -29,8 +34,11 @@ public class ChannelHealthMonitor {
     /** 错误状态超过此时间触发重启（毫秒） */
     private static final long ERROR_THRESHOLD_MS = 5 * 60 * 1000;
 
-    /** 连接正常但无事件超过此时间视为 stale（毫秒） */
-    private static final long STALE_THRESHOLD_MS = 60 * 60 * 1000;
+    /**
+     * 兜底 stale 阈值（当 adapter 未覆盖 {@link ChannelAdapter#stalenessThreshold()} 时使用）。
+     * RFC-024 Change 2 之前是硬编码 60min；现在由 adapter 自行声明。
+     */
+    private static final Duration DEFAULT_STALE_THRESHOLD = Duration.ofMinutes(60);
 
     /** 每渠道每小时最大重启次数 */
     private static final int MAX_RESTARTS_PER_HOUR = 10;
@@ -41,7 +49,7 @@ public class ChannelHealthMonitor {
     /** 重启历史记录（channelId → 重启时间列表） */
     private final ConcurrentHashMap<Long, List<Instant>> restartHistory = new ConcurrentHashMap<>();
 
-    @Scheduled(fixedRate = 300_000) // 每 5 分钟
+    @Scheduled(fixedRate = 60_000)   // RFC-024 Change 2: 每 1 分钟（原 5 分钟）
     public void checkHealth() {
         Collection<ChannelAdapter> adapters = channelManager.getActiveAdapters();
         if (adapters.isEmpty()) {
@@ -70,10 +78,18 @@ public class ChannelHealthMonitor {
                 reason = String.format("ERROR state for %ds", sinceLastEvent / 1000);
             }
 
-            // 检查 2：CONNECTED 但长时间无事件（stale）
+            // 检查 2：CONNECTED 但长时间无事件（stale）— RFC-024 读 adapter 自声明阈值
+            Duration staleThreshold;
+            try {
+                Duration d = adapter.stalenessThreshold();
+                staleThreshold = (d == null || d.isNegative() || d.isZero()) ? DEFAULT_STALE_THRESHOLD : d;
+            } catch (Exception ex) {
+                staleThreshold = DEFAULT_STALE_THRESHOLD;
+            }
             if (reason == null && state == AbstractChannelAdapter.ConnectionState.CONNECTED
-                    && sinceLastEvent > STALE_THRESHOLD_MS) {
-                reason = String.format("stale connection, no events for %dm", sinceLastEvent / 60000);
+                    && sinceLastEvent > staleThreshold.toMillis()) {
+                reason = String.format("stale connection, no events for %ds (threshold=%ds)",
+                        sinceLastEvent / 1000, staleThreshold.toSeconds());
             }
 
             if (reason != null) {

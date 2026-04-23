@@ -6,7 +6,7 @@
 
     <groupId>vip.mate</groupId>
     <artifactId>mateclaw-server</artifactId>
-    <version>1.0.314-SNAPSHOT</version>
+    <version>1.1.0</version>
     <packaging>jar</packaging>
 
     <name>MateClaw Server</name>
@@ -54,6 +54,13 @@
     </dependencyManagement>
 
     <dependencies>
+        <!-- ===== MateClaw Plugin API ===== -->
+        <dependency>
+            <groupId>vip.mate</groupId>
+            <artifactId>mateclaw-plugin-api</artifactId>
+            <version>1.1.0-SNAPSHOT</version>
+        </dependency>
+
         <!-- ===== Web MVC（不引入 WebFlux，避免自动切换为响应式模式） ===== -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
@@ -242,6 +249,39 @@
                     <artifactId>opus-java</artifactId>
                 </exclusion>
             </exclusions>
+        </dependency>
+
+        <!-- ===== Spring WebSocket（Talk Mode） ===== -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-websocket</artifactId>
+        </dependency>
+
+        <!-- ===== Slack SDK（Socket Mode + Web API） ===== -->
+        <dependency>
+            <groupId>com.slack.api</groupId>
+            <artifactId>slack-api-client</artifactId>
+            <version>1.44.2</version>
+        </dependency>
+        <dependency>
+            <groupId>com.slack.api</groupId>
+            <artifactId>bolt-socket-mode</artifactId>
+            <version>1.44.2</version>
+        </dependency>
+        <dependency>
+            <groupId>org.glassfish.tyrus.bundles</groupId>
+            <artifactId>tyrus-standalone-client</artifactId>
+            <version>2.2.0</version>
+        </dependency>
+
+        <!-- ===== Database Migration (Flyway) ===== -->
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-mysql</artifactId>
         </dependency>
 
         <!-- ===== Spring Boot Test ===== -->

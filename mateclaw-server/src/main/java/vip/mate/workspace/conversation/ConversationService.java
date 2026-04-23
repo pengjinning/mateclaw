@@ -23,6 +23,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
@@ -50,11 +52,23 @@ public class ConversationService {
      * 获取用户的会话列表（返回 VO，包含 agentName/agentIcon/status）
      */
     public List<ConversationVO> listConversations(String username) {
+        return listConversations(username, null);
+    }
+
+    /**
+     * 获取用户的会话列表（按工作区过滤）
+     */
+    public List<ConversationVO> listConversations(String username, Long workspaceId) {
         // 同时返回当前用户的会话 和 定时任务（system）产生的会话
-        List<ConversationEntity> entities = conversationMapper.selectList(
-                new LambdaQueryWrapper<ConversationEntity>()
-                        .in(ConversationEntity::getUsername, username, SYSTEM_USER)
-                        .orderByDesc(ConversationEntity::getLastActiveTime));
+        // 排除子会话（委派产生的子会话不在侧边栏显示）
+        LambdaQueryWrapper<ConversationEntity> wrapper = new LambdaQueryWrapper<ConversationEntity>()
+                .in(ConversationEntity::getUsername, username, SYSTEM_USER)
+                .isNull(ConversationEntity::getParentConversationId)
+                .orderByDesc(ConversationEntity::getLastActiveTime);
+        if (workspaceId != null) {
+            wrapper.eq(ConversationEntity::getWorkspaceId, workspaceId);
+        }
+        List<ConversationEntity> entities = conversationMapper.selectList(wrapper);
 
         if (entities.isEmpty()) {
             return List.of();
@@ -86,10 +100,19 @@ public class ConversationService {
     }
 
     /**
-     * 获取或创建会话
+     * 获取或创建会话（向后兼容，默认 workspace 1）
      */
     @Transactional
     public ConversationEntity getOrCreateConversation(String conversationId, Long agentId, String username) {
+        return getOrCreateConversation(conversationId, agentId, username, 1L);
+    }
+
+    /**
+     * 获取或创建会话（workspace 感知）
+     */
+    @Transactional
+    public ConversationEntity getOrCreateConversation(String conversationId, Long agentId,
+                                                       String username, Long workspaceId) {
         ConversationEntity conv = conversationMapper.selectOne(new LambdaQueryWrapper<ConversationEntity>()
                 .eq(ConversationEntity::getConversationId, conversationId));
         if (conv == null) {
@@ -97,6 +120,7 @@ public class ConversationService {
             conv.setConversationId(conversationId);
             conv.setAgentId(agentId);
             conv.setUsername(username != null ? username : "anonymous");
+            conv.setWorkspaceId(workspaceId != null ? workspaceId : 1L);
             conv.setTitle("新对话");
             conv.setMessageCount(0);
             conv.setLastActiveTime(LocalDateTime.now());
@@ -104,6 +128,20 @@ public class ConversationService {
         } else if (!conv.getUsername().equals(username)) {
             throw new IllegalArgumentException("无权操作该会话");
         }
+        return conv;
+    }
+
+    /**
+     * 创建子会话（委派场景），关联父会话 ID。
+     */
+    @Transactional
+    public ConversationEntity createChildConversation(String childConversationId, Long agentId,
+                                                        String username, Long workspaceId,
+                                                        String parentConversationId) {
+        ConversationEntity conv = getOrCreateConversation(childConversationId, agentId, username, workspaceId);
+        conv.setParentConversationId(parentConversationId);
+        conv.setTitle("子任务");
+        conversationMapper.updateById(conv);
         return conv;
     }
 
@@ -116,6 +154,14 @@ public class ConversationService {
      */
     @Transactional
     public ConversationEntity getOrCreateSharedConversation(String conversationId, Long agentId) {
+        return getOrCreateSharedConversation(conversationId, agentId, null);
+    }
+
+    /**
+     * 获取或创建共享渠道会话（workspace 感知）
+     */
+    @Transactional
+    public ConversationEntity getOrCreateSharedConversation(String conversationId, Long agentId, Long workspaceId) {
         ConversationEntity conv = conversationMapper.selectOne(new LambdaQueryWrapper<ConversationEntity>()
                 .eq(ConversationEntity::getConversationId, conversationId));
         if (conv == null) {
@@ -123,6 +169,7 @@ public class ConversationService {
             conv.setConversationId(conversationId);
             conv.setAgentId(agentId);
             conv.setUsername(SYSTEM_USER);
+            conv.setWorkspaceId(workspaceId != null ? workspaceId : 1L);
             conv.setTitle("新对话");
             conv.setMessageCount(0);
             conv.setLastActiveTime(LocalDateTime.now());
@@ -233,6 +280,19 @@ public class ConversationService {
     }
 
     /**
+     * 重命名会话
+     */
+    @Transactional
+    public void renameConversation(String conversationId, String title) {
+        ConversationEntity conv = conversationMapper.selectOne(new LambdaQueryWrapper<ConversationEntity>()
+                .eq(ConversationEntity::getConversationId, conversationId));
+        if (conv != null) {
+            conv.setTitle(title);
+            conversationMapper.updateById(conv);
+        }
+    }
+
+    /**
      * 更新会话的流状态（running / idle）
      */
     @Transactional
@@ -271,6 +331,61 @@ public class ConversationService {
                 .eq(MessageEntity::getConversationId, conversationId)
                 .orderByAsc(MessageEntity::getCreateTime)
                 .orderByAsc(MessageEntity::getId));
+    }
+
+    /**
+     * 加载最近 N 条消息（倒序取出后翻转为正序）。
+     * 利用复合索引 (conversation_id, create_time) 高效分页。
+     */
+    public List<MessageEntity> listRecentMessages(String conversationId, int lastN) {
+        List<MessageEntity> recent = messageMapper.selectList(
+                new LambdaQueryWrapper<MessageEntity>()
+                        .eq(MessageEntity::getConversationId, conversationId)
+                        .orderByDesc(MessageEntity::getCreateTime)
+                        .orderByDesc(MessageEntity::getId)
+                        .last("LIMIT " + lastN));
+        Collections.reverse(recent);
+        return recent;
+    }
+
+    /**
+     * 分页加载指定 ID 之前的消息（用于前端上拉加载更早消息）。
+     * 返回倒序结果，调用方需自行 reverse。
+     */
+    public List<MessageEntity> listMessagesBefore(String conversationId, Long beforeId, int limit) {
+        List<MessageEntity> results = messageMapper.selectList(
+                new LambdaQueryWrapper<MessageEntity>()
+                        .eq(MessageEntity::getConversationId, conversationId)
+                        .lt(MessageEntity::getId, beforeId)
+                        .orderByDesc(MessageEntity::getCreateTime)
+                        .orderByDesc(MessageEntity::getId)
+                        .last("LIMIT " + limit));
+        Collections.reverse(results);
+        return results;
+    }
+
+    /**
+     * 查询会话消息总数。
+     */
+    public long countMessages(String conversationId) {
+        return messageMapper.selectCount(
+                new LambdaQueryWrapper<MessageEntity>()
+                        .eq(MessageEntity::getConversationId, conversationId));
+    }
+
+    /**
+     * 将压缩摘要持久化为 role=system 的特殊消息。
+     * 下次加载历史时识别此消息，跳过它之前的已压缩消息。
+     */
+    public void saveCompressionSummary(String conversationId, String summary, int compressedCount) {
+        MessageEntity entity = new MessageEntity();
+        entity.setConversationId(conversationId);
+        entity.setRole("system");
+        entity.setContent(summary);
+        entity.setStatus("completed");
+        entity.setMetadata("{\"type\":\"compression_summary\",\"compressedCount\":" + compressedCount + "}");
+        messageMapper.insert(entity);
+        log.info("[Conversation] Saved compression summary for conv={}, compressedCount={}", conversationId, compressedCount);
     }
 
     public List<MessageVO> listMessageViews(String conversationId) {

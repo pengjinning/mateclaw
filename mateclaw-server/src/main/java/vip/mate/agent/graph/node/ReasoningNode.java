@@ -17,6 +17,7 @@ import org.springframework.ai.tool.ToolCallback;
 import org.springframework.util.StringUtils;
 import vip.mate.agent.AgentToolSet;
 import vip.mate.agent.GraphEventPublisher;
+import vip.mate.agent.ThinkingLevelHolder;
 import vip.mate.agent.graph.NodeStreamingChatHelper;
 import vip.mate.agent.context.ConversationWindowManager;
 import vip.mate.agent.context.RuntimeContextInjector;
@@ -60,6 +61,8 @@ public class ReasoningNode implements NodeAction {
     private final ConversationWindowManager conversationWindowManager;
     private final ChatStreamTracker streamTracker;
     private final int maxOutputTokens;
+    /** Wiki 相关性注入（可选，null 时跳过） */
+    private final vip.mate.wiki.service.WikiContextService wikiContextService;
 
     public ReasoningNode(ChatModel chatModel, AgentToolSet toolSet, String reasoningEffort,
                          NodeStreamingChatHelper streamingHelper,
@@ -73,6 +76,15 @@ public class ReasoningNode implements NodeAction {
                          NodeStreamingChatHelper streamingHelper,
                          ConversationWindowManager conversationWindowManager,
                          ChatStreamTracker streamTracker, int maxOutputTokens) {
+        this(chatModel, toolSet, reasoningEffort, streamingHelper, conversationWindowManager,
+                streamTracker, maxOutputTokens, null);
+    }
+
+    public ReasoningNode(ChatModel chatModel, AgentToolSet toolSet, String reasoningEffort,
+                         NodeStreamingChatHelper streamingHelper,
+                         ConversationWindowManager conversationWindowManager,
+                         ChatStreamTracker streamTracker, int maxOutputTokens,
+                         vip.mate.wiki.service.WikiContextService wikiContextService) {
         this.chatModel = chatModel;
         this.toolCallbacks = toolSet.callbacks();
         this.reasoningEffort = reasoningEffort;
@@ -80,6 +92,7 @@ public class ReasoningNode implements NodeAction {
         this.conversationWindowManager = conversationWindowManager;
         this.streamTracker = streamTracker;
         this.maxOutputTokens = maxOutputTokens > 0 ? maxOutputTokens : DEFAULT_MAX_OUTPUT_TOKENS;
+        this.wikiContextService = wikiContextService;
     }
 
     public ReasoningNode(ChatModel chatModel, AgentToolSet toolSet, String reasoningEffort,
@@ -110,6 +123,7 @@ public class ReasoningNode implements NodeAction {
         this.conversationWindowManager = null;
         this.streamTracker = null;
         this.maxOutputTokens = DEFAULT_MAX_OUTPUT_TOKENS;
+        this.wikiContextService = null;
     }
 
     @Override
@@ -171,27 +185,34 @@ public class ReasoningNode implements NodeAction {
             messages = trimmed;
         }
 
+        String workspaceBasePath = state.value(vip.mate.agent.graph.state.MateClawStateKeys.WORKSPACE_BASE_PATH, "");
         List<Message> promptMessages = new ArrayList<>();
         promptMessages.add(new SystemMessage(systemPrompt));
-        promptMessages.add(new UserMessage(RuntimeContextInjector.buildContextMessage()));
+        promptMessages.add(new UserMessage(RuntimeContextInjector.buildContextMessage(workspaceBasePath)));
+
+        // Wiki 相关性注入：根据用户消息提取相关页面摘要
+        if (wikiContextService != null) {
+            String agentIdStr = state.value(MateClawStateKeys.AGENT_ID, "");
+            String userMsg = state.value(MateClawStateKeys.USER_MESSAGE, "");
+            try {
+                Long parsedAgentId = Long.parseLong(agentIdStr);
+                String wikiRelevant = wikiContextService.buildRelevantContext(parsedAgentId, userMsg);
+                if (wikiRelevant != null && !wikiRelevant.isBlank()) {
+                    promptMessages.add(new UserMessage(wikiRelevant));
+                }
+            } catch (NumberFormatException ignored) {
+                // agentId 无法解析时跳过 wiki 注入
+            }
+        }
+
         promptMessages.addAll(messages);
 
-        ChatOptions options;
-        if (StringUtils.hasText(reasoningEffort)) {
-            OpenAiChatOptions oaiOpts = OpenAiChatOptions.builder()
-                    .toolCallbacks(toolCallbacks)
-                    .reasoningEffort(reasoningEffort)
-                    .maxTokens(maxOutputTokens)
-                    .build();
-            oaiOpts.setInternalToolExecutionEnabled(false);
-            options = oaiOpts;
-        } else {
-            options = ToolCallingChatOptions.builder()
-                    .toolCallbacks(toolCallbacks)
-                    .internalToolExecutionEnabled(false)
-                    .maxTokens(maxOutputTokens)
-                    .build();
-        }
+        // 请求级思考深度覆盖（ThinkingLevelHolder 由 AgentService 设置）
+        String effectiveReasoning = resolveEffectiveReasoningEffort();
+        log.info("[ReasoningNode] thinkingLevel={}, effectiveReasoningEffort={}, nodeDefault={}",
+                ThinkingLevelHolder.get(), effectiveReasoning, this.reasoningEffort);
+
+        ChatOptions options = buildChatOptions(effectiveReasoning);
 
         Prompt prompt = new Prompt(promptMessages, options);
 
@@ -222,7 +243,7 @@ public class ReasoningNode implements NodeAction {
                 if (compactedMessages != null && compactedMessages.size() < messages.size()) {
                     List<Message> retryPromptMessages = new ArrayList<>();
                     retryPromptMessages.add(new SystemMessage(systemPrompt));
-                    retryPromptMessages.add(new UserMessage(RuntimeContextInjector.buildContextMessage()));
+                    retryPromptMessages.add(new UserMessage(RuntimeContextInjector.buildContextMessage(workspaceBasePath)));
                     retryPromptMessages.addAll(compactedMessages);
                     Prompt retryPrompt = new Prompt(retryPromptMessages, options);
                     log.info("[ReasoningNode] Retrying with compacted messages: {} -> {} messages",
@@ -371,5 +392,101 @@ public class ReasoningNode implements NodeAction {
         }
         streamTracker.updatePhase(conversationId, phase);
         streamTracker.broadcastObject(conversationId, "phase", GraphEventPublisher.phase(phase, extra).data());
+    }
+
+    /**
+     * 根据 ChatModel 类型构建合适的 ChatOptions。
+     * - AnthropicChatModel → AnthropicChatOptions（支持 extended thinking）
+     * - 其他（OpenAI/DashScope）→ OpenAiChatOptions（支持 reasoningEffort）
+     */
+    private ChatOptions buildChatOptions(String effectiveReasoning) {
+        // Anthropic 协议模型（AnthropicChatModel）：MiniMax 也用此协议但不支持 thinking
+        if (chatModel instanceof org.springframework.ai.anthropic.AnthropicChatModel anthropicModel) {
+            org.springframework.ai.anthropic.AnthropicChatOptions.Builder builder =
+                    org.springframework.ai.anthropic.AnthropicChatOptions.builder()
+                    .toolCallbacks(toolCallbacks)
+                    .internalToolExecutionEnabled(false);
+
+            // 仅对真正的 Claude 模型启用 extended thinking（MiniMax 等走 Anthropic 协议但不支持）
+            String thinkingLevel = ThinkingLevelHolder.get();
+            boolean thinkingOn = thinkingLevel != null && !"off".equalsIgnoreCase(thinkingLevel);
+            String currentModel = getAnthropicModelName(anthropicModel);
+            boolean isClaudeModel = currentModel != null && currentModel.toLowerCase().contains("claude");
+
+            if (thinkingOn && isClaudeModel) {
+                int budgetTokens = switch (thinkingLevel.toLowerCase()) {
+                    case "low" -> 4096;
+                    case "medium" -> 8192;
+                    case "high" -> 16384;
+                    case "max" -> 32768;
+                    default -> 16384;
+                };
+                builder.thinking(org.springframework.ai.anthropic.api.AnthropicApi.ThinkingType.ENABLED, budgetTokens);
+                builder.maxTokens(budgetTokens + maxOutputTokens);
+                builder.temperature(1.0);
+                log.info("[ReasoningNode] Anthropic extended thinking enabled: model={}, budget={}", currentModel, budgetTokens);
+            } else {
+                builder.maxTokens(maxOutputTokens);
+                if (thinkingOn && !isClaudeModel) {
+                    log.debug("[ReasoningNode] Anthropic protocol model {} does not support thinking, skipping", currentModel);
+                }
+            }
+            return builder.build();
+        }
+
+        // OpenAI / DashScope / 其他
+        // 始终使用 OpenAiChatOptions（而非 ToolCallingChatOptions），
+        // 因为 ToolCallingChatOptions 会丢失 OpenAI 特有参数（streamUsage 等），
+        // 导致 Kimi 等 OpenAI 兼容 API 响应异常或提前截断。
+        OpenAiChatOptions.Builder oaiBuilder = OpenAiChatOptions.builder()
+                .toolCallbacks(toolCallbacks)
+                .maxTokens(maxOutputTokens);
+        if (StringUtils.hasText(effectiveReasoning)) {
+            oaiBuilder.reasoningEffort(effectiveReasoning);
+        }
+        OpenAiChatOptions oaiOpts = oaiBuilder.build();
+        oaiOpts.setInternalToolExecutionEnabled(false);
+        oaiOpts.setStreamUsage(true);
+        return oaiOpts;
+    }
+
+    /**
+     * 解析有效的 reasoningEffort。
+     * 优先级：ThinkingLevelHolder（请求级） > 构造时的 reasoningEffort（Agent/模型默认）。
+     * "off" 会清除 reasoningEffort（返回 null）。
+     */
+    private String resolveEffectiveReasoningEffort() {
+        String requestLevel = ThinkingLevelHolder.get();
+        if (requestLevel != null) {
+            if ("off".equalsIgnoreCase(requestLevel)) {
+                return null;
+            }
+            // thinkingLevel → reasoningEffort 映射
+            return switch (requestLevel.toLowerCase()) {
+                case "low" -> "low";
+                case "medium" -> "medium";
+                case "high" -> "high";
+                case "max" -> "high"; // OpenAI 最高支持 high
+                default -> requestLevel; // 透传未知值
+            };
+        }
+        // 无请求级覆盖，使用构造时的默认值
+        return this.reasoningEffort;
+    }
+
+    /**
+     * 从 AnthropicChatModel 的 defaultOptions 中提取模型名称。
+     * 用于判断是否为真正的 Claude 模型（vs MiniMax 等走 Anthropic 协议的非 Claude 模型）。
+     */
+    private String getAnthropicModelName(org.springframework.ai.anthropic.AnthropicChatModel model) {
+        try {
+            var options = model.getDefaultOptions();
+            if (options instanceof org.springframework.ai.anthropic.AnthropicChatOptions aOpts) {
+                return aOpts.getModel();
+            }
+        } catch (Exception e) {
+            log.debug("[ReasoningNode] Failed to extract Anthropic model name: {}", e.getMessage());
+        }
+        return null;
     }
 }

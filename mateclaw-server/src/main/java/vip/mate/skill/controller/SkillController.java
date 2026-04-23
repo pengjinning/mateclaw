@@ -7,6 +7,7 @@ import org.springframework.web.bind.annotation.*;
 import vip.mate.common.result.R;
 import vip.mate.skill.model.SkillEntity;
 import vip.mate.skill.service.SkillService;
+import vip.mate.skill.synthesis.SkillSynthesisService;
 import vip.mate.skill.runtime.SkillRuntimeService;
 import vip.mate.skill.runtime.model.ResolvedSkill;
 import vip.mate.skill.workspace.SkillWorkspaceManager;
@@ -31,6 +32,7 @@ public class SkillController {
     private final SkillService skillService;
     private final SkillRuntimeService skillRuntimeService;
     private final SkillWorkspaceManager workspaceManager;
+    private final SkillSynthesisService synthesisService;
 
     @Operation(summary = "获取技能列表")
     @GetMapping
@@ -127,6 +129,38 @@ public class SkillController {
                 "count", skills.size(),
                 "message", resync ? "Active skills refreshed with workspace resync" : "Active skills refreshed",
                 "resynced", resynced));
+    }
+
+    // ==================== Synthesis API (RFC-023) ====================
+
+    @Operation(summary = "从对话历史合成 Skill（RFC-023）")
+    @PostMapping("/synthesize-from-conversation")
+    public R<Map<String, Object>> synthesizeFromConversation(@RequestBody Map<String, Object> body) {
+        String conversationId = (String) body.get("conversationId");
+        Long agentId = body.get("agentId") != null ? Long.valueOf(body.get("agentId").toString()) : null;
+        if (conversationId == null || conversationId.isBlank()) {
+            return R.fail("conversationId is required");
+        }
+
+        SkillSynthesisService.SynthesisResult result = synthesisService.synthesize(conversationId, agentId);
+
+        if (result.blocked()) {
+            return R.ok(Map.of(
+                    "success", false,
+                    "blocked", true,
+                    "skillName", result.skillName() != null ? result.skillName() : "",
+                    "error", result.error(),
+                    "scanSummary", result.scanSummary() != null ? result.scanSummary() : ""
+            ));
+        }
+        if (!result.success()) {
+            return R.ok(Map.of("success", false, "error", result.error()));
+        }
+        return R.ok(Map.of(
+                "success", true,
+                "skillId", result.skillId(),
+                "skillName", result.skillName()
+        ));
     }
 
     // ==================== Workspace API ====================

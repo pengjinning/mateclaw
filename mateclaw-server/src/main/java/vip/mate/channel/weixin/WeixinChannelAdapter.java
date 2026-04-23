@@ -5,7 +5,10 @@ import lombok.extern.slf4j.Slf4j;
 import vip.mate.channel.AbstractChannelAdapter;
 import vip.mate.channel.ChannelMessage;
 import vip.mate.channel.ChannelMessageRouter;
+import vip.mate.channel.ExponentialBackoff;
 import vip.mate.channel.model.ChannelEntity;
+import vip.mate.channel.weixin.error.TokenExpiredException;
+import vip.mate.common.security.SecretEquals;
 import vip.mate.workspace.conversation.model.MessageContentPart;
 
 import java.io.IOException;
@@ -72,6 +75,29 @@ public class WeixinChannelAdapter extends AbstractChannelAdapter {
     /** 长轮询游标 */
     private volatile String cursor = "";
 
+    /**
+     * RFC-024 Change 5：pollLoop 错误重试专用退避器。
+     * 3s 起步、60s 上限、1.8 倍递增、±20% jitter、无限重试。
+     * 成功一次 getUpdates 即 reset()。
+     */
+    private final ExponentialBackoff pollBackoff =
+            new ExponentialBackoff(3000, 60000, 1.8, -1, 0.2);
+
+    /**
+     * RFC-024 Change 4：pollLoop watchdog。虚拟线程调度，每 30s 检查一次活跃度。
+     * 由 {@link #startWatchdog()} 启动，{@link #stopWatchdog()} 关闭。
+     */
+    private volatile ScheduledExecutorService watchdogScheduler;
+    private volatile ScheduledFuture<?> watchdogTask;
+
+    /**
+     * pollLoop 卡死判定阈值（毫秒）。getUpdates 最长 45s 就该回包一次；
+     * 超过此值说明客户端或代理层有问题，主动置 ERROR 让 HealthMonitor 重启。
+     * 默认 90s（45s × 2 缓冲）。
+     */
+    private static final long POLL_STUCK_THRESHOLD_MS = 90_000;
+    private static final long WATCHDOG_INTERVAL_MS = 30_000;
+
     /** 消息去重集合（LRU） */
     private final LinkedHashMap<String, Boolean> processedIds = new LinkedHashMap<>(256, 0.75f, true) {
         @Override
@@ -82,6 +108,19 @@ public class WeixinChannelAdapter extends AbstractChannelAdapter {
 
     /** 用户最新 context_token 缓存（用于主动推送） */
     private final ConcurrentHashMap<String, String> userContextTokens = new ConcurrentHashMap<>();
+
+    /** context_token 持久化文件路径 */
+    private Path contextTokensFile;
+
+    /** bot_token 持久化文件路径 */
+    private Path botTokenFile;
+
+    /** 文件名扩展名列表（用于过滤纯文件名文本，避免误触发 Agent） */
+    private static final Set<String> FILENAME_EXTENSIONS = Set.of(
+            ".txt", ".doc", ".docx", ".pdf", ".jpg", ".jpeg", ".png", ".gif",
+            ".mp4", ".avi", ".mov", ".mp3", ".wav", ".zip", ".rar",
+            ".xlsx", ".xls", ".ppt", ".pptx", ".csv", ".json", ".xml"
+    );
 
     // ==================== 输入中提示 ====================
 
@@ -124,7 +163,17 @@ public class WeixinChannelAdapter extends AbstractChannelAdapter {
 
     @Override
     protected void doStart() {
+        // 初始化持久化路径
+        String dataDir = getConfigString("data_dir", "data/weixin");
+        Path dataDirPath = Path.of(dataDir, String.valueOf(channelEntity.getId()));
+        botTokenFile = dataDirPath.resolve("bot_token.txt");
+        contextTokensFile = dataDirPath.resolve("context_tokens.json");
+
+        // bot_token 优先级：config > 持久化文件
         String botToken = getConfigString("bot_token", "");
+        if (botToken.isBlank()) {
+            botToken = loadBotTokenFromFile();
+        }
         String baseUrl = getConfigString("base_url", ILinkClient.DEFAULT_BASE_URL);
 
         if (botToken.isBlank()) {
@@ -139,20 +188,39 @@ public class WeixinChannelAdapter extends AbstractChannelAdapter {
             return t;
         });
 
+        // 加载持久化的 context_tokens（用于重启后主动推送）
+        loadContextTokens();
+
+        // 持久化 bot_token（QR 登录后或首次启动时保存）
+        saveBotTokenToFile(botToken);
+
         // 启动长轮询线程
         stopSignal.set(false);
         cursor = "";
+        pollBackoff.reset();                   // RFC-024 Change 5: 每次启动从 3s 起步
+        touchActivity();                       // RFC-024 Change 4: watchdog 基准点
         pollThread = new Thread(this::pollLoop, "weixin-poll-" + channelEntity.getId());
         pollThread.setDaemon(true);
         pollThread.start();
 
-        log.info("[weixin] Channel started: {} (token={}...)", channelEntity.getName(),
-                botToken.substring(0, Math.min(12, botToken.length())));
+        // RFC-024 Change 4: 启动 pollLoop watchdog
+        startWatchdog();
+
+        log.info("[weixin] Channel started: {} (token={}..., cached_contexts={})",
+                channelEntity.getName(),
+                botToken.substring(0, Math.min(12, botToken.length())),
+                userContextTokens.size());
     }
 
     @Override
     protected void doStop() {
         stopSignal.set(true);
+
+        // RFC-024 Change 4: 关闭 watchdog（在中断 pollThread 之前，避免最后一次 tick 误判）
+        stopWatchdog();
+
+        // 持久化 context_tokens（重启后可恢复主动推送能力）
+        saveContextTokens();
 
         // 停止所有输入提示任务
         typingTasks.values().forEach(f -> f.cancel(false));
@@ -184,6 +252,12 @@ public class WeixinChannelAdapter extends AbstractChannelAdapter {
         while (!stopSignal.get() && !Thread.currentThread().isInterrupted()) {
             try {
                 Map<String, Object> data = client.getUpdates(cursor);
+
+                // RFC-024 Change 1: getUpdates 成功返回（哪怕没消息）= 连接活跃；
+                // 让 ChannelHealthMonitor 能准确识别"连接还在线"而非依赖用户发消息
+                touchActivity();
+                // RFC-024 Change 5: 成功即清零退避计数，下次故障仍从 3s 起步
+                pollBackoff.reset();
 
                 // 更新游标
                 Object newCursor = data.get("get_updates_buf");
@@ -220,11 +294,22 @@ public class WeixinChannelAdapter extends AbstractChannelAdapter {
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 break;
+            } catch (TokenExpiredException te) {
+                // RFC-024 Change 3: token 已过期 → 停止轮询、标记 ERROR，让 HealthMonitor 接手
+                // 不在 catch Exception 里被吞，避免"无限重试 + 日志淹没但用户不知道要重扫码"
+                log.error("[weixin] bot_token expired (HTTP {}) during {}; stopping poll loop — channel needs re-scan",
+                        te.getHttpStatus(), te.getOperation());
+                connectionState.set(ConnectionState.ERROR);
+                lastError = "bot_token expired, please re-scan QR code";
+                break;
             } catch (Exception e) {
                 if (!stopSignal.get()) {
-                    log.error("[weixin] Poll error, retry in 5s: {}", e.getMessage());
+                    // RFC-024 Change 5: 指数退避 + jitter（替代固定 5s），防止连锁故障时雷群效应
+                    long delay = pollBackoff.nextDelayMs();
+                    log.error("[weixin] Poll error (attempt {}), retry in {}ms: {}",
+                            pollBackoff.getAttempts(), delay, e.getMessage());
                     try {
-                        Thread.sleep(5000);
+                        Thread.sleep(delay);
                     } catch (InterruptedException ie) {
                         Thread.currentThread().interrupt();
                         break;
@@ -233,6 +318,59 @@ public class WeixinChannelAdapter extends AbstractChannelAdapter {
             }
         }
         log.info("[weixin] Poll thread stopped");
+    }
+
+    // ==================== RFC-024 Change 4: pollLoop watchdog ====================
+
+    /**
+     * 启动 pollLoop 监视器：每 30s 检查一次"距离上次活跃是否超过 {@value #POLL_STUCK_THRESHOLD_MS}ms"。
+     *
+     * <p>getUpdates 最多 45s 就会返回（服务端 hold 35s + 少量网络延迟）；若超过 90s 没有活动，
+     * 意味着 HTTP 客户端的长连接被代理 / NAT 静默 FIN 掉、pollLoop 卡在 read 上了。
+     * 此时主动把 state 置 ERROR，{@code ChannelHealthMonitor} 下一轮（1 分钟内）会重启本渠道，
+     * 缩短用户感知的"僵死时间"。</p>
+     *
+     * <p>用虚拟线程 ScheduledExecutorService，开销极小；与 pollLoop 完全独立，失败隔离。</p>
+     */
+    private void startWatchdog() {
+        watchdogScheduler = Executors.newSingleThreadScheduledExecutor(
+                Thread.ofVirtual().name("weixin-watchdog-" + channelEntity.getId()).factory());
+        watchdogTask = watchdogScheduler.scheduleAtFixedRate(
+                this::watchdogTick,
+                WATCHDOG_INTERVAL_MS, WATCHDOG_INTERVAL_MS, TimeUnit.MILLISECONDS);
+    }
+
+    private void watchdogTick() {
+        if (stopSignal.get()) return;
+        if (connectionState.get() != ConnectionState.CONNECTED) return;   // 已 ERROR，等 HealthMonitor
+        long sinceLast = System.currentTimeMillis() - lastEventTimeMs.get();
+        if (sinceLast > POLL_STUCK_THRESHOLD_MS) {
+            log.warn("[weixin] Watchdog: poll thread appears stuck ({}s since last activity); " +
+                    "setting ERROR state for HealthMonitor to restart", sinceLast / 1000);
+            connectionState.set(ConnectionState.ERROR);
+            lastError = "poll thread stuck, last activity " + (sinceLast / 1000) + "s ago";
+        }
+    }
+
+    private void stopWatchdog() {
+        if (watchdogTask != null) {
+            watchdogTask.cancel(false);
+            watchdogTask = null;
+        }
+        if (watchdogScheduler != null) {
+            watchdogScheduler.shutdownNow();
+            watchdogScheduler = null;
+        }
+    }
+
+    /**
+     * RFC-024 Change 2：微信是长轮询，代理/NAT 的 idle timeout 通常 2–5 分钟；
+     * 这里报告 5 分钟作为 stale 阈值，配合 {@code ChannelHealthMonitor} 1 分钟扫描，
+     * 断连后最多 5 分钟内被自动重启，而非原先的 60 分钟。
+     */
+    @Override
+    public Duration stalenessThreshold() {
+        return Duration.ofMinutes(5);
     }
 
     // ==================== 入站消息处理 ====================
@@ -264,6 +402,7 @@ public class WeixinChannelAdapter extends AbstractChannelAdapter {
         // 解析消息内容
         List<MessageContentPart> contentParts = new ArrayList<>();
         List<String> textParts = new ArrayList<>();
+        boolean hasVoice = false;
 
         List<Map<String, Object>> itemList = (List<Map<String, Object>>) msg.getOrDefault("item_list", List.of());
         boolean mediaDownloadEnabled = getConfigBoolean("media_download_enabled", true);
@@ -274,10 +413,10 @@ public class WeixinChannelAdapter extends AbstractChannelAdapter {
 
             switch (itemType) {
                 case 1 -> {
-                    // Text
+                    // Text — 过滤纯文件名文本，避免文件名误触发 Agent
                     Map<String, Object> textItem = (Map<String, Object>) item.getOrDefault("text_item", Map.of());
                     String text = getStr(textItem, "text").strip();
-                    if (!text.isEmpty()) {
+                    if (!text.isEmpty() && !isFilenameOnly(text)) {
                         textParts.add(text);
                     }
                 }
@@ -312,13 +451,53 @@ public class WeixinChannelAdapter extends AbstractChannelAdapter {
                 }
                 case 3 -> {
                     // Voice — 使用 ASR 语音识别文本
+                    // iLink API 的 ASR 文本可能在两个位置：
+                    //   路径1: voice_item.text_item.text（嵌套结构）
+                    //   路径2: voice_item.text（直接结构）
+                    hasVoice = true;
                     Map<String, Object> voiceItem = (Map<String, Object>) item.getOrDefault("voice_item", Map.of());
-                    Map<String, Object> voiceTextItem = (Map<String, Object>) voiceItem.getOrDefault("text_item", Map.of());
-                    String asrText = getStr(voiceTextItem, "text").strip();
+                    String asrText = "";
+
+                    // 路径1: voice_item → text_item → text
+                    Object textItemObj = voiceItem.get("text_item");
+                    if (textItemObj instanceof Map<?,?> textItemMap) {
+                        asrText = getStr((Map<String, Object>) textItemMap, "text").strip();
+                    }
+
+                    // 路径2: voice_item → text（直接字段，部分版本 API 的兜底结构）
+                    if (asrText.isEmpty()) {
+                        asrText = getStr(voiceItem, "text").strip();
+                    }
+
+                    // 路径3: voice_item → content（与 WeCom 一致的字段名）
+                    if (asrText.isEmpty()) {
+                        asrText = getStr(voiceItem, "content").strip();
+                    }
+
+                    log.debug("[weixin] Voice item payload: {}", voiceItem);
+
                     if (!asrText.isEmpty()) {
                         textParts.add(asrText);
+                        log.info("[weixin] Voice ASR text: {}", asrText.length() > 50
+                                ? asrText.substring(0, 50) + "..." : asrText);
                     } else {
-                        textParts.add("[语音: 无转写结果]");
+                        // ASR 为空：可能是语音过短、噪音、或 iLink API 字段变更
+                        // 尝试下载语音文件保存到本地（供后续调试 / 自有 STT 使用）
+                        if (mediaDownloadEnabled) {
+                            String voicePath = downloadMediaItem(item, "voice_item", "voice.amr", mediaDir);
+                            if (voicePath != null) {
+                                // 保存为 audio content part，即使无 ASR 文本
+                                MessageContentPart audioPart = new MessageContentPart();
+                                audioPart.setType("audio");
+                                audioPart.setPath(voicePath);
+                                audioPart.setFileName("voice.amr");
+                                contentParts.add(audioPart);
+                                log.info("[weixin] Voice audio downloaded (no ASR): {}", voicePath);
+                            }
+                        }
+                        textParts.add("[语音消息]");
+                        log.warn("[weixin] Voice message with no ASR result. voice_item keys: {}, full: {}",
+                                voiceItem.keySet(), voiceItem);
                     }
                 }
                 case 4 -> {
@@ -381,9 +560,14 @@ public class WeixinChannelAdapter extends AbstractChannelAdapter {
             return;
         }
 
-        // 缓存 context_token（用于主动推送）
+        // 缓存 context_token（用于主动推送）并定期持久化
         if (!fromUserId.isBlank() && !contextToken.isBlank()) {
-            userContextTokens.put(fromUserId, contextToken);
+            String prev = userContextTokens.put(fromUserId, contextToken);
+            // token 变更时才持久化（减少 I/O）
+            // RFC-025 Change 2: 常数时间比较，作为秘钥类字符串比较的模板统一
+            if (!SecretEquals.equals(contextToken, prev)) {
+                saveContextTokens();
+            }
         }
 
         // 构建统一消息
@@ -401,6 +585,7 @@ public class WeixinChannelAdapter extends AbstractChannelAdapter {
                 .content(textContent)
                 .contentType(contentParts.size() == 1 && "text".equals(contentParts.getFirst().getType()) ? "text" : "mixed")
                 .contentParts(contentParts)
+                .inputMode(hasVoice ? "voice" : "text")
                 .timestamp(LocalDateTime.now())
                 .replyToken(replyToken)
                 .rawPayload(msg)
@@ -511,6 +696,7 @@ public class WeixinChannelAdapter extends AbstractChannelAdapter {
                         }
                     }
                     case "image" -> sendImagePart(toUserId, contextToken, part);
+                    case "audio" -> sendAudioPart(toUserId, contextToken, part);
                     case "file" -> sendFilePart(toUserId, contextToken, part);
                     case "video" -> sendVideoPart(toUserId, contextToken, part);
                     default -> {
@@ -583,6 +769,22 @@ public class WeixinChannelAdapter extends AbstractChannelAdapter {
     }
 
     /**
+     * 发送音频部分：以文件形式发送 MP3（用户可点击播放）
+     */
+    private void sendAudioPart(String toUserId, String contextToken, MessageContentPart part) throws Exception {
+        byte[] audioBytes = resolveFileBytes(part);
+        if (audioBytes == null) {
+            sendFallbackText(contextToken + "|" + toUserId, part);
+            return;
+        }
+        String fileName = part.getFileName() != null ? part.getFileName() : "voice_reply.mp3";
+        client.sendVoice(toUserId, audioBytes, fileName, contextToken);
+        log.info("[weixin] Audio sent to {}: {} ({}KB)",
+                toUserId.substring(0, Math.min(12, toUserId.length())),
+                fileName, audioBytes.length / 1024);
+    }
+
+    /**
      * 从 MessageContentPart 解析文件字节：优先本地路径，其次 URL 下载
      */
     private byte[] resolveFileBytes(MessageContentPart part) {
@@ -617,6 +819,7 @@ public class WeixinChannelAdapter extends AbstractChannelAdapter {
     private void sendFallbackText(String targetId, MessageContentPart part) {
         switch (part.getType()) {
             case "image" -> sendMessage(targetId, "[图片]");
+            case "audio" -> sendMessage(targetId, "[语音回复]");
             case "file" -> sendMessage(targetId, "[文件: " + (part.getFileName() != null ? part.getFileName() : "file") + "]");
             case "video" -> sendMessage(targetId, "[视频]");
             default -> { if (part.getText() != null) sendMessage(targetId, part.getText()); }
@@ -820,5 +1023,89 @@ public class WeixinChannelAdapter extends AbstractChannelAdapter {
                     + Character.digit(hex.charAt(i + 1), 16));
         }
         return data;
+    }
+
+    // ==================== Token 持久化 ====================
+
+    /**
+     * 从文件加载 bot_token（启动时如果 config 中无 token，尝试从文件恢复）
+     */
+    private String loadBotTokenFromFile() {
+        if (botTokenFile == null) return "";
+        try {
+            if (Files.exists(botTokenFile)) {
+                String token = Files.readString(botTokenFile).strip();
+                if (!token.isBlank()) {
+                    log.info("[weixin] Loaded bot_token from {}", botTokenFile);
+                    return token;
+                }
+            }
+        } catch (Exception e) {
+            log.debug("[weixin] Failed to read bot_token file: {}", e.getMessage());
+        }
+        return "";
+    }
+
+    /**
+     * 持久化 bot_token 到文件（QR 登录后或首次启动时保存）
+     */
+    private void saveBotTokenToFile(String token) {
+        if (botTokenFile == null || token == null || token.isBlank()) return;
+        try {
+            Files.createDirectories(botTokenFile.getParent());
+            Files.writeString(botTokenFile, token);
+            log.info("[weixin] Bot token saved to {}", botTokenFile);
+        } catch (Exception e) {
+            log.warn("[weixin] Failed to save bot_token file: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * 从文件加载 context_tokens（启动时恢复主动推送能力）
+     */
+    @SuppressWarnings("unchecked")
+    private void loadContextTokens() {
+        if (contextTokensFile == null) return;
+        try {
+            if (Files.exists(contextTokensFile)) {
+                String json = Files.readString(contextTokensFile);
+                Map<String, String> data = objectMapper.readValue(json,
+                        objectMapper.getTypeFactory().constructMapType(HashMap.class, String.class, String.class));
+                if (data != null && !data.isEmpty()) {
+                    userContextTokens.putAll(data);
+                    log.info("[weixin] Loaded {} context_tokens from {}", data.size(), contextTokensFile);
+                }
+            }
+        } catch (Exception e) {
+            log.debug("[weixin] Failed to load context_tokens: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * 持久化 context_tokens 到文件（停止时保存 + token 变更时保存）
+     */
+    private void saveContextTokens() {
+        if (contextTokensFile == null || userContextTokens.isEmpty()) return;
+        try {
+            Files.createDirectories(contextTokensFile.getParent());
+            Files.writeString(contextTokensFile,
+                    objectMapper.writeValueAsString(new HashMap<>(userContextTokens)));
+        } catch (Exception e) {
+            log.debug("[weixin] Failed to save context_tokens: {}", e.getMessage());
+        }
+    }
+
+    // ==================== 文件名过滤 ====================
+
+    /**
+     * 判断文本是否仅为文件名（如 "photo.jpg"、"report.pdf"）。
+     * 微信发送文件时会同时发一条文本消息包含文件名，这不应触发 Agent 回复。
+     */
+    private static boolean isFilenameOnly(String text) {
+        if (text == null || text.isBlank()) return false;
+        // 文件名不应包含换行（多行文本不是纯文件名）
+        if (text.contains("\n")) return false;
+        String lower = text.strip().toLowerCase();
+        return FILENAME_EXTENSIONS.stream().anyMatch(lower::endsWith);
     }
 }

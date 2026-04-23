@@ -1,7 +1,7 @@
 import { computed, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ElMessage } from 'element-plus'
-import { modelApi } from '@/api'
+import { modelApi, oauthApi } from '@/api'
 import type { ActiveModelsInfo, DiscoverResult, ProviderInfo, ProviderModelInfo, TestResult } from '@/types'
 
 export function useProviders() {
@@ -385,10 +385,57 @@ export function useProviders() {
     'zhipu-cn': '/icons/providers/zhipu.svg',
     'zhipu-intl': '/icons/providers/zhipu.svg',
     'volcengine': '/icons/providers/volcengine.svg',
+    'openai-chatgpt': '/icons/providers/openai.svg',
   }
 
   function getProviderIcon(providerId: string): string {
     return providerIconMap[providerId] || '/icons/providers/default.svg'
+  }
+
+  // ==================== OAuth ====================
+
+  async function handleOAuthLogin() {
+    try {
+      const res: any = await oauthApi.authorize()
+      const { authorizeUrl } = res.data
+      // 打开新窗口进行 OAuth 登录
+      const authWindow = window.open(authorizeUrl, '_blank', 'width=600,height=700')
+      // 轮询检查 OAuth 状态
+      const pollInterval = setInterval(async () => {
+        try {
+          const statusRes: any = await oauthApi.status()
+          if (statusRes.data?.connected) {
+            clearInterval(pollInterval)
+            if (authWindow && !authWindow.closed) authWindow.close()
+            ElMessage.success(t('settings.model.oauthLoginSuccess'))
+            await loadProviders()
+            // 刷新当前编辑的 provider
+            if (editingProvider.value) {
+              const updated = providers.value.find(p => p.id === editingProvider.value!.id)
+              if (updated) editingProvider.value = updated
+            }
+          }
+        } catch { /* ignore polling errors */ }
+      }, 2000)
+      // 30 秒后停止轮询
+      setTimeout(() => clearInterval(pollInterval), 30000)
+    } catch (e: any) {
+      ElMessage.error(e.msg || 'OAuth login failed')
+    }
+  }
+
+  async function handleOAuthRevoke() {
+    try {
+      await oauthApi.revoke()
+      ElMessage.success(t('settings.model.oauthRevokeSuccess'))
+      await loadProviders()
+      if (editingProvider.value) {
+        const updated = providers.value.find(p => p.id === editingProvider.value!.id)
+        if (updated) editingProvider.value = updated
+      }
+    } catch (e: any) {
+      ElMessage.error(e.msg || 'OAuth revoke failed')
+    }
   }
 
   function onIconError(e: Event) {
@@ -445,6 +492,8 @@ export function useProviders() {
     providerStatus,
     getProviderIcon,
     onIconError,
+    handleOAuthLogin,
+    handleOAuthRevoke,
   }
 }
 

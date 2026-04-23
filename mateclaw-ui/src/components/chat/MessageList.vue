@@ -22,12 +22,14 @@
                 class="suggestion-card"
                 @click="$emit('suggestion-click', s)"
               >
-                <span class="suggestion-card__icon">{{ ['💬', '✍️', '💻', '📊'][i % 4] }}</span>
+                <span class="suggestion-card__icon">
+                  <el-icon v-if="i % 4 === 0"><ChatDotRound /></el-icon>
+                  <el-icon v-else-if="i % 4 === 1"><EditPen /></el-icon>
+                  <el-icon v-else-if="i % 4 === 2"><Monitor /></el-icon>
+                  <el-icon v-else><DataLine /></el-icon>
+                </span>
                 <span class="suggestion-card__text">{{ s }}</span>
-                <svg class="suggestion-card__arrow" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                  <line x1="5" y1="12" x2="19" y2="12"/>
-                  <polyline points="12 5 19 12 12 19"/>
-                </svg>
+                <el-icon class="suggestion-card__arrow"><Right /></el-icon>
               </button>
             </div>
           </div>
@@ -36,19 +38,37 @@
 
       <!-- 消息列表 -->
       <template v-else>
-        <MessageBubble
-          v-for="(msg, index) in messages"
-          :key="msg.id || index"
-          :message="msg"
-          :is-last="index === messages.length - 1"
-          :assistant-icon="assistantIcon"
-          :user-icon="userIcon"
-          :show-cursor="showCursorForMessage(msg)"
-          @regenerate="$emit('regenerate', msg)"
-          @toggle-thinking="(expanded) => $emit('toggle-thinking', msg, expanded)"
-          @approve="(pendingId) => $emit('approve', pendingId)"
-          @deny="(pendingId) => $emit('deny', pendingId)"
-        />
+        <!-- 上拉加载更早消息触发器 -->
+        <div v-if="hasMore" ref="loadMoreRef" class="load-more-trigger text-center py-3">
+          <div v-if="loadingOlder" class="text-gray-400 dark:text-gray-500 text-sm flex items-center justify-center gap-2">
+            <span class="animate-spin inline-block w-4 h-4 border-2 border-gray-300 border-t-gray-500 rounded-full"></span>
+            {{ t('chat.loadingOlder') }}
+          </div>
+          <button v-else class="text-gray-400 dark:text-gray-500 text-sm hover:text-gray-600 dark:hover:text-gray-300 transition-colors" @click="$emit('load-more')">
+            {{ t('chat.loadOlderMessages') }}
+          </button>
+        </div>
+
+        <template v-for="(msg, index) in messages" :key="msg.id || index">
+          <!-- 压缩摘要消息特殊渲染 -->
+          <CompressionSummary
+            v-if="isCompressionSummary(msg)"
+            :message="msg"
+          />
+          <!-- 普通消息气泡 -->
+          <MessageBubble
+            v-else
+            :message="msg"
+            :is-last="index === messages.length - 1"
+            :assistant-icon="assistantIcon"
+            :user-icon="userIcon"
+            :show-cursor="showCursorForMessage(msg)"
+            @regenerate="$emit('regenerate', msg)"
+            @toggle-thinking="(expanded) => $emit('toggle-thinking', msg, expanded)"
+            @approve="(pendingId) => $emit('approve', pendingId)"
+            @deny="(pendingId) => $emit('deny', pendingId)"
+          />
+        </template>
       </template>
 
       <!-- 加载指示器：只在无消息时显示（有消息时由输入框显示停止按钮） -->
@@ -65,7 +85,12 @@
 
 <script setup lang="ts">
 import { computed, watch, nextTick } from 'vue'
+import { useI18n } from 'vue-i18n'
+import { ChatDotRound, DataLine, EditPen, Monitor, Right } from '@element-plus/icons-vue'
+
+const { t } = useI18n()
 import MessageBubble from './MessageBubble.vue'
+import CompressionSummary from './CompressionSummary.vue'
 import { useStickToBottom } from '@/composables/chat/useStickToBottom'
 import type { Message } from '@/types'
 
@@ -86,6 +111,10 @@ interface Props {
   suggestions?: string[]
   /** 是否自动滚动到底部 */
   autoScroll?: boolean
+  /** 是否还有更早的消息可加载 */
+  hasMore?: boolean
+  /** 是否正在加载更早消息 */
+  loadingOlder?: boolean
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -96,6 +125,8 @@ const props = withDefaults(defineProps<Props>(), {
   subtitle: '',
   suggestions: () => [],
   autoScroll: true,
+  hasMore: false,
+  loadingOlder: false,
 })
 
 const emit = defineEmits<{
@@ -105,7 +136,19 @@ const emit = defineEmits<{
   scroll: [event: Event]
   approve: [pendingId: string]
   deny: [pendingId: string]
+  'load-more': []
 }>()
+
+// 判断消息是否为压缩摘要
+const isCompressionSummary = (msg: Message) => {
+  if (msg.role !== 'system') return false
+  try {
+    const metadata = typeof msg.metadata === 'string' ? JSON.parse(msg.metadata) : msg.metadata
+    return metadata?.type === 'compression_summary'
+  } catch {
+    return false
+  }
+}
 
 // 智能滚动
 const { scrollRef, contentRef, isAtBottom, scrollToBottom } = useStickToBottom({
@@ -149,8 +192,9 @@ watch(
   flex: 1;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 28px 28px 20px;
+  padding: 18px 20px 12px;
   scroll-behavior: smooth;
+  min-height: 0;
 }
 
 .message-list::-webkit-scrollbar {
@@ -165,7 +209,7 @@ watch(
 .message-list-content {
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: 14px;
   min-height: 100%;
 }
 
@@ -176,12 +220,12 @@ watch(
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  min-height: 400px;
+  min-height: 320px;
 }
 
 .welcome-screen {
   text-align: center;
-  padding: 40px 20px;
+  padding: 24px 16px;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -231,7 +275,7 @@ watch(
 .welcome-subtitle {
   font-size: 14px;
   color: var(--mc-text-secondary, #64748b);
-  margin: 0 0 36px;
+  margin: 0 0 24px;
   max-width: 360px;
   line-height: 1.6;
 }
@@ -341,19 +385,19 @@ watch(
 /* ===== 移动端适配 ===== */
 @media (max-width: 768px) {
   .message-list {
-    padding: 16px 12px 12px;
+    padding: 12px 10px 8px;
   }
 
   .message-list-content {
-    gap: 12px;
+    gap: 10px;
   }
 
   .empty-state {
-    min-height: 300px;
+    min-height: 240px;
   }
 
   .welcome-screen {
-    padding: 24px 12px;
+    padding: 16px 10px;
   }
 
   .welcome-logo__icon {

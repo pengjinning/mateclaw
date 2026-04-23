@@ -15,6 +15,7 @@ import vip.mate.datasource.service.DatasourceService;
 import java.sql.*;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.regex.Pattern;
 
 /**
  * 内置工具：数据源发现
@@ -31,6 +32,16 @@ public class DatasourceTool {
 
     private final DatasourceService datasourceService;
     private final DatasourceConnectionManager connectionManager;
+
+    /** SQL identifier whitelist: letters, digits, underscore, dot, hyphen only */
+    private static final Pattern SAFE_IDENTIFIER = Pattern.compile("^[a-zA-Z0-9_][a-zA-Z0-9_.\\-]{0,127}$");
+
+    private static String sanitizeIdentifier(String name) {
+        if (name == null || !SAFE_IDENTIFIER.matcher(name).matches()) {
+            throw new IllegalArgumentException("Invalid SQL identifier: " + name);
+        }
+        return name;
+    }
 
     @Tool(description = """
             查询外部数据源的元数据。支持三种动作：
@@ -84,12 +95,12 @@ public class DatasourceTool {
         String sql = switch (dbType) {
             case "mysql", "mariadb" -> String.format(
                     "SELECT TABLE_NAME, TABLE_COMMENT, TABLE_ROWS FROM information_schema.TABLES WHERE TABLE_SCHEMA = '%s' ORDER BY TABLE_NAME",
-                    entity.getDatabaseName());
+                    sanitizeIdentifier(entity.getDatabaseName()));
             case "postgresql" -> String.format(
                     "SELECT tablename AS table_name, obj_description(c.oid) AS table_comment " +
                     "FROM pg_tables t LEFT JOIN pg_class c ON c.relname = t.tablename " +
                     "WHERE t.schemaname = '%s' ORDER BY tablename",
-                    entity.getSchemaName() != null ? entity.getSchemaName() : "public");
+                    sanitizeIdentifier(entity.getSchemaName() != null ? entity.getSchemaName() : "public"));
             case "clickhouse" -> "SHOW TABLES";
             default -> throw new IllegalArgumentException("不支持的数据库类型: " + dbType);
         };
@@ -113,7 +124,7 @@ public class DatasourceTool {
             case "mysql", "mariadb" -> String.format(
                     "SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_KEY, COLUMN_DEFAULT, COLUMN_COMMENT " +
                     "FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = '%s' AND TABLE_NAME = '%s' ORDER BY ORDINAL_POSITION",
-                    entity.getDatabaseName(), tableName);
+                    sanitizeIdentifier(entity.getDatabaseName()), sanitizeIdentifier(tableName));
             case "postgresql" -> String.format(
                     "SELECT c.column_name, c.data_type, c.is_nullable, " +
                     "CASE WHEN pk.column_name IS NOT NULL THEN 'PRI' ELSE '' END AS column_key, " +
@@ -125,8 +136,10 @@ public class DatasourceTool {
                     "LEFT JOIN pg_catalog.pg_statio_all_tables st ON st.relname = c.table_name " +
                     "LEFT JOIN pg_catalog.pg_description pgd ON pgd.objoid = st.relid AND pgd.objsubid = c.ordinal_position " +
                     "WHERE c.table_schema = '%s' AND c.table_name = '%s' ORDER BY c.ordinal_position",
-                    tableName, entity.getSchemaName() != null ? entity.getSchemaName() : "public", tableName);
-            case "clickhouse" -> String.format("DESCRIBE TABLE %s", tableName);
+                    sanitizeIdentifier(tableName),
+                    sanitizeIdentifier(entity.getSchemaName() != null ? entity.getSchemaName() : "public"),
+                    sanitizeIdentifier(tableName));
+            case "clickhouse" -> String.format("DESCRIBE TABLE %s", sanitizeIdentifier(tableName));
             default -> throw new IllegalArgumentException("不支持的数据库类型: " + dbType);
         };
 

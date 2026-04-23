@@ -37,6 +37,13 @@ public class AgentToolSet {
     }
 
     /**
+     * 从预构建的 ToolCallback 列表构建工具集（用于 i18n 等需要包装 callback 的场景）
+     */
+    public static AgentToolSet fromCallbacks(List<Object> toolBeans, List<ToolCallback> callbacks) {
+        return new AgentToolSet(toolBeans != null ? toolBeans : List.of(), callbacks);
+    }
+
+    /**
      * 从 @Tool Bean 列表和 ToolCallbackProvider 列表构建统一工具集
      */
     public static AgentToolSet from(List<Object> toolBeans, List<ToolCallbackProvider> providers) {
@@ -75,6 +82,20 @@ public class AgentToolSet {
         }
         List<ToolCallback> filtered = new ArrayList<>(callbacks);
         filtered.removeIf(cb -> deniedTools.contains(cb.getToolDefinition().name()));
+        return new AgentToolSet(toolBeans, filtered);
+    }
+
+    /**
+     * 仅保留指定名称的工具（白名单模式，用于 per-agent 绑定）
+     *
+     * @param allowedTools 允许的工具名集合（为 null 时直接返回 this，表示使用全局默认）
+     */
+    public AgentToolSet withAllowedToolsOnly(Set<String> allowedTools) {
+        if (allowedTools == null) {
+            return this; // null = 无绑定，使用全局默认
+        }
+        List<ToolCallback> filtered = new ArrayList<>(callbacks);
+        filtered.removeIf(cb -> !allowedTools.contains(cb.getToolDefinition().name()));
         return new AgentToolSet(toolBeans, filtered);
     }
 

@@ -1,57 +1,112 @@
 <template>
-  <div class="chat-layout">
-    <!-- 移动端会话面板遮罩 -->
-    <Transition name="fade">
-      <div v-if="isMobile && convPanelOpen" class="conv-backdrop" @click="convPanelOpen = false"></div>
-    </Transition>
+  <div class="mc-page-shell chat-console-shell">
+    <div class="mc-page-frame chat-console-frame">
+      <div class="chat-layout mc-surface-card">
+        <!-- 移动端会话面板遮罩 -->
+        <Transition name="fade">
+          <div v-if="isMobile && convPanelOpen" class="conv-backdrop" @click="convPanelOpen = false"></div>
+        </Transition>
 
     <!-- 会话侧边栏 -->
-    <div class="conversation-panel" :class="{ 'mobile-open': convPanelOpen }">
+    <div class="conversation-panel" :class="{ 'mobile-open': convPanelOpen, 'conv-collapsed': convPanelCollapsed && !isMobile }">
       <div class="panel-header">
-        <h2 class="panel-title">{{ $t('chat.conversations') }}</h2>
-        <button class="new-chat-btn" @click="newConversation" :title="$t('chat.newChat')">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <line x1="12" y1="5" x2="12" y2="19"/>
-            <line x1="5" y1="12" x2="19" y2="12"/>
-          </svg>
+        <div v-if="!convPanelCollapsed || isMobile" class="panel-header-copy">
+          <div class="panel-kicker">{{ $t('nav.chat') }}</div>
+          <h2 class="panel-title">{{ $t('chat.conversations') }}</h2>
+        </div>
+        <button class="new-chat-btn" @click="newConversation" :title="`${$t('chat.newChat')} (⌘N)`">
+          <el-icon><Plus /></el-icon>
         </button>
       </div>
+      <!-- 折叠切换按钮 -->
+      <button v-if="!isMobile" class="conv-collapse-btn" @click="toggleConvPanel" :title="convPanelCollapsed ? $t('common.expandSidebar') : $t('common.collapseSidebar')">
+        <svg v-if="!convPanelCollapsed" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>
+        <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+      </button>
 
       <div class="agent-selector">
-        <select v-model="selectedAgentId" class="agent-select" @change="onAgentChange">
-          <option v-if="agents.length === 0" value="">{{ $t('chat.loadingAgents') }}</option>
-          <option v-for="agent in agents" :key="agent.id" :value="agent.id">
-            {{ agent.icon || '🤖' }} {{ agent.name }}
-          </option>
-        </select>
+        <button class="agent-select-trigger" @click="agentDropdownOpen = !agentDropdownOpen" :title="`${$t('chat.selectAgent')} (⌘K)`">
+          <span class="agent-select-trigger__icon">{{ currentAgent?.icon || '🤖' }}</span>
+          <span v-if="!convPanelCollapsed || isMobile" class="agent-select-trigger__name">{{ currentAgent?.name || $t('chat.selectAgent') }}</span>
+          <svg v-if="!convPanelCollapsed || isMobile" class="agent-select-trigger__arrow" :class="{ open: agentDropdownOpen }" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+        </button>
+        <Transition name="fade">
+          <div v-if="agentDropdownOpen" class="agent-dropdown-backdrop" @click="agentDropdownOpen = false"></div>
+        </Transition>
+        <Transition name="agent-dropdown">
+          <div v-if="agentDropdownOpen" class="agent-dropdown">
+            <div
+              v-for="agent in agents"
+              :key="agent.id"
+              class="agent-dropdown-item"
+              :class="{ active: String(agent.id) === String(selectedAgentId) }"
+              @click="selectAgent(agent)"
+            >
+              <span class="agent-dropdown-item__icon">{{ agent.icon || '🤖' }}</span>
+              <div class="agent-dropdown-item__info">
+                <span class="agent-dropdown-item__name">{{ agent.name }}</span>
+                <span class="agent-dropdown-item__desc">{{ agent.description || agent.agentType }}</span>
+              </div>
+              <span v-if="String(agent.id) === String(selectedAgentId)" class="agent-dropdown-item__check">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+              </span>
+            </div>
+            <div v-if="agents.length === 0" class="agent-dropdown-empty">{{ $t('chat.loadingAgents') }}</div>
+          </div>
+        </Transition>
       </div>
 
       <div class="conversation-list">
         <template v-for="group in groupedConversations" :key="group.label">
-          <div class="conv-group-title">{{ group.label }}</div>
+          <div v-if="!convPanelCollapsed || isMobile" class="conv-group-title">{{ group.label }}</div>
           <div
             v-for="conv in group.items"
             :key="conv.conversationId"
             class="conv-item"
-            :class="{ active: currentConversationId === conv.conversationId }"
+            :class="{
+              active: currentConversationId === conv.conversationId,
+              'is-running': conv.streamStatus === 'running',
+            }"
             @click="selectConversation(conv)"
           >
             <div class="conv-icon">
               <img :src="channelIconUrl(conv.source)" width="14" height="14" alt="" />
+              <span
+                v-if="conv.streamStatus === 'running'"
+                class="conv-running-dot"
+                :title="$t('chat.streamGenerating')"
+              ></span>
             </div>
-            <div class="conv-info">
-              <div class="conv-title">{{ conv.title }}</div>
+            <div v-if="!convPanelCollapsed || isMobile" class="conv-info">
+              <input
+                v-if="renamingConvId === conv.conversationId"
+                v-model="renameText"
+                class="conv-title-input"
+                @keydown.enter="confirmRename(conv)"
+                @keydown.escape="cancelRename"
+                @blur="confirmRename(conv)"
+                @click.stop
+                ref="renameInputRef"
+              />
+              <div v-else class="conv-title" @dblclick.stop="startRename(conv)">
+                <span>{{ conv.title }}</span>
+                <span
+                  v-if="conv.streamStatus === 'running'"
+                  class="conv-running-badge"
+                  :title="$t('chat.streamGenerating')"
+                >
+                  <span class="conv-running-badge-pulse"></span>
+                  {{ $t('chat.streamGenerating') }}
+                </span>
+              </div>
               <div class="conv-meta">
                 <span>{{ $t('chat.messages', { count: conv.messageCount }) }}</span>
                 <span class="conv-dot">·</span>
                 <span>{{ formatConversationTime(conv.lastActiveTime) }}</span>
               </div>
             </div>
-            <button class="conv-delete" @click.stop="deleteConversation(conv.conversationId)" :title="$t('common.delete')">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <polyline points="3 6 5 6 21 6"/>
-                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
-              </svg>
+            <button v-if="!convPanelCollapsed || isMobile" class="conv-delete" @click.stop="confirmDeleteConversation(conv.conversationId)" :title="$t('common.delete')">
+              <el-icon><Delete /></el-icon>
             </button>
           </div>
         </template>
@@ -75,11 +130,7 @@
       <Transition name="fade">
         <div v-if="isDragging" class="drop-overlay">
           <div class="drop-overlay__content">
-            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-              <polyline points="17 8 12 3 7 8"/>
-              <line x1="12" y1="3" x2="12" y2="15"/>
-            </svg>
+            <el-icon><UploadFilled /></el-icon>
             <span>{{ $t('chat.dropToUpload') }}</span>
           </div>
         </div>
@@ -88,41 +139,54 @@
       <div class="chat-header">
         <div class="chat-header-left">
           <button v-if="isMobile" class="conv-toggle-btn" @click="convPanelOpen = !convPanelOpen" :title="$t('chat.conversations')">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
-            </svg>
+            <el-icon><ChatDotRound /></el-icon>
           </button>
-          <div class="agent-badge" v-if="currentAgent" :title="currentAgent.name">
-            <span class="agent-badge-icon">{{ currentAgent.icon || '🤖' }}</span>
-            <span class="agent-badge-name">{{ currentAgent.name }}</span>
-            <span class="agent-badge-type">{{ currentAgent.agentType === 'react' ? 'ReAct' : 'Plan-Execute' }}</span>
+          <div class="chat-stage-copy" v-if="currentAgent">
+            <div class="chat-stage-kicker">{{ $t('nav.chat') }}</div>
+            <div class="agent-badge" :title="currentAgent.name">
+              <span class="agent-badge-icon">{{ currentAgent.icon || '🤖' }}</span>
+              <span class="agent-badge-name">{{ currentAgent.name }}</span>
+              <span class="agent-badge-type">{{ currentAgent.agentType === 'react' ? 'ReAct' : 'Plan-Execute' }}</span>
+              <span class="status-dot" :class="connectionStatusClass" :title="connectionStatusLabel"></span>
+            </div>
           </div>
           <div v-else class="no-agent-hint">{{ $t('chat.selectAgent') }}</div>
         </div>
         <div class="chat-header-right">
-          <select
+          <!-- Model selector -->
+          <ModelSelector
             v-if="eligibleModels.length > 0"
-            :value="activeModelValue"
-            class="model-select"
-            :disabled="modelSaving"
-            @change="onModelChange"
-          >
-            <option v-for="item in eligibleModels" :key="item.value" :value="item.value">
-              {{ item.label }}
-            </option>
-          </select>
+            :providers="availableProviders"
+            :active-value="activeModelValue"
+            :active-label="activeModelLabel"
+            :saving="modelSaving"
+            @select="selectModel"
+          />
           <button v-else class="header-btn" @click="goToModelSettings" :title="$t('chat.configModel')">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <circle cx="12" cy="12" r="3"/>
-              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l-.06.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01A1.65 1.65 0 0 0 10.5 3.1V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
-            </svg>
+            <el-icon><Setting /></el-icon>
           </button>
-          <button class="header-btn" @click="clearMessages" :title="$t('chat.clearMessages')">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <polyline points="3 6 5 6 21 6"/>
-              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
-            </svg>
-          </button>
+          <!-- Overflow menu -->
+          <div class="header-overflow-wrap">
+            <button class="header-btn" @click="headerMenuOpen = !headerMenuOpen" :title="$t('common.more') || 'More'">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/></svg>
+            </button>
+            <Transition name="fade">
+              <div v-if="headerMenuOpen" class="header-menu-backdrop" @click="headerMenuOpen = false"></div>
+            </Transition>
+            <Transition name="agent-dropdown">
+              <div v-if="headerMenuOpen" class="header-menu">
+                <button class="header-menu-item" @click="headerMenuOpen = false; goToModelSettings()">
+                  <el-icon><Setting /></el-icon>
+                  <span>{{ $t('chat.configModel') }}</span>
+                </button>
+                <div class="header-menu-divider"></div>
+                <button class="header-menu-item header-menu-item--danger" @click="handleClearMessages">
+                  <el-icon><Delete /></el-icon>
+                  <span>{{ $t('chat.clearMessages') }}</span>
+                </button>
+              </div>
+            </Transition>
+          </div>
         </div>
       </div>
 
@@ -171,7 +235,7 @@
         :loading="isGenerating && !hasPendingApproval"
         :disabled="showModelPrompt || !currentAgent"
         :placeholder="$t('chat.messagePlaceholder')"
-        :hint="`MateClaw · ${currentRuntimeModel}` + (currentConversationId ? ` · Session · ${currentConversationId.slice(0, 8)}...` : '')"
+        :hint="currentRuntimeModel"
         :attachments="pendingAttachments"
         :uploading="uploadingAttachment"
         :max-length="10240"
@@ -186,45 +250,102 @@
         @attachment-remove="removeAttachment"
         @approve="handleApprove"
         @deny="handleDeny"
+        :enable-talk-mode="!!selectedAgentId"
+        :thinking-enabled="thinkingEnabled"
+        @toggle-thinking="thinkingEnabled = !thinkingEnabled"
+        @talk="showTalkMode = true"
       />
+    </div>
+
+        <!-- Talk Mode 覆盖层 -->
+        <TalkMode
+          v-if="showTalkMode"
+          :visible="showTalkMode"
+          :agent-id="selectedAgentId"
+          :conversation-id="currentConversationId"
+          @close="showTalkMode = false"
+        />
+      </div>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { ChatDotRound, Delete, Plus, Setting, UploadFilled } from '@element-plus/icons-vue'
 import { conversationApi, agentApi, modelApi, chatApi } from '@/api/index'
 import { channelIconUrl } from '@/utils/channelSource'
 import { useChat } from '@/composables/chat/useChat'
 import { reconstructErrorInfo } from '@/types/chatError'
+import { reconcileMessages, extractMessages } from '@/utils/messageReconcile'
 import type { Conversation, Agent, ModelConfig, ProviderInfo, ActiveModelsInfo, ChatAttachment, MessageContentPart, Message, ToolCallMeta, StreamPhase } from '@/types'
 
 // 导入组件化组件
 import MessageList from '@/components/chat/MessageList.vue'
 import ChatInput from '@/components/chat/ChatInput.vue'
 import StreamLoadingBar from '@/components/chat/StreamLoadingBar.vue'
+import TalkMode from '@/components/chat/TalkMode.vue'
+import ModelSelector from '@/components/chat/ModelSelector.vue'
 import { useEChartsRenderer } from '@/composables/useEChartsRenderer'
 
-// ============ 移动端状态 ============
+// ============ Talk Mode ============
+const showTalkMode = ref(false)
+
+// ============ 移动端 & 响应式状态 ============
 const isMobile = ref(false)
 const convPanelOpen = ref(false)
+const convPanelCollapsed = ref(localStorage.getItem('mc-conv-collapsed') === 'true')
 let mobileQuery: MediaQueryList | null = null
+let mediumQuery: MediaQueryList | null = null
+const userExplicitConvCollapse = ref(localStorage.getItem('mc-conv-collapsed') === 'true')
 
 function handleMobileChange(e: MediaQueryListEvent | MediaQueryList) {
   isMobile.value = e.matches
   if (!e.matches) convPanelOpen.value = false
 }
 
+function handleConvMediumChange(e: MediaQueryListEvent | MediaQueryList) {
+  if (e.matches && !userExplicitConvCollapse.value) {
+    convPanelCollapsed.value = true
+  } else if (!e.matches && !userExplicitConvCollapse.value) {
+    convPanelCollapsed.value = false
+  }
+}
+
+function toggleConvPanel() {
+  convPanelCollapsed.value = !convPanelCollapsed.value
+  userExplicitConvCollapse.value = convPanelCollapsed.value
+  localStorage.setItem('mc-conv-collapsed', String(convPanelCollapsed.value))
+}
+
 // ============ 配置和常量 ============
-const suggestions = computed(() => [
-  t('chat.suggestionIntro'),
-  t('chat.suggestionPoem'),
-  t('chat.suggestionCode'),
-  t('chat.suggestionWeather'),
-])
+const suggestions = computed(() => {
+  const agent = currentAgent.value
+  // If agent has custom suggestions (stored as newline-separated string in description etc.)
+  const agentSuggestions = (agent as any)?.suggestions as string | undefined
+  if (agentSuggestions) {
+    const parsed = agentSuggestions.split('\n').filter(Boolean).slice(0, 4)
+    if (parsed.length) return parsed
+  }
+  // Agent-type-aware defaults
+  if (agent?.agentType === 'plan_execute') {
+    return [
+      t('chat.suggestionPlan1', '帮我制定一个完整的项目计划'),
+      t('chat.suggestionPlan2', '分步骤帮我完成一个复杂任务'),
+      t('chat.suggestionIntro'),
+      t('chat.suggestionWeather'),
+    ]
+  }
+  return [
+    t('chat.suggestionIntro'),
+    t('chat.suggestionPoem'),
+    t('chat.suggestionCode'),
+    t('chat.suggestionWeather'),
+  ]
+})
 
 // ============ 状态 ============
 const router = useRouter()
@@ -243,6 +364,84 @@ const providers = ref<ProviderInfo[]>([])
 const activeModels = ref<ActiveModelsInfo | null>(null)
 const pendingAttachments = ref<ChatAttachment[]>([])
 const uploadingAttachment = ref(false)
+
+// 思考模式：只有两个状态 — 开或关
+const thinkingEnabled = ref(localStorage.getItem('mateclaw_thinking') !== 'off')
+const thinkingLevel = computed(() => thinkingEnabled.value ? 'high' : 'off')
+watch(thinkingEnabled, (v) => localStorage.setItem('mateclaw_thinking', v ? 'on' : 'off'))
+
+// Dropdowns & menus
+const agentDropdownOpen = ref(false)
+
+const headerMenuOpen = ref(false)
+
+function selectAgent(agent: Agent) {
+  agentDropdownOpen.value = false
+  if (String(agent.id) !== String(selectedAgentId.value)) {
+    selectedAgentId.value = agent.id
+    newConversation()
+  }
+}
+
+async function selectModel(value: string) {
+  const [providerId, model] = value.split('::')
+  if (!providerId || !model) return
+  modelSaving.value = true
+  try {
+    const res: any = await modelApi.setActive({ providerId, model })
+    activeModels.value = res.data || { activeLlm: { providerId, model } }
+    await loadModelState()
+  } catch (e) {
+    ElMessage.error(t('chat.switchModelFailed'))
+  } finally {
+    modelSaving.value = false
+  }
+}
+
+function handleClearMessages() {
+  headerMenuOpen.value = false
+  clearMessages()
+}
+
+// Conversation rename
+const renamingConvId = ref('')
+const renameText = ref('')
+const renameInputRef = ref<HTMLInputElement | null>(null)
+
+function startRename(conv: Conversation) {
+  renamingConvId.value = conv.conversationId
+  renameText.value = conv.title || ''
+  nextTick(() => {
+    renameInputRef.value?.focus()
+    renameInputRef.value?.select()
+  })
+}
+
+async function confirmRename(conv: Conversation) {
+  const newTitle = renameText.value.trim()
+  renamingConvId.value = ''
+  if (!newTitle || newTitle === conv.title) return
+  conv.title = newTitle
+  try {
+    await conversationApi.rename(conv.conversationId, newTitle)
+  } catch {
+    // revert on fail — reload
+    await loadConversations()
+  }
+}
+
+function cancelRename() {
+  renamingConvId.value = ''
+}
+
+// Delete with confirmation
+function confirmDeleteConversation(conversationId: string) {
+  ElMessageBox.confirm(
+    t('chat.deleteConfirm') || 'Delete this conversation?',
+    t('common.confirm'),
+    { type: 'warning', confirmButtonText: t('common.confirm'), cancelButtonText: t('common.cancel') }
+  ).then(() => deleteConversation(conversationId)).catch(() => {})
+}
 
 // 拖拽上传
 const isDragging = ref(false)
@@ -373,8 +572,10 @@ const {
   stopGeneration: stopChatGeneration,
   cancelQueued,
   reconnectStream: reconnectChatStream,
+  resetForNewConversation,
 } = useChat({
   baseUrl: '',
+  thinkingLevel,
   onStreamEnd: async (meta) => {
     // 流结束后刷新会话列表（更新 lastActiveTime / 标题等）
     await loadConversations()
@@ -385,6 +586,18 @@ const {
       }
     }
   },
+})
+
+// ============ 连接状态 ============
+const connectionStatusClass = computed(() => {
+  if (isGenerating.value) return 'status-streaming'
+  if (streamPhase.value === 'failed') return 'status-error'
+  return 'status-idle'
+})
+const connectionStatusLabel = computed(() => {
+  if (isGenerating.value) return t('chat.status.streaming', 'Generating...')
+  if (streamPhase.value === 'failed') return t('chat.status.error', 'Disconnected')
+  return t('chat.status.idle', 'Ready')
 })
 
 // ============ 计算属性 ============
@@ -430,6 +643,12 @@ const activeModelValue = computed(() => {
   return providerId && model ? `${providerId}::${model}` : ''
 })
 
+const activeModelLabel = computed(() => {
+  if (!activeModelValue.value) return ''
+  const match = eligibleModels.value.find(m => m.value === activeModelValue.value)
+  return match?.label || ''
+})
+
 const activeProvider = computed(() => {
   const providerId = activeModels.value?.activeLlm?.providerId
   return providerId ? providers.value.find((provider) => provider.id === providerId) || null : null
@@ -455,33 +674,97 @@ const modelPromptDesc = computed(() => {
   return t('chat.noAvailableModel')
 })
 
+const availableProviders = computed(() =>
+  providers.value.filter((p) => p.available && [...(p.models || []), ...(p.extraModels || [])].length > 0)
+)
+
 const eligibleModels = computed(() => {
-  return providers.value
-    .filter((provider) => provider.available)
-    .flatMap((provider) => {
-      const allModels = [...(provider.models || []), ...(provider.extraModels || [])]
-      return allModels.map((model) => ({
-        value: `${provider.id}::${model.id}`,
-        label: `${provider.name} / ${model.name || model.id}`,
-      }))
-    })
+  return availableProviders.value.flatMap((provider) => {
+    const allModels = [...(provider.models || []), ...(provider.extraModels || [])]
+    return allModels.map((model) => ({
+      value: `${provider.id}::${model.id}`,
+      label: `${provider.name} / ${model.name || model.id}`,
+    }))
+  })
 })
 
 // ============ 生命周期 ============
+function handleKeyboardShortcuts(e: KeyboardEvent) {
+  const mod = e.metaKey || e.ctrlKey
+  if (mod && e.key === 'n') {
+    e.preventDefault()
+    newConversation()
+    chatInputRef.value?.focus?.()
+  }
+  if (mod && e.key === 'k') {
+    e.preventDefault()
+    agentDropdownOpen.value = !agentDropdownOpen.value
+  }
+}
+
+// 轮询定时器：让 ChatConsole 能实时感知外部渠道（WeChat/DingTalk/…）推进来的新消息，
+// 无需 F5 即可看到侧栏列表更新和选中会话的消息/流状态。
+let activityPollTimer: number | null = null
+const ACTIVITY_POLL_MS = 4000
+
+async function pollActivity() {
+  // 页面不可见时不轮询，避免切到别的标签还在空耗
+  if (typeof document !== 'undefined' && document.hidden) return
+  try {
+    await loadConversations()
+  } catch {
+    // 静默失败，下一轮再试
+  }
+  // 自己没在生成时才刷新当前选中会话的消息 + 探测是否该接入流
+  if (currentConversationId.value && !isGenerating.value && streamPhase.value !== 'awaiting_approval') {
+    const cid = currentConversationId.value
+    try {
+      const statusRes: any = await conversationApi.getStatus(cid)
+      if (currentConversationId.value !== cid) return
+      const running = statusRes?.data?.streamStatus === 'running'
+      if (running) {
+        // 外部渠道正在跑：
+        // 1. 先从 DB 拉消息，把刚插入的 user 消息（"你在干什么"之类）带进来，
+        //    否则只接入流的话前端只能看到 assistant content_delta，看不到用户问题。
+        // 2. 再接入流，让后续 content_delta 实时累积到 assistant 气泡。
+        await refreshCurrentConversationMessages(cid)
+        if (currentConversationId.value !== cid || isGenerating.value) return
+        await reconnectStream(cid)
+      } else {
+        // 不在跑：从 DB 对齐消息（新 user 消息 / 刚落库 assistant 会合并进来）
+        await refreshCurrentConversationMessages(cid)
+      }
+    } catch {
+      // 忽略探测失败
+    }
+  }
+}
+
 onMounted(async () => {
+  document.addEventListener('keydown', handleKeyboardShortcuts)
   document.addEventListener('click', handleCodeCopy)
   startECharts()
   mobileQuery = window.matchMedia('(max-width: 768px)')
   handleMobileChange(mobileQuery)
   mobileQuery.addEventListener('change', handleMobileChange)
+  mediumQuery = window.matchMedia('(max-width: 1200px)')
+  handleConvMediumChange(mediumQuery)
+  mediumQuery.addEventListener('change', handleConvMediumChange)
   await Promise.all([loadAgents(), loadModelState(), loadConversations()])
   await hydrateStateFromRoute()
+  activityPollTimer = window.setInterval(pollActivity, ACTIVITY_POLL_MS)
 })
 
 onBeforeUnmount(() => {
+  document.removeEventListener('keydown', handleKeyboardShortcuts)
   document.removeEventListener('click', handleCodeCopy)
   disposeECharts()
   mobileQuery?.removeEventListener('change', handleMobileChange)
+  mediumQuery?.removeEventListener('change', handleConvMediumChange)
+  if (activityPollTimer !== null) {
+    clearInterval(activityPollTimer)
+    activityPollTimer = null
+  }
   stopChatGeneration()
   // 释放所有附件的 ObjectURL，防止内存泄漏
   revokeAllPreviewUrls()
@@ -543,13 +826,20 @@ async function loadConversations() {
 
 async function refreshCurrentConversationMessages(conversationId: string) {
   if (!conversationId) return
-  // 如果已经在生成新消息（用户在 stop 后又快速发了新消息），不覆盖本地状态
   if (isGenerating.value) return
-  // 审批挂起时本地状态比 DB 更丰富（含 thinking + text），不替换
   if (streamPhase.value === 'awaiting_approval') return
   try {
     const res: any = await conversationApi.listMessages(conversationId)
-    messages.value = (res.data || []).map((msg: Message) => normalizeMessage(msg))
+    // Stale guard：await 返回后确认仍是当前会话
+    if (currentConversationId.value !== conversationId) return
+    // 二次 isGenerating 检查：如果 await 期间用户已发新消息，不覆盖本地状态
+    if (isGenerating.value) return
+    const fetched = extractMessages(res).messages.map((msg: Message) => normalizeMessage(msg))
+    // 严格过滤：只保留 conversationId 完全匹配的本地消息，orphan（空 conversationId）直接丢弃
+    const currentMessages = messages.value.filter(
+      (m: any) => m.conversationId === conversationId
+    )
+    messages.value = reconcileMessages(currentMessages, fetched)
   } catch (e) {
     console.warn('[ChatConsole] Failed to refresh current conversation messages:', e)
   }
@@ -573,13 +863,15 @@ async function hydrateStateFromRoute() {
       messages.value = []
       try {
         const res: any = await conversationApi.listMessages(conversationId)
-        messages.value = (res.data || []).map((msg: Message) => normalizeMessage(msg))
+        if (currentConversationId.value !== conversationId) return
+        messages.value = extractMessages(res).messages.map((msg: Message) => normalizeMessage(msg))
       } catch {
         // 消息加载失败，保持空
       }
       try {
+        if (currentConversationId.value !== conversationId) return
         const statusRes: any = await conversationApi.getStatus(conversationId)
-        if (statusRes.data?.streamStatus === 'running') {
+        if (currentConversationId.value === conversationId && statusRes.data?.streamStatus === 'running') {
           await reconnectStream(conversationId)
         }
       } catch {
@@ -603,19 +895,33 @@ function syncRouteState() {
 
 async function selectConversation(conv: Conversation) {
   if (isMobile.value) convPanelOpen.value = false
-  resetStreamingState()
+  // 切换到不同会话：只清理本地 UI/SSE（resetForNewConversation 会 stream.disconnect + 清变量），
+  // 但不 POST /chat/{A}/stop —— 让 A 的后台 agent run 跑到完成。
+  // 用户之后回到 A：pollActivity / selectConversation 的 /status 探测会自动 reconnect 接回实时流；
+  // 若 A 已完成，refreshCurrentConversationMessages 会从 DB 拉完整结果。
+  // 点同一个会话则完全不 reset，避免打断正在观察的流。
+  const switchingAway = currentConversationId.value !== conv.conversationId
+  if (switchingAway) {
+    resetForNewConversation()
+  }
   currentConversationId.value = conv.conversationId
   selectedAgentId.value = conv.agentId || selectedAgentId.value
+  const requestedConvId = conv.conversationId
   try {
-    const res: any = await conversationApi.listMessages(conv.conversationId)
-    messages.value = (res.data || []).map((msg: Message) => normalizeMessage(msg))
+    const res: any = await conversationApi.listMessages(requestedConvId)
+    // Stale guard：await 返回后确认仍是当前会话，否则丢弃
+    if (currentConversationId.value !== requestedConvId) return
+    // 点同一个会话时，若已有 SSE 在跑就不要覆盖本地消息状态
+    if (switchingAway || !isGenerating.value) {
+      messages.value = extractMessages(res).messages.map((msg: Message) => normalizeMessage(msg))
+    }
 
     // Hydrate pending approvals：恢复刷新后丢失的审批卡片
     try {
-      const approvalRes: any = await chatApi.getPendingApprovals(conv.conversationId)
+      const approvalRes: any = await chatApi.getPendingApprovals(requestedConvId)
+      if (currentConversationId.value !== requestedConvId) return
       const pendingApprovals = approvalRes.data || []
       if (pendingApprovals.length > 0) {
-        // 将 pending approvals 绑定到最近的 assistant 消息
         const assistantMessages = messages.value.filter(m => m.role === 'assistant')
         const lastAssistant = assistantMessages[assistantMessages.length - 1]
         if (lastAssistant) {
@@ -629,7 +935,6 @@ async function selectConversation(conv: Conversation) {
                 arguments: pa.toolArguments,
                 reason: pa.reason,
                 status: 'pending_approval',
-                // 增强字段（Phase 6: 结构化风险信息）
                 findings: pa.findingsJson ? JSON.parse(pa.findingsJson) : undefined,
                 maxSeverity: pa.maxSeverity || undefined,
                 summary: pa.summary || undefined,
@@ -642,8 +947,21 @@ async function selectConversation(conv: Conversation) {
       // hydration 失败不影响正常使用
     }
 
-    if (conv.streamStatus === 'running') {
-      await reconnectStream(conv.conversationId)
+    // 决定是否重连 SSE：
+    // - 快照 streamStatus==='running' → 直接重连
+    // - 否则探测实时状态（兜底处理：渠道消息进入后侧栏快照未刷新时，仍能接入运行中的流）
+    let shouldReconnect = conv.streamStatus === 'running'
+    if (!shouldReconnect) {
+      try {
+        const statusRes: any = await conversationApi.getStatus(requestedConvId)
+        if (currentConversationId.value !== requestedConvId) return
+        shouldReconnect = statusRes?.data?.streamStatus === 'running'
+      } catch {
+        // 探测失败不阻断主流程
+      }
+    }
+    if (currentConversationId.value === requestedConvId && shouldReconnect) {
+      await reconnectStream(requestedConvId)
     }
   } catch (e) {
     ElMessage.error(t('chat.loadMessagesFailed'))
@@ -681,26 +999,9 @@ async function clearMessages() {
   }
 }
 
-function onAgentChange() {
-  newConversation()
-}
+// onAgentChange removed — replaced by selectAgent()
 
-async function onModelChange(event: Event) {
-  const value = (event.target as HTMLSelectElement).value
-  const [providerId, model] = value.split('::')
-  if (!providerId || !model) return
-
-  modelSaving.value = true
-  try {
-    const res: any = await modelApi.setActive({ providerId, model })
-    activeModels.value = res.data || { activeLlm: { providerId, model } }
-    await loadModelState()
-  } catch (e) {
-    ElMessage.error(t('chat.switchModelFailed'))
-  } finally {
-    modelSaving.value = false
-  }
-}
+// onModelChange removed — replaced by selectModel()
 
 function goToModelSettings() {
   router.push('/settings/models')
@@ -832,6 +1133,7 @@ async function handleSendMessage(content: string) {
       conversationId: currentConversationId.value,
       agentId: selectedAgentId.value,
       contentParts,
+      thinkingLevel: thinkingLevel.value,
       attachments: outgoingAttachments.map(a => ({
         type: 'file' as const,
         fileUrl: a.url,
@@ -910,7 +1212,9 @@ function handleCancelQueued() {
 
 // 简化版重置函数
 function resetStreamingState() {
+  // 先通知后端停止旧流（fire-and-forget），再彻底清理前端状态
   stopChatGeneration()
+  resetForNewConversation()
 }
 
 // ============ 附件处理 ============
@@ -990,6 +1294,19 @@ function buildOutgoingParts(text: string, attachments: ChatAttachment[]): Messag
 function normalizeMessage(raw: Message): Message {
   const msg: Message = { ...raw, contentParts: raw.contentParts ? [...raw.contentParts] : [] }
 
+  // 统一解析 metadata：确保是对象而非 JSON 字符串
+  // 注意：后端 metadata 在 DB 中是 JSON 字符串，Jackson 序列化时可能双重编码
+  if (typeof msg.metadata === 'string') {
+    try {
+      let parsed = JSON.parse(msg.metadata)
+      // 处理双重编码：parse 后仍然是字符串的情况
+      if (typeof parsed === 'string') {
+        try { parsed = JSON.parse(parsed) } catch { /* ignore */ }
+      }
+      msg.metadata = parsed
+    } catch { msg.metadata = {} as any }
+  }
+
   // 保留后端返回的 token 字段（MessageVO 新增）
   if ((raw as any).promptTokens) msg.promptTokens = (raw as any).promptTokens
   if ((raw as any).completionTokens) msg.completionTokens = (raw as any).completionTokens
@@ -997,7 +1314,10 @@ function normalizeMessage(raw: Message): Message {
   if (msg.contentParts.length === 0 && msg.content) {
     if (msg.role === 'assistant') {
       const parsed = parseThinkingContent(msg.content)
-      if (parsed.thinking) msg.contentParts.push({ type: 'thinking', text: parsed.thinking })
+      // thinkingLevel=off 时不展示 thinking 内容，直接剥离 <think> 标签
+      if (parsed.thinking && thinkingLevel.value !== 'off') {
+        msg.contentParts.push({ type: 'thinking', text: parsed.thinking })
+      }
       if (parsed.content) msg.contentParts.push({ type: 'text', text: parsed.content })
       msg.content = parsed.content
     } else {
@@ -1117,43 +1437,128 @@ function handleCodeCopy(e: MouseEvent) {
 </script>
 
 <style scoped>
-.chat-layout {
-  display: flex;
+.chat-console-shell {
+  background: transparent;
+  min-height: 0;
   height: 100%;
   overflow: hidden;
 }
 
+.chat-console-frame {
+  height: min(calc(100vh - 28px), 100%);
+  min-height: 0;
+  overflow: hidden;
+}
+
+.chat-layout {
+  display: flex;
+  height: 100%;
+  overflow: hidden;
+  min-height: 0;
+}
+
 .conversation-panel {
-  width: 260px;
-  min-width: 260px;
-  background: var(--mc-bg-elevated);
-  border-right: 1px solid var(--mc-border);
+  width: 248px;
+  min-width: 248px;
+  background: linear-gradient(180deg, var(--mc-panel-top), var(--mc-panel-bottom));
+  border-right: 1px solid var(--mc-border-light);
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  transition: width 0.25s ease, min-width 0.25s ease;
+}
+
+.conversation-panel.conv-collapsed {
+  width: 54px;
+  min-width: 54px;
+}
+
+.conversation-panel.conv-collapsed .panel-header {
+  justify-content: center;
+  padding: 14px 8px 12px;
+}
+
+.conversation-panel.conv-collapsed .agent-selector {
+  padding: 10px 6px 12px;
+}
+
+.conversation-panel.conv-collapsed .agent-select-trigger {
+  justify-content: center;
+  padding: 8px;
+}
+
+.conversation-panel.conv-collapsed .agent-dropdown {
+  position: fixed;
+  top: auto;
+  left: 62px;
+  right: auto;
+  min-width: 260px;
+}
+
+.conversation-panel.conv-collapsed .conv-item {
+  justify-content: center;
+  padding: 10px 6px;
+}
+
+.conversation-panel.conv-collapsed .conv-icon {
+  margin: 0;
+}
+
+.conv-collapse-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 28px;
+  border: none;
+  border-bottom: 1px solid var(--mc-border-light);
+  background: transparent;
+  color: var(--mc-text-tertiary);
+  cursor: pointer;
+  transition: all 0.15s;
+  flex-shrink: 0;
+}
+
+.conv-collapse-btn:hover {
+  background: var(--mc-bg-muted);
+  color: var(--mc-text-primary);
 }
 
 .panel-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 16px;
+  padding: 14px 14px 12px;
   border-bottom: 1px solid var(--mc-border-light);
 }
 
+.panel-header-copy {
+  min-width: 0;
+}
+
+.panel-kicker {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--mc-accent);
+  margin-bottom: 4px;
+}
+
 .panel-title {
-  font-size: 15px;
-  font-weight: 600;
+  font-size: 16px;
+  font-weight: 700;
   color: var(--mc-text-primary);
   margin: 0;
+  letter-spacing: -0.03em;
 }
 
 .new-chat-btn {
   width: 28px;
   height: 28px;
   border: 1px solid var(--mc-border);
-  background: var(--mc-bg-elevated);
-  border-radius: 6px;
+  background: var(--mc-panel-raised);
+  border-radius: 10px;
   cursor: pointer;
   display: flex;
   align-items: center;
@@ -1169,25 +1574,151 @@ function handleCodeCopy(e: MouseEvent) {
 }
 
 .agent-selector {
-  padding: 10px 12px;
+  padding: 10px 12px 12px;
   border-bottom: 1px solid var(--mc-border-light);
+  position: relative;
 }
 
-.agent-select {
+.agent-select-trigger {
   width: 100%;
-  padding: 7px 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
   border: 1px solid var(--mc-border);
-  border-radius: 6px;
+  border-radius: 12px;
   font-size: 13px;
   color: var(--mc-text-primary);
   background: var(--mc-bg-sunken);
   cursor: pointer;
   outline: none;
+  transition: all 0.15s;
 }
 
-.agent-select:focus {
+.agent-select-trigger:hover {
   border-color: var(--mc-primary);
-  box-shadow: 0 0 0 2px rgba(217, 119, 87, 0.1);
+  background: var(--mc-bg-elevated);
+}
+
+.agent-select-trigger__icon {
+  font-size: 18px;
+  line-height: 1;
+}
+
+.agent-select-trigger__name {
+  flex: 1;
+  text-align: left;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.agent-select-trigger__arrow {
+  flex-shrink: 0;
+  color: var(--mc-text-tertiary);
+  transition: transform 0.2s;
+}
+
+.agent-select-trigger__arrow.open {
+  transform: rotate(180deg);
+}
+
+.agent-dropdown-backdrop,
+.model-dropdown-backdrop,
+.header-menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 99;
+}
+
+.agent-dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 12px;
+  right: 12px;
+  min-width: 240px;
+  z-index: 100;
+  background: var(--mc-bg-elevated);
+  border: 1px solid var(--mc-border);
+  border-radius: 14px;
+  padding: 6px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.12);
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.agent-dropdown-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: background 0.12s;
+}
+
+.agent-dropdown-item:hover {
+  background: var(--mc-bg-sunken);
+}
+
+.agent-dropdown-item.active {
+  background: var(--mc-primary-bg);
+}
+
+.agent-dropdown-item__icon {
+  font-size: 24px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.agent-dropdown-item__info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.agent-dropdown-item__name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--mc-text-primary);
+}
+
+.agent-dropdown-item__desc {
+  font-size: 11px;
+  color: var(--mc-text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.agent-dropdown-item__check {
+  flex-shrink: 0;
+  color: var(--mc-primary);
+}
+
+.agent-dropdown-empty {
+  padding: 16px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--mc-text-tertiary);
+}
+
+.agent-dropdown-enter-active {
+  transition: all 0.15s ease-out;
+}
+.agent-dropdown-leave-active {
+  transition: all 0.1s ease-in;
+}
+.agent-dropdown-enter-from {
+  opacity: 0;
+  transform: translateY(-6px) scale(0.97);
+}
+.agent-dropdown-leave-to {
+  opacity: 0;
+  transform: translateY(-4px) scale(0.98);
 }
 
 .conversation-list {
@@ -1197,26 +1728,27 @@ function handleCodeCopy(e: MouseEvent) {
 }
 
 .conv-group-title {
-  padding: 8px 10px 4px;
-  font-size: 11px;
-  font-weight: 600;
+  padding: 10px 10px 6px;
+  font-size: 10px;
+  font-weight: 700;
   color: var(--mc-text-tertiary);
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.12em;
 }
 
 .conv-item {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 9px 10px;
-  border-radius: 6px;
+  padding: 10px 11px;
+  border-radius: 14px;
   cursor: pointer;
   transition: all 0.15s;
 }
 
 .conv-item:hover {
   background: var(--mc-bg-sunken);
+  transform: translateY(-1px);
 }
 
 .conv-item.active {
@@ -1230,10 +1762,62 @@ function handleCodeCopy(e: MouseEvent) {
 .conv-icon {
   color: var(--mc-text-tertiary);
   flex-shrink: 0;
+  position: relative;
 }
 
 .conv-item.active .conv-icon {
   color: var(--mc-primary);
+}
+
+/* 正在执行：图标右上角脉冲小点（折叠与展开态均可见） */
+.conv-running-dot {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #fbbf24;
+  box-shadow: 0 0 4px rgba(251, 191, 36, 0.6), 0 0 0 2px var(--mc-bg-primary, #fff);
+  animation: pulse-dot 1.2s infinite;
+  pointer-events: none;
+}
+
+.conv-item.is-running {
+  background: color-mix(in srgb, #fbbf24 8%, transparent);
+}
+
+.conv-item.is-running:hover {
+  background: color-mix(in srgb, #fbbf24 14%, var(--mc-bg-sunken));
+}
+
+.conv-item.is-running.active {
+  background: var(--mc-primary-bg);
+}
+
+/* 展开态：标题右侧"生成中..."小徽章 */
+.conv-running-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 500;
+  color: #b45309;
+  background: rgba(251, 191, 36, 0.15);
+  border: 1px solid rgba(251, 191, 36, 0.3);
+  padding: 1px 6px 1px 5px;
+  border-radius: 10px;
+  line-height: 1.3;
+  white-space: nowrap;
+}
+
+.conv-running-badge-pulse {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #f59e0b;
+  animation: pulse-dot 1.2s infinite;
 }
 
 .conv-info {
@@ -1245,9 +1829,19 @@ function handleCodeCopy(e: MouseEvent) {
   font-size: 13px;
   font-weight: 500;
   color: var(--mc-text-primary);
-  white-space: nowrap;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* 标题文本本身承担省略号；flex 父级上的 overflow:hidden 会阻止 ellipsis 正常工作 */
+.conv-title > span:first-child {
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 1 1 auto;
 }
 
 .conv-item.active .conv-title {
@@ -1265,6 +1859,19 @@ function handleCodeCopy(e: MouseEvent) {
 
 .conv-dot {
   color: var(--mc-text-tertiary);
+}
+
+.conv-title-input {
+  width: 100%;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--mc-text-primary);
+  background: var(--mc-bg-elevated);
+  border: 1px solid var(--mc-primary);
+  border-radius: 6px;
+  padding: 2px 6px;
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(217, 119, 87, 0.15);
 }
 
 .conv-delete {
@@ -1302,8 +1909,9 @@ function handleCodeCopy(e: MouseEvent) {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  background: var(--mc-chat-bg);
+  background: linear-gradient(180deg, var(--mc-chat-header-bg), var(--mc-chat-bg));
   position: relative;
+  min-height: 0;
 }
 
 /* 拖拽上传遮罩 */
@@ -1346,25 +1954,51 @@ function handleCodeCopy(e: MouseEvent) {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 12px 20px;
-  background: var(--mc-chat-header-bg);
+  padding: 10px 16px;
+  background: linear-gradient(180deg, var(--mc-panel-raised), var(--mc-surface-overlay));
   border-bottom: 1px solid var(--mc-border);
   min-height: 52px;
+  backdrop-filter: blur(12px);
+  gap: 10px;
+}
+
+.chat-header-left {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 10px;
 }
 
 .chat-header-right {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-shrink: 0;
+}
+
+.chat-stage-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.chat-stage-kicker {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--mc-accent);
 }
 
 .agent-badge {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 10px;
+  padding: 5px 10px;
   background: var(--mc-primary-bg);
-  border-radius: 20px;
+  border-radius: 999px;
+  max-width: 100%;
 }
 
 .agent-badge-icon {
@@ -1373,8 +2007,11 @@ function handleCodeCopy(e: MouseEvent) {
 
 .agent-badge-name {
   font-size: 13px;
-  font-weight: 500;
+  font-weight: 600;
   color: var(--mc-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .agent-badge-type {
@@ -1385,28 +2022,77 @@ function handleCodeCopy(e: MouseEvent) {
   border-radius: 10px;
 }
 
+.status-dot {
+  width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; margin-left: 2px;
+  transition: background 0.3s;
+}
+.status-idle { background: #34d399; box-shadow: 0 0 4px rgba(52, 211, 153, 0.5); }
+.status-streaming { background: #fbbf24; box-shadow: 0 0 4px rgba(251, 191, 36, 0.5); animation: pulse-dot 1.2s infinite; }
+.status-error { background: #f87171; box-shadow: 0 0 4px rgba(248, 113, 113, 0.5); }
+@keyframes pulse-dot { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+
 .no-agent-hint {
   font-size: 13px;
   color: var(--mc-text-tertiary);
 }
 
-.model-select {
-  min-width: 260px;
-  height: 32px;
-  border: 1px solid var(--mc-border);
-  border-radius: 8px;
+/* Model selector */
+/* Model selector styles moved to ModelSelector.vue */
+
+/* Header overflow menu */
+.header-overflow-wrap {
+  position: relative;
+}
+
+.header-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 100;
+  min-width: 180px;
   background: var(--mc-bg-elevated);
-  color: var(--mc-text-primary);
+  border: 1px solid var(--mc-border);
+  border-radius: 12px;
+  padding: 4px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+}
+
+.header-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 9px 12px;
+  border: none;
+  background: none;
+  border-radius: 8px;
   font-size: 13px;
-  padding: 0 10px;
+  color: var(--mc-text-primary);
+  cursor: pointer;
+  transition: background 0.12s;
+}
+
+.header-menu-item:hover {
+  background: var(--mc-bg-sunken);
+}
+
+.header-menu-item--danger:hover {
+  background: var(--mc-danger-bg);
+  color: var(--mc-danger);
+}
+
+.header-menu-divider {
+  height: 1px;
+  background: var(--mc-border-light);
+  margin: 2px 8px;
 }
 
 .header-btn {
-  width: 32px;
-  height: 32px;
+  width: 30px;
+  height: 30px;
   border: 1px solid var(--mc-border);
-  background: var(--mc-bg-elevated);
-  border-radius: 6px;
+  background: var(--mc-panel-raised);
+  border-radius: 10px;
   cursor: pointer;
   display: flex;
   align-items: center;
@@ -1447,10 +2133,10 @@ function handleCodeCopy(e: MouseEvent) {
 
 .btn-primary {
   padding: 8px 16px;
-  background: var(--mc-primary);
+  background: linear-gradient(135deg, var(--mc-primary), var(--mc-primary-hover));
   color: white;
   border: none;
-  border-radius: 8px;
+  border-radius: 12px;
   font-size: 14px;
   cursor: pointer;
   transition: background 0.15s;
@@ -1471,14 +2157,30 @@ function handleCodeCopy(e: MouseEvent) {
 
 /* ===== 移动端适配 ===== */
 @media (max-width: 768px) {
+  .chat-console-shell {
+    padding: 0 !important;
+    height: 100dvh !important;
+    height: 100vh !important;
+    overflow: hidden !important;
+    min-height: 0 !important;
+  }
+
+  .chat-console-frame {
+    height: 100% !important;
+    min-height: 0 !important;
+    overflow: hidden !important;
+    border-radius: 0;
+    border: none;
+  }
+
   .conversation-panel {
     position: fixed;
     left: 0;
     top: 0;
     bottom: 0;
     z-index: 100;
-    width: 280px;
-    min-width: 280px;
+    width: 272px;
+    min-width: 272px;
     transform: translateX(-100%);
     transition: transform 0.25s ease;
     box-shadow: none;
@@ -1518,19 +2220,16 @@ function handleCodeCopy(e: MouseEvent) {
   }
 
   .chat-header {
-    padding: 10px 12px;
+    padding: 9px 12px;
     gap: 8px;
-  }
-
-  .chat-header-left {
-    display: flex;
-    align-items: center;
-    min-width: 0;
-    gap: 6px;
   }
 
   .agent-badge {
     padding: 4px 8px;
+  }
+
+  .chat-stage-kicker {
+    display: none;
   }
 
   .agent-badge-name,
@@ -1538,10 +2237,12 @@ function handleCodeCopy(e: MouseEvent) {
     display: none;
   }
 
-  .model-select {
-    min-width: 0;
+  .model-select-trigger {
     max-width: 160px;
-    flex: 1;
+  }
+
+  .model-dropdown {
+    min-width: 200px;
   }
 
   .drop-overlay__content {
@@ -1549,4 +2250,28 @@ function handleCodeCopy(e: MouseEvent) {
     font-size: 14px;
   }
 }
+
+@media (max-width: 480px) {
+  .chat-header {
+    padding: 6px 8px;
+    min-height: 44px;
+  }
+
+  .chat-header-right {
+    gap: 4px;
+  }
+
+  .model-select-trigger {
+    max-width: 120px;
+    height: 30px;
+    padding: 0 8px;
+    font-size: 12px;
+  }
+
+  .header-btn {
+    width: 28px;
+    height: 28px;
+  }
+}
+
 </style>

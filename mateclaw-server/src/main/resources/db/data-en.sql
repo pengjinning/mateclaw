@@ -10,7 +10,7 @@ MERGE INTO mate_agent (id, name, description, agent_type, system_prompt, model_n
 KEY (id)
 VALUES (1000000001, 'MateClaw Assistant', 'Default AI assistant with ReAct mode and tool calling', 'react',
         'You are MateClaw, an intelligent AI assistant. You can help users answer questions, analyze data, and execute tasks. Please respond professionally and in a friendly manner.',
-        NULL, 10, TRUE, '🤖', 'default,assistant', NOW(), NOW(), 0);
+        NULL, 25, TRUE, '🤖', 'default,assistant', NOW(), NOW(), 0);
 
 -- Default Agent: Task Planner (Plan-Execute mode)
 MERGE INTO mate_agent (id, name, description, agent_type, system_prompt, model_name, max_iterations, enabled, icon, tags, create_time, update_time, deleted)
@@ -24,7 +24,7 @@ MERGE INTO mate_agent (id, name, description, agent_type, system_prompt, model_n
 KEY (id)
 VALUES (1000000003, 'StateGraph ReAct', 'StateGraph-based ReAct Agent with explicit reasoning loops and tool calling', 'react',
         'You are an intelligent assistant based on the StateGraph architecture. You can use tools to help users solve problems. Please respond professionally and in a friendly manner.',
-        NULL, 10, TRUE, '🔄', 'react,stategraph,tools', NOW(), NOW(), 0);
+        NULL, 25, TRUE, '🔄', 'react,stategraph,tools', NOW(), NOW(), 0);
 
 -- ==================== Local Model Providers (displayed first) ====================
 
@@ -114,6 +114,10 @@ MERGE INTO mate_model_provider (provider_id, name, api_key_prefix, chat_model, a
 KEY (provider_id)
 VALUES ('volcengine', 'Volcano Engine', '', 'OpenAIChatModel', '', 'https://ark.cn-beijing.volces.com/api/v3', '{}', FALSE, FALSE, FALSE, TRUE, TRUE, TRUE, NOW(), NOW());
 
+MERGE INTO mate_model_provider (provider_id, name, api_key_prefix, chat_model, api_key, base_url, generate_kwargs, is_custom, is_local, support_model_discovery, support_connection_check, freeze_url, require_api_key, auth_type, create_time, update_time)
+KEY (provider_id)
+VALUES ('openai-chatgpt', 'OpenAI ChatGPT (OAuth)', '', 'ChatGPTChatModel', '', 'https://chatgpt.com/backend-api', '{}', FALSE, FALSE, FALSE, FALSE, TRUE, FALSE, 'oauth', NOW(), NOW());
+
 -- ==================== Local model pre-configs (Ollama, disabled by default) ====================
 MERGE INTO mate_model_config (id, name, provider, model_name, description, temperature, max_tokens, top_p, builtin, enabled, is_default, create_time, update_time, deleted)
 KEY (id) VALUES
@@ -155,8 +159,7 @@ MERGE INTO mate_model_config (id, name, provider, model_name, description, tempe
 (1000000101, 'Qwen3 Max', 'dashscope', 'qwen3-max', '', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
 (1000000102, 'Qwen3 235B A22B Thinking', 'dashscope', 'qwen3-235b-a22b-thinking-2507', '', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
 (1000000103, 'DeepSeek-V3.2', 'dashscope', 'deepseek-v3.2', '', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
-(1000000170, 'Qwen3.5 Plus', 'dashscope', 'qwen3.5-plus', 'Qwen 3.5 series latest balanced model', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
-(1000000171, 'Qwen3.5 Max', 'dashscope', 'qwen3.5-max', 'Qwen 3.5 series strongest model', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
+-- Removed: qwen3.5-plus / qwen3.5-max — unavailable on DashScope native protocol (returns 400 InvalidParameter)
 (1000000172, 'Qwen3 Plus', 'dashscope', 'qwen3-plus', 'Qwen3 balanced model', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
 (1000000173, 'Qwen Long', 'dashscope', 'qwen-long', 'Long-context model with extended context support', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
 (1000000104, 'Qwen3.5-122B-A10B', 'modelscope', 'Qwen/Qwen3.5-122B-A10B', '', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
@@ -240,7 +243,9 @@ MERGE INTO mate_model_config (id, name, provider, model_name, description, tempe
 (1000000233, 'Doubao 1.5 Vision Pro 32K', 'volcengine', 'doubao-1.5-vision-pro-32k', 'Doubao multimodal vision model', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
 (1000000234, 'Doubao 1.5 Thinking Pro', 'volcengine', 'doubao-1.5-thinking-pro', 'Doubao deep reasoning model', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
 (1000000235, 'Doubao 1.5 Thinking Lite', 'volcengine', 'doubao-1.5-thinking-lite', 'Doubao lite reasoning model', 0.7, 4096, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
-(1000000240, 'Kimi for Coding', 'kimi-code', 'kimi-for-coding', 'Kimi Code dedicated coding model', 0.2, 32768, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0);
+(1000000240, 'Kimi for Coding', 'kimi-code', 'kimi-for-coding', 'Kimi Code dedicated coding model', 0.2, 32768, 0.8, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
+(1000000250, 'GPT-5.4', 'openai-chatgpt', 'gpt-5.4', 'ChatGPT Plus/Pro member model (OAuth login)', NULL, 128000, NULL, TRUE, TRUE, FALSE, NOW(), NOW(), 0),
+(1000000251, 'GPT-5.4 Mini', 'openai-chatgpt', 'gpt-5.4-mini', 'ChatGPT member lightweight model', NULL, 128000, NULL, TRUE, TRUE, FALSE, NOW(), NOW(), 0);
 
 -- Default system settings
 MERGE INTO mate_system_setting (id, setting_key, setting_value, description, create_time, update_time)
@@ -287,6 +292,14 @@ VALUES (1000000010, 'tavilyApiKey', '', 'Tavily API Key', NOW(), NOW());
 MERGE INTO mate_system_setting (id, setting_key, setting_value, description, create_time, update_time)
 KEY (id)
 VALUES (1000000011, 'tavilyBaseUrl', 'https://api.tavily.com/search', 'Tavily base URL', NOW(), NOW());
+
+MERGE INTO mate_system_setting (id, setting_key, setting_value, description, create_time, update_time)
+KEY (id)
+VALUES (1000000012, 'duckduckgoEnabled', 'true', 'DuckDuckGo keyless search fallback (zero-config)', NOW(), NOW());
+
+MERGE INTO mate_system_setting (id, setting_key, setting_value, description, create_time, update_time)
+KEY (id)
+VALUES (1000000013, 'searxngBaseUrl', '', 'SearXNG instance base URL (auto-configured in Docker)', NOW(), NOW());
 
 -- Built-in tool: Date & Time
 MERGE INTO mate_tool (id, name, display_name, description, tool_type, bean_name, icon, enabled, builtin, create_time, update_time, deleted)
@@ -358,6 +371,24 @@ MERGE INTO mate_tool (id, name, display_name, description, tool_type, bean_name,
 KEY (id)
 VALUES (1000000014, 'DelegateAgentTool', 'Agent Delegation', 'Delegate tasks to other Agents for multi-agent collaboration. Call target Agent by name, run in isolated session and return result.', 'builtin', 'delegateAgentTool', '🤝', TRUE, TRUE, NOW(), NOW(), 0);
 
+-- Built-in tool: Video Generation
+MERGE INTO mate_tool (id, name, display_name, description, tool_type, bean_name, icon, enabled, builtin, create_time, update_time, deleted)
+KEY (id)
+VALUES (1000000015, 'VideoGenerateTool', 'Video Generation', 'Generate videos using AI. Supports text-to-video and image-to-video modes. Video generation is asynchronous and will appear in conversation when complete.', 'builtin', 'videoGenerateTool', '🎬', TRUE, TRUE, NOW(), NOW(), 0);
+
+MERGE INTO mate_tool (id, name, display_name, description, tool_type, bean_name, icon, enabled, builtin, create_time, update_time, deleted)
+KEY (id)
+VALUES (1000000016, 'ImageGenerateTool', 'Image Generation', 'Generate images using AI. Supports text-to-image mode with multiple providers: DashScope, OpenAI DALL-E, fal.ai Flux, Zhipu CogView. Auto-fallback between providers.', 'builtin', 'imageGenerateTool', '🎨', TRUE, TRUE, NOW(), NOW(), 0);
+
+MERGE INTO mate_tool (id, name, display_name, description, tool_type, bean_name, icon, enabled, builtin, create_time, update_time, deleted)
+KEY (id)
+VALUES (1000000017, 'WikiTool', 'Wiki Knowledge Base', 'Read, search, and trace sources in Wiki knowledge bases. Supports wiki_read_page, wiki_list_pages, wiki_search_pages, wiki_trace_source.', 'builtin', 'wikiTool', '📚', TRUE, TRUE, NOW(), NOW(), 0);
+
+-- Built-in tool: Cron Job Management (chat-based scheduled task management)
+MERGE INTO mate_tool (id, name, display_name, description, tool_type, bean_name, icon, enabled, builtin, create_time, update_time, deleted)
+KEY (id)
+VALUES (1000000018, 'CronJobTool', 'Scheduled Tasks', 'Create, list, enable/disable, and delete scheduled tasks (cron jobs) through chat. Supports 5-field cron expressions for flexible scheduling.', 'builtin', 'cronJobTool', '⏰', TRUE, TRUE, NOW(), NOW(), 0);
+
 -- Example MCP Server: Filesystem (see MateClaw docs mcpServers.filesystem)
 MERGE INTO mate_mcp_server (
     id, name, description, transport, url, headers_json, command, args_json, env_json, cwd,
@@ -373,10 +404,10 @@ VALUES (
     NULL,
     NULL,
     'npx',
-    '["-y","@modelcontextprotocol/server-filesystem","/Users/mate"]',
+    '["-y","@modelcontextprotocol/server-filesystem","${user.home}"]',
     '{}',
-    '/Users/mate',
-    TRUE,
+    NULL,
+    FALSE,
     30,
     30,
     'disconnected',
@@ -476,6 +507,10 @@ VALUES (1000000013, 'mateclaw_source_index', 'Map user questions to MateClaw doc
 MERGE INTO mate_skill (id, name, description, skill_type, icon, version, author, config_json, enabled, builtin, tags, create_time, update_time, deleted)
 KEY (id)
 VALUES (1000000014, 'sql_query', 'Query databases using natural language. Discover schemas, generate SQL, and execute read-only queries against configured external datasources.', 'builtin', '📊', '1.0.0', 'MateClaw', '{"upstream":"mateclaw","entryFile":"SKILL.md"}', TRUE, TRUE, 'sql,database,query,data', NOW(), NOW(), 0);
+
+MERGE INTO mate_skill (id, name, description, skill_type, icon, version, author, config_json, enabled, builtin, tags, create_time, update_time, deleted)
+KEY (id)
+VALUES (1000000015, 'steve_jobs_perspective', 'Steve Jobs thinking OS. Analyze products, evaluate decisions, and give feedback through Jobs'' perspective, using his six mental models and distinctive expression style.', 'builtin', '🍎', '1.0.0', 'MateClaw', '{"upstream":"mateclaw","entryFile":"SKILL.md"}', TRUE, TRUE, 'persona,jobs,product,strategy,thinking', NOW(), NOW(), 0);
 
 -- Populate skill_content for key built-in skills (SKILL.md execution protocol)
 -- NOTE: For pdf/docx/pptx/xlsx/himalaya, the authoritative SKILL.md is bundled in
@@ -1030,6 +1065,41 @@ When answering **installation, configuration, behavior** questions, first **clas
 - This skill **does not replace** actual reading: after identifying candidate paths, read and verify immediately
 ' WHERE id = 1000000013;
 
+UPDATE mate_skill SET skill_content = '# Steve Jobs · Thinking Operating System
+
+## Role-Playing Rules (Highest Priority)
+When this Skill is activated, respond directly as Steve Jobs:
+- Use "I" instead of "Jobs would think..."
+- Respond with his tone, rhythm, and vocabulary
+- Never break character for meta-analysis (unless user explicitly says "exit persona")
+
+## Activation Triggers
+Automatically activate when user message contains:
+- "Steve Jobs perspective", "Jobs mode", "think like Jobs"
+- "What would Jobs say", "Jobs'' view on"
+
+## Six Core Mental Models
+1. **Focus = Saying No** — Say No to a hundred other good ideas
+2. **The Whole Widget** — People who are serious about software should make their own hardware
+3. **Connecting the Dots** — You can''t connect the dots looking forward, only backward
+4. **Death as Decision Tool** — If today were the last day of your life, would you still do this?
+5. **Reality Distortion Field** — Make people believe impossible goals are possible
+6. **Technology x Liberal Arts** — Technology alone is not enough
+
+## Decision Heuristics
+- Subtract first: ask "what can we cut?"
+- Don''t ask users what they want: they don''t know until you show them
+- A+ Team: only work with the best people
+- Perfect details: even the parts you can''t see must be perfect
+
+## Expression DNA
+- Short sentences, rhetorical questions, rule of three
+- High-frequency words: insanely great, revolutionary, magical, incredible
+- Forbidden words: never use "okay", "not bad", "could be improved" — only extremes
+- Pattern: conclusion first, create dramatic pauses
+
+Use read_skill_file to access references/ for more background material.' WHERE id = 1000000015;
+
 -- ==================== Channel Seed Data ====================
 -- MateClaw supports multiple channels
 
@@ -1170,6 +1240,23 @@ VALUES (1000000008, 'WeChat', 'weixin', 1000000001, '', '{
   "message_format": "auto"
 }', FALSE,
         'WeChat personal account channel (iLink Bot HTTP long polling). Get bot_token by scanning QR code to login, or enter existing token. Based on iLink Bot API, supports text, image, voice (ASR), file, and video messages', NOW(), NOW(), 0);
+
+-- 9. Slack (disabled by default, requires bot_token / app_token)
+MERGE INTO mate_channel (id, name, channel_type, agent_id, bot_prefix, config_json, enabled, description, create_time, update_time, deleted)
+KEY (id)
+VALUES (1000000009, 'Slack Bot', 'slack', 1000000001, '', '{
+  "bot_token": "",
+  "app_token": "",
+  "signing_secret": "",
+  "dm_policy": "open",
+  "group_policy": "mention",
+  "allow_from": [],
+  "deny_message": "Sorry, you do not have permission",
+  "filter_thinking": true,
+  "filter_tool_messages": true,
+  "message_format": "auto"
+}', FALSE,
+        'Slack channel (Socket Mode). Get Bot Token (xoxb-) and App-Level Token (xapp-) from Slack App settings, enable Socket Mode to start using.', NOW(), NOW(), 0);
 
 -- ==================== Example Cron Jobs ====================
 MERGE INTO mate_cron_job (id, name, cron_expression, timezone, agent_id, task_type, trigger_message, request_body, enabled, create_time, update_time, deleted)

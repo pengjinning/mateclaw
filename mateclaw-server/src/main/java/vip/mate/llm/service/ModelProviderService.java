@@ -12,7 +12,10 @@ import vip.mate.llm.event.ModelConfigChangedEvent;
 import vip.mate.llm.model.*;
 import vip.mate.llm.repository.ModelProviderMapper;
 
+import org.springframework.ai.chat.model.ChatModel;
+
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 @Service
@@ -23,6 +26,32 @@ public class ModelProviderService {
     private final ModelConfigService modelConfigService;
     private final ApplicationEventPublisher eventPublisher;
     private final ObjectMapper objectMapper = new ObjectMapper();
+
+    /** Plugin-registered ChatModel instances: providerId -> ChatModel */
+    private final Map<String, ChatModel> pluginChatModels = new ConcurrentHashMap<>();
+
+    /**
+     * Register a ChatModel from a plugin.
+     */
+    public void registerPluginChatModel(String providerId, ChatModel chatModel) {
+        pluginChatModels.put(providerId, chatModel);
+    }
+
+    /**
+     * Unregister a plugin ChatModel.
+     */
+    public void unregisterPluginChatModel(String providerId) {
+        pluginChatModels.remove(providerId);
+    }
+
+    /**
+     * Get a plugin-registered ChatModel.
+     *
+     * @return the ChatModel, or null if not registered by a plugin
+     */
+    public ChatModel getPluginChatModel(String providerId) {
+        return pluginChatModels.get(providerId);
+    }
 
     public List<ProviderInfoDTO> listProviders() {
         List<ModelProviderEntity> providers = modelProviderMapper.selectList(new LambdaQueryWrapper<ModelProviderEntity>()
@@ -51,10 +80,10 @@ public class ModelProviderService {
 
     public ProviderInfoDTO createCustomProvider(CreateCustomProviderRequest request) {
         if (!StringUtils.hasText(request.getId()) || !StringUtils.hasText(request.getName())) {
-            throw new MateClawException("Provider id 和名称不能为空");
+            throw new MateClawException("err.llm.provider_fields_required", "Provider id 和名称不能为空");
         }
         if (modelProviderMapper.selectById(request.getId()) != null) {
-            throw new MateClawException("Provider 已存在: " + request.getId());
+            throw new MateClawException("err.llm.provider_exists", "Provider 已存在: " + request.getId());
         }
         ModelProviderEntity provider = new ModelProviderEntity();
         provider.setProviderId(request.getId());
@@ -83,7 +112,7 @@ public class ModelProviderService {
     public void deleteCustomProvider(String providerId) {
         ModelProviderEntity provider = getProvider(providerId);
         if (!Boolean.TRUE.equals(provider.getIsCustom())) {
-            throw new MateClawException("内置 Provider 不支持删除");
+            throw new MateClawException("err.llm.provider_builtin_readonly", "内置 Provider 不支持删除");
         }
         modelConfigService.deleteModelsByProvider(providerId);
         modelProviderMapper.deleteById(providerId);
@@ -92,7 +121,15 @@ public class ModelProviderService {
 
     public ProviderInfoDTO addModel(String providerId, AddProviderModelRequest request) {
         getProvider(providerId);
-        modelConfigService.addModelToProvider(providerId, request.getId(), request.getName(), false);
+        // Defense-in-depth: the manual "Add model" form must apply the same
+        // protocol-level safety as auto-discovery — otherwise users can freely
+        // type an unknown model id (e.g. "qwen3.6-plus") that DashScope native
+        // rejects at runtime with the opaque "[InvalidParameter] url error".
+        String modelId = request.getId();
+        if (modelId != null && !modelId.isBlank()) {
+            ModelDiscoveryService.assertModelIdAcceptable(providerId, this.getProvider(providerId), modelId);
+        }
+        modelConfigService.addModelToProvider(providerId, modelId, request.getName(), false);
         return toProviderInfo(getProvider(providerId), modelConfigService.listModelsByProvider(providerId));
     }
 
@@ -159,7 +196,7 @@ public class ModelProviderService {
     private ModelProviderEntity getProvider(String providerId) {
         ModelProviderEntity provider = modelProviderMapper.selectById(providerId);
         if (provider == null) {
-            throw new MateClawException("Provider 不存在: " + providerId);
+            throw new MateClawException("err.llm.provider_not_found", "Provider 不存在: " + providerId);
         }
         return provider;
     }
@@ -184,6 +221,9 @@ public class ModelProviderService {
         dto.setApiKey(maskApiKey(provider.getApiKey()));
         dto.setBaseUrl(provider.getBaseUrl());
         dto.setGenerateKwargs(readJson(provider.getGenerateKwargs()));
+        dto.setAuthType(provider.getAuthType() != null ? provider.getAuthType() : "api_key");
+        dto.setOauthConnected(StringUtils.hasText(provider.getOauthAccessToken()));
+        dto.setOauthExpiresAt(provider.getOauthExpiresAt());
         List<ModelInfoDTO> builtinModels = new ArrayList<>();
         List<ModelInfoDTO> extraModels = new ArrayList<>();
         if (models != null) {
@@ -211,6 +251,11 @@ public class ModelProviderService {
         }
         if (Boolean.TRUE.equals(provider.getIsLocal())) {
             return true;
+        }
+
+        // OAuth 认证的 provider：检查 OAuth token 是否存在
+        if ("oauth".equals(provider.getAuthType())) {
+            return StringUtils.hasText(provider.getOauthAccessToken());
         }
 
         boolean hasBaseUrl = StringUtils.hasText(provider.getBaseUrl());

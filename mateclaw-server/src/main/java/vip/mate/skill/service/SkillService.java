@@ -60,11 +60,25 @@ public class SkillService {
 
     /**
      * 获取已启用的技能列表（Agent 运行时使用）
+     * <p>
+     * RFC-023：追加 security_scan_status 过滤——FAILED 的 skill 不加载。
+     * NULL（旧数据/手动创建）和 PASSED（扫描通过）都允许。
      */
     public List<SkillEntity> listEnabledSkills() {
         return skillMapper.selectList(new LambdaQueryWrapper<SkillEntity>()
                 .eq(SkillEntity::getEnabled, true)
+                .and(w -> w.isNull(SkillEntity::getSecurityScanStatus)
+                           .or().eq(SkillEntity::getSecurityScanStatus, "PASSED"))
                 .orderByAsc(SkillEntity::getName));
+    }
+
+    /**
+     * 按名称查找技能（RFC-023：SkillManageTool 重名检查用）
+     */
+    public SkillEntity findByName(String name) {
+        return skillMapper.selectOne(new LambdaQueryWrapper<SkillEntity>()
+                .eq(SkillEntity::getName, name)
+                .last("LIMIT 1"));
     }
 
     /**
@@ -82,7 +96,7 @@ public class SkillService {
     public SkillEntity getSkill(Long id) {
         SkillEntity skill = skillMapper.selectById(id);
         if (skill == null) {
-            throw new MateClawException("技能不存在: " + id);
+            throw new MateClawException("err.skill.not_found", "技能不存在: " + id);
         }
         return skill;
     }
@@ -94,14 +108,14 @@ public class SkillService {
     public SkillEntity createSkill(SkillEntity skill) {
         // 验证名称不为空
         if (skill.getName() == null || skill.getName().isBlank()) {
-            throw new MateClawException("技能名称不能为空");
+            throw new MateClawException("err.skill.name_required", "技能名称不能为空");
         }
 
         // 检查名称唯一性
         Long count = skillMapper.selectCount(new LambdaQueryWrapper<SkillEntity>()
                 .eq(SkillEntity::getName, skill.getName()));
         if (count > 0) {
-            throw new MateClawException("技能名称已存在: " + skill.getName());
+            throw new MateClawException("err.skill.name_exists", "技能名称已存在: " + skill.getName());
         }
 
         // 设置默认值
@@ -187,7 +201,7 @@ public class SkillService {
     public void deleteSkill(Long id) {
         SkillEntity skill = getSkill(id);
         if (Boolean.TRUE.equals(skill.getBuiltin())) {
-            throw new MateClawException("内置技能不可删除: " + skill.getName());
+            throw new MateClawException("err.skill.builtin_readonly", "内置技能不可删除: " + skill.getName());
         }
         skillMapper.deleteById(id);
         log.info("Deleted skill: {}", skill.getName());
@@ -256,9 +270,18 @@ public class SkillService {
             return "";
         }
 
-        // --- 第一层：技能目录（始终注入，消耗很少的 token） ---
+        // --- 第零层：Skill 自治引导（RFC-023，对标 hermes-agent prompt_builder.py:164-171） ---
         StringBuilder catalog = new StringBuilder();
-        catalog.append("\n\n## Available Skills\n");
+        catalog.append("\n\n## Skill Management\n\n");
+        catalog.append("After completing a complex task (5+ tool calls), fixing a tricky error, ");
+        catalog.append("or discovering a non-trivial workflow, save the approach as a skill using ");
+        catalog.append("`skill_manage(action='create')` so you can reuse it next time.\n\n");
+        catalog.append("When using a skill and finding it outdated, incomplete, or wrong, ");
+        catalog.append("patch it immediately with `skill_manage(action='patch')` — don't wait to be asked. ");
+        catalog.append("Skills that aren't maintained become liabilities.\n\n");
+
+        // --- 第一层：技能目录（始终注入，消耗很少的 token） ---
+        catalog.append("## Available Skills\n");
         catalog.append("以下技能已启用，你可以在对话中根据用户需求灵活运用：\n\n");
 
         for (SkillEntity skill : enabledSkills) {

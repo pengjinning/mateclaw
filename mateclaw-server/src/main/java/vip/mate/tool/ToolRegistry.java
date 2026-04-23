@@ -9,13 +9,20 @@ import org.springframework.stereotype.Component;
 import vip.mate.tool.model.ToolEntity;
 import vip.mate.tool.repository.ToolMapper;
 
+import org.springframework.ai.support.ToolCallbacks;
+import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.ToolCallbackProvider;
 import vip.mate.agent.AgentToolSet;
+import vip.mate.i18n.I18nService;
+import vip.mate.i18n.LocaleAwareToolCallback;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 /**
@@ -32,16 +39,44 @@ public class ToolRegistry {
 
     private final ApplicationContext applicationContext;
     private final ToolMapper toolMapper;
+    private final I18nService i18nService;
+
+    // ==================== Plugin Tools ====================
+
+    /** Plugin-registered tool entries with lazy availability checks */
+    private final CopyOnWriteArrayList<PluginToolEntry> pluginTools = new CopyOnWriteArrayList<>();
+
+    /** A tool entry registered by a plugin */
+    public record PluginToolEntry(ToolCallback callback, Supplier<Boolean> availabilityCheck) {}
+
+    /**
+     * Register a tool from a plugin with an availability check.
+     * The check is evaluated lazily each time the tool set is built.
+     */
+    public void registerPluginTool(ToolCallback callback, Supplier<Boolean> availabilityCheck) {
+        pluginTools.add(new PluginToolEntry(callback, availabilityCheck != null ? availabilityCheck : () -> true));
+        log.info("Plugin tool registered: {}", callback.getToolDefinition().name());
+    }
+
+    /**
+     * Unregister a plugin tool by name.
+     */
+    public void unregisterPluginTool(String toolName) {
+        pluginTools.removeIf(entry -> entry.callback().getToolDefinition().name().equals(toolName));
+        log.info("Plugin tool unregistered: {}", toolName);
+    }
 
     /**
      * 获取所有已启用的工具 Bean（Spring AI @Tool 注解方式）
      * 通过数据库 enabled 标志过滤，确保 UI 开关真正生效
      */
     public List<Object> getEnabledTools() {
-        // 1. 从数据库获取已启用的 beanName 集合
-        Set<String> enabledBeanNames = toolMapper.selectList(
+        // 1. 从数据库获取明确禁用的 beanName 黑名单
+        //    逻辑：只有 DB 中存在记录且 enabled=false 的才跳过
+        //    DB 中没有记录的 bean 默认启用（向后兼容 + 新工具自动可用）
+        Set<String> disabledBeanNames = toolMapper.selectList(
                 new LambdaQueryWrapper<ToolEntity>()
-                        .eq(ToolEntity::getEnabled, true)
+                        .eq(ToolEntity::getEnabled, false)
                         .isNotNull(ToolEntity::getBeanName)
         ).stream()
                 .map(ToolEntity::getBeanName)
@@ -59,13 +94,12 @@ public class ToolRegistry {
                     .anyMatch(m -> m.isAnnotationPresent(Tool.class));
 
             if (hasToolMethod) {
-                // 3. 如果 DB 中有该 beanName 的记录，则按 DB enabled 状态决定是否加入
-                //    如果 DB 中没有记录（未注册），默认加入（保持向后兼容）
-                if (enabledBeanNames.isEmpty() || enabledBeanNames.contains(beanName)) {
+                // 3. 只有 DB 中明确 enabled=false 的才跳过，其余全部启用
+                if (disabledBeanNames.contains(beanName)) {
+                    log.debug("Skipped disabled tool bean: {} (beanName={})", bean.getClass().getSimpleName(), beanName);
+                } else {
                     tools.add(bean);
                     log.debug("Registered tool bean: {} (beanName={})", bean.getClass().getSimpleName(), beanName);
-                } else {
-                    log.debug("Skipped disabled tool bean: {} (beanName={})", bean.getClass().getSimpleName(), beanName);
                 }
             }
         }
@@ -85,8 +119,52 @@ public class ToolRegistry {
         List<Object> toolBeans = getEnabledTools();
         Map<String, ToolCallbackProvider> providerBeans = applicationContext.getBeansOfType(ToolCallbackProvider.class);
         List<ToolCallbackProvider> providers = new ArrayList<>(providerBeans.values());
-        log.info("Building AgentToolSet: toolBeans={}, providers={}", toolBeans.size(), providers.size());
-        return AgentToolSet.from(toolBeans, providers);
+
+        // 对内置工具 callback 应用 i18n 描述包装
+        List<ToolCallback> localizedCallbacks = new ArrayList<>();
+        for (Object bean : toolBeans) {
+            ToolCallback[] cbs = ToolCallbacks.from(bean);
+            for (ToolCallback cb : cbs) {
+                String toolName = cb.getToolDefinition().name();
+                String descKey = "tool." + toolName + ".desc";
+                String localizedDesc = i18nService.msg(descKey);
+                // 如果 key 被解析（不等于 key 本身），使用本地化描述
+                if (!localizedDesc.equals(descKey)) {
+                    localizedCallbacks.add(new LocaleAwareToolCallback(cb, localizedDesc));
+                } else {
+                    localizedCallbacks.add(cb);
+                }
+            }
+        }
+
+        // MCP provider callbacks 不做 i18n 包装（MCP 工具自行管理描述）
+        for (ToolCallbackProvider provider : providers) {
+            ToolCallback[] cbs = provider.getToolCallbacks();
+            if (cbs != null) {
+                Collections.addAll(localizedCallbacks, cbs);
+            }
+        }
+
+        // Plugin tool callbacks — evaluate availability checks lazily
+        int pluginToolCount = 0;
+        for (PluginToolEntry entry : pluginTools) {
+            try {
+                if (Boolean.TRUE.equals(entry.availabilityCheck().get())) {
+                    localizedCallbacks.add(entry.callback());
+                    pluginToolCount++;
+                } else {
+                    log.debug("Plugin tool excluded (availability check failed): {}",
+                            entry.callback().getToolDefinition().name());
+                }
+            } catch (Exception e) {
+                log.warn("Plugin tool availability check failed for {}: {}",
+                        entry.callback().getToolDefinition().name(), e.getMessage());
+            }
+        }
+
+        log.info("Building AgentToolSet: toolBeans={}, providers={}, pluginTools={}, totalCallbacks={}",
+                toolBeans.size(), providers.size(), pluginToolCount, localizedCallbacks.size());
+        return AgentToolSet.fromCallbacks(toolBeans, localizedCallbacks);
     }
 
     /**

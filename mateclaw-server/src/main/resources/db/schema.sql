@@ -28,6 +28,8 @@ CREATE TABLE IF NOT EXISTS mate_agent (
     enabled        BOOLEAN      NOT NULL DEFAULT TRUE,
     icon           VARCHAR(256),
     tags           VARCHAR(256),
+    workspace_id   BIGINT       NOT NULL DEFAULT 1,
+    default_thinking_level VARCHAR(32) DEFAULT NULL,
     create_time    DATETIME     NOT NULL,
     update_time    DATETIME     NOT NULL,
     deleted        INT          NOT NULL DEFAULT 0
@@ -46,6 +48,9 @@ CREATE TABLE IF NOT EXISTS mate_model_config (
     builtin      BOOLEAN      NOT NULL DEFAULT TRUE,
     enabled      BOOLEAN      NOT NULL DEFAULT TRUE,
     is_default   BOOLEAN      NOT NULL DEFAULT FALSE,
+    max_input_tokens INT      DEFAULT 0,
+    enable_search BOOLEAN     DEFAULT FALSE,
+    search_strategy VARCHAR(32) DEFAULT NULL,
     create_time  DATETIME     NOT NULL,
     update_time  DATETIME     NOT NULL,
     deleted      INT          NOT NULL DEFAULT 0
@@ -66,6 +71,11 @@ CREATE TABLE IF NOT EXISTS mate_model_provider (
     support_connection_check    BOOLEAN      NOT NULL DEFAULT FALSE,
     freeze_url                  BOOLEAN      NOT NULL DEFAULT FALSE,
     require_api_key             BOOLEAN      NOT NULL DEFAULT TRUE,
+    auth_type                   VARCHAR(16)  NOT NULL DEFAULT 'api_key',
+    oauth_access_token          TEXT,
+    oauth_refresh_token         TEXT,
+    oauth_expires_at            BIGINT,
+    oauth_account_id            VARCHAR(128),
     create_time                 DATETIME     NOT NULL,
     update_time                 DATETIME     NOT NULL
 );
@@ -79,11 +89,6 @@ CREATE TABLE IF NOT EXISTS mate_system_setting (
     create_time  DATETIME     NOT NULL,
     update_time  DATETIME     NOT NULL
 );
-
-ALTER TABLE mate_model_config ADD COLUMN IF NOT EXISTS builtin BOOLEAN NOT NULL DEFAULT TRUE;
-ALTER TABLE mate_model_config ADD COLUMN IF NOT EXISTS max_input_tokens INT DEFAULT 0;
-ALTER TABLE mate_model_config ADD COLUMN IF NOT EXISTS enable_search BOOLEAN DEFAULT FALSE;
-ALTER TABLE mate_model_config ADD COLUMN IF NOT EXISTS search_strategy VARCHAR(32) DEFAULT NULL;
 
 -- 技能表
 CREATE TABLE IF NOT EXISTS mate_skill (
@@ -100,6 +105,7 @@ CREATE TABLE IF NOT EXISTS mate_skill (
     enabled       BOOLEAN      NOT NULL DEFAULT TRUE,
     builtin       BOOLEAN      NOT NULL DEFAULT FALSE,
     tags          VARCHAR(256),
+    workspace_id  BIGINT       NOT NULL DEFAULT 1,
     create_time   DATETIME     NOT NULL,
     update_time   DATETIME     NOT NULL,
     deleted       INT          NOT NULL DEFAULT 0
@@ -118,6 +124,7 @@ CREATE TABLE IF NOT EXISTS mate_tool (
     params_schema TEXT,
     enabled       BOOLEAN      NOT NULL DEFAULT TRUE,
     builtin       BOOLEAN      NOT NULL DEFAULT FALSE,
+    workspace_id  BIGINT       NOT NULL DEFAULT 1,
     create_time   DATETIME     NOT NULL,
     update_time   DATETIME     NOT NULL,
     deleted       INT          NOT NULL DEFAULT 0
@@ -133,6 +140,7 @@ CREATE TABLE IF NOT EXISTS mate_channel (
     config_json  TEXT,
     enabled      BOOLEAN      NOT NULL DEFAULT FALSE,
     description  VARCHAR(256),
+    workspace_id BIGINT       NOT NULL DEFAULT 1,
     create_time  DATETIME     NOT NULL,
     update_time  DATETIME     NOT NULL,
     deleted      INT          NOT NULL DEFAULT 0
@@ -149,6 +157,8 @@ CREATE TABLE IF NOT EXISTS mate_conversation (
     last_message     TEXT,
     last_active_time DATETIME,
     stream_status    VARCHAR(16)  NOT NULL DEFAULT 'idle',
+    workspace_id     BIGINT       NOT NULL DEFAULT 1,
+    parent_conversation_id VARCHAR(64) DEFAULT NULL,
     create_time      DATETIME     NOT NULL,
     update_time      DATETIME     NOT NULL,
     deleted          INT          NOT NULL DEFAULT 0
@@ -404,9 +414,6 @@ CREATE TABLE IF NOT EXISTS mate_datasource (
     deleted         INT          NOT NULL DEFAULT 0
 );
 
--- 为现有表添加 metadata 列（向后兼容，防止迁移时数据丢失）
-ALTER TABLE mate_message ADD COLUMN IF NOT EXISTS metadata JSON;
-
 CREATE INDEX IF NOT EXISTS idx_guard_audit_conv ON mate_tool_guard_audit_log(conversation_id);
 CREATE INDEX IF NOT EXISTS idx_guard_audit_time ON mate_tool_guard_audit_log(create_time);
 
@@ -436,3 +443,260 @@ CREATE INDEX IF NOT EXISTS idx_memory_recall_candidates ON mate_memory_recall(ag
 -- 补充复合索引（高频查询优化）
 CREATE INDEX IF NOT EXISTS idx_message_conv_time ON mate_message(conversation_id, create_time);
 CREATE INDEX IF NOT EXISTS idx_workspace_file_agent_enabled ON mate_workspace_file(agent_id, enabled);
+
+-- 清理 Codex 不支持的 ChatGPT OAuth 模型（gpt-4o, o3, o4-mini 在 Codex 模式下不可用）
+DELETE FROM mate_model_config WHERE provider = 'openai-chatgpt' AND model_name IN ('gpt-4o', 'o3', 'o4-mini');
+
+-- ==================== 异步任务（视频/图片生成等长耗时操作） ====================
+
+CREATE TABLE IF NOT EXISTS mate_async_task (
+    id               BIGINT        NOT NULL PRIMARY KEY,
+    task_id          VARCHAR(64)   NOT NULL UNIQUE,
+    task_type        VARCHAR(32)   NOT NULL,
+    status           VARCHAR(16)   NOT NULL DEFAULT 'pending',
+    conversation_id  VARCHAR(128),
+    message_id       BIGINT,
+    provider_name    VARCHAR(64),
+    provider_task_id VARCHAR(128),
+    request_json     TEXT,
+    result_json      TEXT,
+    error_message    VARCHAR(512),
+    progress         INT           DEFAULT 0,
+    created_by       VARCHAR(64),
+    create_time      DATETIME      NOT NULL,
+    update_time      DATETIME      NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_async_task_conv ON mate_async_task(conversation_id);
+CREATE INDEX IF NOT EXISTS idx_async_task_status ON mate_async_task(status);
+
+-- ==================== Wiki 知识库 ====================
+
+CREATE TABLE IF NOT EXISTS mate_wiki_knowledge_base (
+    id               BIGINT       NOT NULL PRIMARY KEY,
+    name             VARCHAR(128) NOT NULL,
+    description      TEXT,
+    agent_id         BIGINT,
+    config_content   CLOB,
+    source_directory VARCHAR(512),
+    status           VARCHAR(32)  NOT NULL DEFAULT 'active',
+    page_count       INT          NOT NULL DEFAULT 0,
+    raw_count        INT          NOT NULL DEFAULT 0,
+    workspace_id     BIGINT       NOT NULL DEFAULT 1,
+    create_time      DATETIME     NOT NULL,
+    update_time      DATETIME     NOT NULL,
+    deleted          INT          NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_wiki_kb_agent ON mate_wiki_knowledge_base(agent_id);
+
+CREATE TABLE IF NOT EXISTS mate_wiki_raw_material (
+    id                BIGINT       NOT NULL PRIMARY KEY,
+    kb_id             BIGINT       NOT NULL,
+    title             VARCHAR(256) NOT NULL,
+    source_type       VARCHAR(32)  NOT NULL DEFAULT 'text',
+    source_path       VARCHAR(512),
+    original_content  CLOB,
+    extracted_text    CLOB,
+    content_hash      VARCHAR(64),
+    file_size         BIGINT       NOT NULL DEFAULT 0,
+    processing_status VARCHAR(32)  NOT NULL DEFAULT 'pending',
+    last_processed_at DATETIME,
+    error_message     VARCHAR(512),
+    create_time       DATETIME     NOT NULL,
+    update_time       DATETIME     NOT NULL,
+    deleted           INT          NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_wiki_raw_kb ON mate_wiki_raw_material(kb_id);
+CREATE INDEX IF NOT EXISTS idx_wiki_raw_status ON mate_wiki_raw_material(kb_id, processing_status);
+
+CREATE TABLE IF NOT EXISTS mate_wiki_page (
+    id              BIGINT       NOT NULL PRIMARY KEY,
+    kb_id           BIGINT       NOT NULL,
+    slug            VARCHAR(256) NOT NULL,
+    title           VARCHAR(256) NOT NULL,
+    content         CLOB,
+    summary         VARCHAR(1024),
+    outgoing_links  CLOB,
+    source_raw_ids  CLOB,
+    version         INT          NOT NULL DEFAULT 1,
+    last_updated_by VARCHAR(32)  NOT NULL DEFAULT 'ai',
+    create_time     DATETIME     NOT NULL,
+    update_time     DATETIME     NOT NULL,
+    deleted         INT          NOT NULL DEFAULT 0,
+    CONSTRAINT uk_wiki_page_kb_slug UNIQUE (kb_id, slug)
+);
+CREATE INDEX IF NOT EXISTS idx_wiki_page_kb ON mate_wiki_page(kb_id);
+
+-- =============================================
+-- 工作区表（Phase 2）
+-- =============================================
+
+-- 工作区
+CREATE TABLE IF NOT EXISTS mate_workspace (
+    id            BIGINT       NOT NULL PRIMARY KEY,
+    name          VARCHAR(128) NOT NULL,
+    slug          VARCHAR(64)  NOT NULL,
+    description   VARCHAR(256),
+    owner_id      BIGINT,
+    settings_json TEXT,
+    base_path     VARCHAR(512),
+    create_time   DATETIME     NOT NULL,
+    update_time   DATETIME     NOT NULL,
+    deleted       INT          NOT NULL DEFAULT 0,
+    CONSTRAINT uk_workspace_slug UNIQUE (slug)
+);
+
+-- 工作区成员
+CREATE TABLE IF NOT EXISTS mate_workspace_member (
+    id           BIGINT      NOT NULL PRIMARY KEY,
+    workspace_id BIGINT      NOT NULL,
+    user_id      BIGINT      NOT NULL,
+    role         VARCHAR(32) NOT NULL DEFAULT 'member',
+    create_time  DATETIME    NOT NULL,
+    update_time  DATETIME    NOT NULL,
+    deleted      INT         NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_ws_member_workspace ON mate_workspace_member(workspace_id);
+CREATE INDEX IF NOT EXISTS idx_ws_member_user ON mate_workspace_member(user_id);
+
+-- =============================================
+-- Agent-Skill / Agent-Tool 绑定表（Phase 3 Sprint 2）
+-- =============================================
+
+CREATE TABLE IF NOT EXISTS mate_agent_skill (
+    id           BIGINT    NOT NULL PRIMARY KEY,
+    agent_id     BIGINT    NOT NULL,
+    skill_id     BIGINT    NOT NULL,
+    enabled      BOOLEAN   NOT NULL DEFAULT TRUE,
+    config_json  TEXT,
+    create_time  DATETIME  NOT NULL,
+    update_time  DATETIME  NOT NULL,
+    deleted      INT       NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uk_agent_skill ON mate_agent_skill(agent_id, skill_id);
+
+CREATE TABLE IF NOT EXISTS mate_agent_tool (
+    id           BIGINT    NOT NULL PRIMARY KEY,
+    agent_id     BIGINT    NOT NULL,
+    tool_name    VARCHAR(128) NOT NULL,
+    enabled      BOOLEAN   NOT NULL DEFAULT TRUE,
+    create_time  DATETIME  NOT NULL,
+    update_time  DATETIME  NOT NULL,
+    deleted      INT       NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uk_agent_tool ON mate_agent_tool(agent_id, tool_name);
+
+-- =============================================
+-- CronJob 执行历史（Phase 3 Sprint 3）
+-- =============================================
+CREATE TABLE IF NOT EXISTS mate_cron_job_run (
+    id              BIGINT       NOT NULL PRIMARY KEY,
+    cron_job_id     BIGINT       NOT NULL,
+    conversation_id VARCHAR(64),
+    status          VARCHAR(32)  NOT NULL,
+    trigger_type    VARCHAR(32)  NOT NULL DEFAULT 'scheduled',
+    started_at      DATETIME     NOT NULL,
+    finished_at     DATETIME,
+    error_message   TEXT,
+    token_usage     INT          DEFAULT 0,
+    create_time     DATETIME     NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_cron_run_job ON mate_cron_job_run(cron_job_id, started_at);
+
+-- =============================================
+-- 用量日统计（Phase 3 Sprint 3）
+-- =============================================
+CREATE TABLE IF NOT EXISTS mate_usage_daily (
+    id                 BIGINT   NOT NULL PRIMARY KEY,
+    workspace_id       BIGINT   NOT NULL,
+    agent_id           BIGINT,
+    stat_date          DATE     NOT NULL,
+    conversation_count INT      DEFAULT 0,
+    message_count      INT      DEFAULT 0,
+    total_tokens       BIGINT   DEFAULT 0,
+    prompt_tokens      BIGINT   DEFAULT 0,
+    completion_tokens  BIGINT   DEFAULT 0,
+    cache_read_tokens  BIGINT   DEFAULT 0,    -- RFC-014: anthropic cache_read_input_tokens
+    cache_write_tokens BIGINT   DEFAULT 0,    -- RFC-014: anthropic cache_creation_input_tokens
+    tool_call_count    INT      DEFAULT 0,
+    error_count        INT      DEFAULT 0,
+    create_time        DATETIME NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uk_usage_daily ON mate_usage_daily(workspace_id, agent_id, stat_date);
+
+-- =============================================
+-- 操作审计事件表（Phase 3 Sprint 1）
+-- =============================================
+CREATE TABLE IF NOT EXISTS mate_audit_event (
+    id             BIGINT       NOT NULL PRIMARY KEY,
+    workspace_id   BIGINT,
+    user_id        BIGINT       NOT NULL,
+    username       VARCHAR(64)  NOT NULL,
+    action         VARCHAR(64)  NOT NULL,
+    resource_type  VARCHAR(64)  NOT NULL,
+    resource_id    VARCHAR(128),
+    resource_name  VARCHAR(256),
+    detail_json    TEXT,
+    ip_address     VARCHAR(64),
+    user_agent     VARCHAR(256),
+    create_time    DATETIME     NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_audit_ws_time ON mate_audit_event(workspace_id, create_time);
+CREATE INDEX IF NOT EXISTS idx_audit_user ON mate_audit_event(user_id);
+CREATE INDEX IF NOT EXISTS idx_audit_resource ON mate_audit_event(resource_type, resource_id);
+
+-- =============================================
+-- 插件表（Plugin SDK）
+-- =============================================
+CREATE TABLE IF NOT EXISTS mate_plugin (
+    id            BIGINT       NOT NULL PRIMARY KEY,
+    name          VARCHAR(128) NOT NULL,
+    version       VARCHAR(32)  NOT NULL,
+    plugin_type   VARCHAR(32)  NOT NULL,
+    display_name  VARCHAR(128),
+    description   TEXT,
+    author        VARCHAR(128),
+    entrypoint    VARCHAR(256) NOT NULL,
+    jar_path      VARCHAR(512),
+    config_json   TEXT          NOT NULL DEFAULT '{}',
+    enabled       BOOLEAN      NOT NULL DEFAULT TRUE,
+    status        VARCHAR(32)  NOT NULL DEFAULT 'LOADED',
+    error_message TEXT,
+    create_time   DATETIME     NOT NULL,
+    update_time   DATETIME     NOT NULL,
+    deleted       INT          NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uk_plugin_name ON mate_plugin(name);
+
+-- =============================================
+-- Hook 系统（RFC-017）
+-- =============================================
+CREATE TABLE IF NOT EXISTS mate_hook (
+    id                  BIGINT       NOT NULL PRIMARY KEY,
+    name                VARCHAR(128) NOT NULL,
+    description         VARCHAR(512),
+    enabled             TINYINT(1)   NOT NULL DEFAULT 1,
+    event_type          VARCHAR(64)  NOT NULL,
+    match_expression    TEXT,
+    action_kind         VARCHAR(32)  NOT NULL,
+    action_config       TEXT         NOT NULL,
+    rate_limit_per_min  INT          DEFAULT 60,
+    timeout_ms          INT          DEFAULT 3000,
+    source              VARCHAR(16)  DEFAULT 'db',
+    created_at          DATETIME     NOT NULL,
+    updated_at          DATETIME     NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_hook_event_type ON mate_hook(event_type);
+CREATE INDEX IF NOT EXISTS idx_hook_enabled    ON mate_hook(enabled);
+
+CREATE TABLE IF NOT EXISTS mate_hook_run (
+    id           BIGINT       NOT NULL PRIMARY KEY,
+    hook_id      BIGINT       NOT NULL,
+    event_type   VARCHAR(64)  NOT NULL,
+    status       VARCHAR(16)  NOT NULL,
+    duration_ms  INT          DEFAULT 0,
+    message      VARCHAR(512),
+    created_at   DATETIME     NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_hook_run_hook_id  ON mate_hook_run(hook_id);
+CREATE INDEX IF NOT EXISTS idx_hook_run_created  ON mate_hook_run(created_at);

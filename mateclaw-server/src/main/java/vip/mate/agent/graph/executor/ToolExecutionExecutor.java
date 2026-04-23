@@ -5,6 +5,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
 import org.springframework.ai.tool.ToolCallback;
+import vip.mate.tool.builtin.ToolExecutionContext;
 import vip.mate.agent.AgentToolSet;
 import vip.mate.agent.GraphEventPublisher;
 import vip.mate.approval.ApprovalWorkflowService;
@@ -143,9 +144,23 @@ public class ToolExecutionExecutor {
         return execute(toolCalls, conversationId, agentId, isReplay, "");
     }
 
+    /** 当前执行的 requesterId，传递给 ToolExecutionContext */
+    private volatile String currentRequesterId;
+    /** 当前工作区活动目录（为空不限制），传递给 ToolExecutionContext */
+    private volatile String currentWorkspaceBasePath;
+
     public ToolExecutionResult execute(List<AssistantMessage.ToolCall> toolCalls,
                                         String conversationId, String agentId,
                                         boolean isReplay, String requesterId) {
+        return execute(toolCalls, conversationId, agentId, isReplay, requesterId, null);
+    }
+
+    public ToolExecutionResult execute(List<AssistantMessage.ToolCall> toolCalls,
+                                        String conversationId, String agentId,
+                                        boolean isReplay, String requesterId,
+                                        String workspaceBasePath) {
+        this.currentRequesterId = requesterId;
+        this.currentWorkspaceBasePath = workspaceBasePath;
         List<ToolResponseMessage.ToolResponse> allResponses = new ArrayList<>();
         List<GraphEventPublisher.GraphEvent> events = Collections.synchronizedList(new ArrayList<>());
 
@@ -161,6 +176,19 @@ public class ToolExecutionExecutor {
             String arguments = toolCall.arguments();
 
             events.add(GraphEventPublisher.toolStart(toolName, arguments));
+
+            // 0. 子会话工具拦截：委派上下文中的子 Agent 禁止调用特定工具
+            if (vip.mate.tool.builtin.DelegationContext.currentDepth() > 0) {
+                java.util.Set<String> denied = vip.mate.tool.builtin.DelegationContext.childDeniedTools();
+                if (denied.contains(toolName)) {
+                    String msg = "[安全限制] 子 Agent 不允许使用工具: " + toolName;
+                    log.info("[ToolExecutor] Child agent blocked from using tool: {}", toolName);
+                    events.add(GraphEventPublisher.toolComplete(toolName, msg, false));
+                    allResponses.add(new org.springframework.ai.chat.messages.ToolResponseMessage.ToolResponse(
+                            toolCall.id(), toolName, msg));
+                    continue;
+                }
+            }
 
             // 1. JSON 校验
             if (arguments != null && !arguments.isBlank()) {
@@ -215,15 +243,16 @@ public class ToolExecutionExecutor {
             ToolCallback callback = toolCallbackMap.get(toolName);
             if (callback == null) {
                 log.warn("[ToolExecutor] Tool not found: {}", toolName);
-                events.add(GraphEventPublisher.toolComplete(toolName, "工具不存在: " + toolName, false));
+                events.add(GraphEventPublisher.toolComplete(toolName, "Tool not found: " + toolName, false));
                 allResponses.add(new ToolResponseMessage.ToolResponse(
-                        toolCall.id(), toolName, "工具不存在: " + toolName));
+                        toolCall.id(), toolName, "Tool not found: " + toolName));
                 continue;
             }
 
             // 4. 分类: concurrencySafe
             boolean safe = isConcurrencySafe(toolName);
-            preparedCalls.add(new PreparedToolCall(toolCall, callback, arguments, safe, allResponses.size(), conversationId));
+            preparedCalls.add(new PreparedToolCall(toolCall, callback, arguments, safe, allResponses.size(),
+                    conversationId, currentRequesterId, currentWorkspaceBasePath));
             // 占位，Phase 2 填充
             allResponses.add(null);
         }
@@ -254,8 +283,8 @@ public class ToolExecutionExecutor {
         ToolCallback callback = toolCallbackMap.get(toolName);
         if (callback == null) {
             log.warn("[ToolExecutor] Pre-approved tool not found: {}", toolName);
-            events.add(GraphEventPublisher.toolComplete(toolName, "工具不存在: " + toolName, false));
-            return new ToolResponseMessage.ToolResponse(toolCall.id(), toolName, "工具不存在: " + toolName);
+            events.add(GraphEventPublisher.toolComplete(toolName, "Tool not found: " + toolName, false));
+            return new ToolResponseMessage.ToolResponse(toolCall.id(), toolName, "Tool not found: " + toolName);
         }
 
         try {
@@ -272,7 +301,7 @@ public class ToolExecutionExecutor {
             log.error("[ToolExecutor] Pre-approved tool {} failed: {}", toolName, e.getMessage());
             events.add(GraphEventPublisher.toolComplete(toolName, e.getMessage(), false));
             return new ToolResponseMessage.ToolResponse(
-                    toolCall.id(), toolName, "工具执行失败: " + e.getMessage());
+                    toolCall.id(), toolName, "Tool execution failed: " + e.getMessage());
         }
     }
 
@@ -386,7 +415,16 @@ public class ToolExecutionExecutor {
             log.info("[ToolExecutor] Executing tool: {} with args: {}",
                     toolName, pc.arguments != null && pc.arguments.length() > 200
                             ? pc.arguments.substring(0, 200) + "..." : pc.arguments);
-            String result = pc.callback.call(pc.arguments);
+
+            // 注入工具执行上下文（供 VideoGenerateTool 等获取 conversationId / username / workspaceBasePath）
+            ToolExecutionContext.set(pc.conversationId, pc.requesterId, pc.workspaceBasePath);
+            String result;
+            try {
+                result = pc.callback.call(pc.arguments);
+            } finally {
+                ToolExecutionContext.clear();
+            }
+
             int rawLen = result != null ? result.length() : 0;
             result = truncateToolResult(result, MAX_TOOL_RESULT_CHARS);
             log.info("[ToolExecutor] Tool {} returned {} chars{}", toolName, rawLen,
@@ -480,7 +518,7 @@ public class ToolExecutionExecutor {
     }
 
     private String normalizeToolExecutionError(Exception e) {
-        String message = e != null && e.getMessage() != null ? e.getMessage() : "未知错误";
+        String message = e != null && e.getMessage() != null ? e.getMessage() : "Unknown error";
         String lower = message.toLowerCase(Locale.ROOT);
 
         if (lower.contains("conversion from json")
@@ -488,16 +526,16 @@ public class ToolExecutionExecutor {
                 || lower.contains("unexpected character escape sequence")
                 || lower.contains("json parse error")
                 || lower.contains("malformed json")) {
-            return "工具执行失败：模型生成的工具参数不是合法 JSON，通常表示单次 tool call 内容过长，"
+            return "Tool execution failed: model generated invalid JSON for tool arguments. "
                     + "或在字符串转义位置被截断。请改为分步骤写入，拆成多个文件，或缩小单次 write_file/edit_file 的内容后重试。";
         }
 
         if (lower.contains("access denied") && lower.contains("path outside allowed directories")) {
             // 提取目标路径和允许路径
-            return "工具执行失败：目标路径不在允许的工作目录范围内。请将文件操作改为用户主目录下的路径（如 ~/Documents/ 或 ~/Desktop/）。";
+            return "Tool execution failed: target path is outside the allowed workspace directory.";
         }
 
-        return "工具执行失败: " + message;
+        return "Tool execution failed: " + message;
     }
 
     /**
@@ -516,7 +554,9 @@ public class ToolExecutionExecutor {
             String arguments,
             boolean concurrencySafe,
             int resultIndex,
-            String conversationId
+            String conversationId,
+            String requesterId,
+            String workspaceBasePath
     ) {}
 
     private record ApprovalBarrier(String pendingId, String toolName) {}

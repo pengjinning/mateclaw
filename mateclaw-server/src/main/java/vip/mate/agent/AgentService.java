@@ -44,10 +44,19 @@ public class AgentService {
                 .orderByDesc(AgentEntity::getCreateTime));
     }
 
+    /**
+     * 按工作区列出 Agent
+     */
+    public List<AgentEntity> listAgentsByWorkspace(Long workspaceId) {
+        return agentMapper.selectList(new LambdaQueryWrapper<AgentEntity>()
+                .eq(AgentEntity::getWorkspaceId, workspaceId)
+                .orderByDesc(AgentEntity::getCreateTime));
+    }
+
     public AgentEntity getAgent(Long id) {
         AgentEntity entity = agentMapper.selectById(id);
         if (entity == null) {
-            throw new MateClawException("Agent不存在: " + id);
+            throw new MateClawException("err.agent.not_found", "Agent不存在: " + id);
         }
         return entity;
     }
@@ -72,6 +81,13 @@ public class AgentService {
         agentInstances.remove(id);
     }
 
+    /**
+     * 清除 Agent 运行时缓存（绑定变更后需调用，使下次对话重新构建 Agent）
+     */
+    public void invalidateAgentCache(Long agentId) {
+        agentInstances.remove(agentId);
+    }
+
     // ==================== 运行时入口 ====================
 
     public String chat(Long agentId, String message, String conversationId) {
@@ -87,20 +103,40 @@ public class AgentService {
     }
 
     public Flux<StreamDelta> chatStructuredStream(Long agentId, String message, String conversationId) {
-        return chatStructuredStream(agentId, message, conversationId, "");
+        return chatStructuredStream(agentId, message, conversationId, "", null);
     }
 
     public Flux<StreamDelta> chatStructuredStream(Long agentId, String message, String conversationId,
                                                    String requesterId) {
+        return chatStructuredStream(agentId, message, conversationId, requesterId, null);
+    }
+
+    public Flux<StreamDelta> chatStructuredStream(Long agentId, String message, String conversationId,
+                                                   String requesterId, String thinkingLevel) {
         memoryRecallTracker.trackRecalls(agentId, message);
         BaseAgent agent = getOrBuildAgent(agentId);
 
+        // 设置请求级思考深度（通过 ThreadLocal 传递到 StateGraph 执行）
+        if (thinkingLevel != null && !thinkingLevel.isBlank()) {
+            ThinkingLevelHolder.set(thinkingLevel);
+        } else {
+            // 尝试从 Agent 默认配置读取
+            AgentEntity entity = getAgent(agentId);
+            if (entity != null && entity.getDefaultThinkingLevel() != null) {
+                ThinkingLevelHolder.set(entity.getDefaultThinkingLevel());
+            } else {
+                ThinkingLevelHolder.clear();
+            }
+        }
+
         if (agent instanceof StructuredStreamCapable capable) {
             return capable.chatStructuredStream(message, conversationId,
-                    requesterId != null ? requesterId : "");
+                    requesterId != null ? requesterId : "")
+                    .doFinally(signal -> ThinkingLevelHolder.clear());
         }
 
         // 降级：不支持结构化流的 Agent，包装为纯内容流
+        ThinkingLevelHolder.clear();
         return agent.chatStream(message, conversationId)
                 .map(chunk -> new StreamDelta(chunk, null));
     }
@@ -178,7 +214,7 @@ public class AgentService {
         return agentInstances.computeIfAbsent(agentId, id -> {
             AgentEntity entity = getAgent(id);
             if (!Boolean.TRUE.equals(entity.getEnabled())) {
-                throw new MateClawException("Agent 已禁用: " + entity.getName());
+                throw new MateClawException("err.agent.disabled", "Agent 已禁用: " + entity.getName());
             }
             return agentGraphBuilder.build(entity);
         });

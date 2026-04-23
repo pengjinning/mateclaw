@@ -22,6 +22,12 @@ async function bootstrap() {
   app.use(router)
   app.use(i18n)
   app.use(ElementPlus)
+
+  // Global error handler — prevents uncaught Vue errors from causing white screens
+  app.config.errorHandler = (err, instance, info) => {
+    console.error('[Vue Error]', info, err)
+  }
+
   app.mount('#app')
 }
 

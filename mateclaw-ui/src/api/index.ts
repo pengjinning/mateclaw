@@ -7,11 +7,15 @@ export const http = axios.create({
   timeout: 30000,
 })
 
-// 请求拦截器：注入 Token
+// 请求拦截器：注入 Token + Workspace ID
 http.interceptors.request.use((config) => {
   const token = localStorage.getItem('token')
   if (token) {
     config.headers.Authorization = `Bearer ${token}`
+  }
+  const workspaceId = localStorage.getItem('mc-workspace-id')
+  if (workspaceId) {
+    config.headers['X-Workspace-Id'] = workspaceId
   }
   return config
 })
@@ -64,6 +68,8 @@ export const authApi = {
     http.post('/auth/login', data),
   listUsers: () => http.get('/auth/users'),
   createUser: (data: any) => http.post('/auth/users', data),
+  changePassword: (id: number, oldPassword: string, newPassword: string) =>
+    http.put(`/auth/users/${id}/password`, null, { params: { oldPassword, newPassword } }),
 }
 
 // ==================== Agent ====================
@@ -76,6 +82,12 @@ export const agentApi = {
   chat: (id: string | number, data: any) => http.post(`/agents/${id}/chat`, data),
   execute: (id: string | number, data: any) => http.post(`/agents/${id}/execute`, data),
   getState: (id: string | number) => http.get(`/agents/${id}/state`),
+}
+
+// ==================== Templates ====================
+export const templateApi = {
+  list: () => http.get('/templates'),
+  apply: (id: string) => http.post(`/templates/${id}/apply`),
 }
 
 // ==================== Chat ====================
@@ -118,14 +130,16 @@ export const chatApi = {
 // ==================== Conversation ====================
 export const conversationApi = {
   list: () => http.get('/conversations'),
-  listMessages: (conversationId: string) =>
-    http.get(`/conversations/${conversationId}/messages`),
+  listMessages: (conversationId: string, params?: { beforeId?: number; limit?: number }) =>
+    http.get(`/conversations/${conversationId}/messages`, { params }),
   getStatus: (conversationId: string) =>
     http.get(`/conversations/${conversationId}/status`),
   delete: (conversationId: string) =>
     http.delete(`/conversations/${conversationId}`),
   clearMessages: (conversationId: string) =>
     http.delete(`/conversations/${conversationId}/messages`),
+  rename: (conversationId: string, title: string) =>
+    http.put(`/conversations/${conversationId}/title`, { title }),
 }
 
 // ==================== Skill ====================
@@ -157,6 +171,14 @@ export const skillInstallApi = {
     http.post(`/skills/install/cancel/${taskId}`),
   uninstall: (skillName: string) =>
     http.delete(`/skills/install/${skillName}`),
+  uploadZip: (file: File, options?: { enable?: boolean; overwrite?: boolean; targetName?: string }) => {
+    const formData = new FormData()
+    formData.append('file', file)
+    return http.post('/skills/install/upload', formData, {
+      params: options,
+      headers: { 'Content-Type': 'multipart/form-data' },
+    })
+  },
 }
 
 // ==================== Datasource ====================
@@ -249,6 +271,28 @@ export const modelApi = {
     http.post(`/models/${providerId}/test-connection`),
   testModel: (providerId: string, modelId: string) =>
     http.post(`/models/${providerId}/models/${encodeURIComponent(modelId)}/test`),
+
+  // ==================== Embedding Model (RFC Embedding UI) ====================
+  listByType: (modelType: 'chat' | 'embedding') =>
+    http.get('/models/by-type', { params: { modelType } }),
+  testEmbedding: (modelId: string | number) =>
+    http.post(`/models/embedding/${modelId}/test`),
+  getDefaultEmbedding: () => http.get('/models/embedding/default'),
+  setDefaultEmbedding: (modelId: string | number | '') =>
+    http.post('/models/embedding/default', { modelId }),
+}
+
+// ==================== OAuth ====================
+export const oauthApi = {
+  authorize: () => http.get('/oauth/openai/authorize'),
+  status: () => http.get('/oauth/openai/status'),
+  refresh: () => http.post('/oauth/openai/refresh'),
+  revoke: () => http.delete('/oauth/openai/revoke'),
+}
+
+// ==================== Setup ====================
+export const setupApi = {
+  onboardingStatus: () => http.get('/setup/onboarding-status'),
 }
 
 // ==================== Settings ====================
@@ -263,7 +307,7 @@ export const settingsApi = {
 const encodeFilePath = (filename: string) =>
   filename.split('/').map(encodeURIComponent).join('/')
 
-export const workspaceApi = {
+export const agentContextApi = {
   listFiles: (agentId: string | number) =>
     http.get(`/agents/${agentId}/workspace/files`),
   getFile: (agentId: string | number, filename: string) =>
@@ -312,4 +356,111 @@ export const cronJobApi = {
   toggle: (id: string | number, enabled: boolean) =>
     http.put(`/cron-jobs/${id}/toggle`, null, { params: { enabled } }),
   runNow: (id: string | number) => http.post(`/cron-jobs/${id}/run`),
+}
+
+// ==================== Wiki Knowledge Base ====================
+export const wikiApi = {
+  // Knowledge Base
+  listKBs: () => http.get('/wiki/knowledge-bases'),
+  getKB: (id: number) => http.get(`/wiki/knowledge-bases/${id}`),
+  listKBsByAgent: (agentId: number) => http.get(`/wiki/knowledge-bases/agent/${agentId}`),
+  createKB: (data: { name: string; description?: string; agentId?: number }) =>
+    http.post('/wiki/knowledge-bases', data),
+  updateKB: (id: number, data: { name?: string; description?: string; agentId?: number; embeddingModelId?: string | number | null }) =>
+    http.put(`/wiki/knowledge-bases/${id}`, data),
+  deleteKB: (id: number) => http.delete(`/wiki/knowledge-bases/${id}`),
+  getConfig: (id: number) => http.get(`/wiki/knowledge-bases/${id}/config`),
+  updateConfig: (id: number, content: string) =>
+    http.put(`/wiki/knowledge-bases/${id}/config`, { content }),
+
+  // Directory Scan
+  setSourceDirectory: (id: number, path: string) =>
+    http.put(`/wiki/knowledge-bases/${id}/source-directory`, { path }),
+  scanDirectory: (id: number) => http.post(`/wiki/knowledge-bases/${id}/scan`),
+
+  // Raw Materials
+  listRaw: (kbId: number) => http.get(`/wiki/knowledge-bases/${kbId}/raw`),
+  addRawText: (kbId: number, data: { title: string; content: string }) =>
+    http.post(`/wiki/knowledge-bases/${kbId}/raw/text`, data),
+  uploadRaw: (kbId: number, formData: FormData) =>
+    http.post(`/wiki/knowledge-bases/${kbId}/raw/upload`, formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    }),
+  deleteRaw: (kbId: number, rawId: number) =>
+    http.delete(`/wiki/knowledge-bases/${kbId}/raw/${rawId}`),
+  reprocessRaw: (kbId: number, rawId: number) =>
+    http.post(`/wiki/knowledge-bases/${kbId}/raw/${rawId}/reprocess`),
+
+  // Wiki Pages
+  listPages: (kbId: number) => http.get(`/wiki/knowledge-bases/${kbId}/pages`),
+  getPage: (kbId: number, slug: string) =>
+    http.get(`/wiki/knowledge-bases/${kbId}/pages/${encodeURIComponent(slug)}`),
+  updatePage: (kbId: number, slug: string, content: string) =>
+    http.put(`/wiki/knowledge-bases/${kbId}/pages/${encodeURIComponent(slug)}`, { content }),
+  deletePage: (kbId: number, slug: string) =>
+    http.delete(`/wiki/knowledge-bases/${kbId}/pages/${encodeURIComponent(slug)}`),
+  batchDeletePages: (kbId: number, slugs: string[]) =>
+    http.delete(`/wiki/knowledge-bases/${kbId}/pages/batch`, { data: slugs }),
+  getBacklinks: (kbId: number, slug: string) =>
+    http.get(`/wiki/knowledge-bases/${kbId}/pages/${encodeURIComponent(slug)}/backlinks`),
+
+  // Processing
+  processKB: (kbId: number) => http.post(`/wiki/knowledge-bases/${kbId}/process`),
+  getProcessingStatus: (kbId: number) => http.get(`/wiki/knowledge-bases/${kbId}/processing-status`),
+}
+
+// ==================== Workspace (Team) ====================
+export const workspaceTeamApi = {
+  list: () => http.get('/workspaces'),
+  get: (id: string | number) => http.get(`/workspaces/${id}`),
+  create: (data: any) => http.post('/workspaces', data),
+  update: (id: string | number, data: any) => http.put(`/workspaces/${id}`, data),
+  delete: (id: string | number) => http.delete(`/workspaces/${id}`),
+  listMembers: (id: string | number) => http.get(`/workspaces/${id}/members`),
+  addMember: (id: string | number, data: { username: string; password?: string; nickname?: string; role?: string }) =>
+    http.post(`/workspaces/${id}/members`, data),
+  updateMemberRole: (id: string | number, memberId: string | number, role: string) =>
+    http.put(`/workspaces/${id}/members/${memberId}`, { role }),
+  removeMember: (id: string | number, memberId: string | number) =>
+    http.delete(`/workspaces/${id}/members/${memberId}`),
+}
+
+// ==================== Agent Binding ====================
+export const agentBindingApi = {
+  listSkills: (agentId: string | number) => http.get(`/agents/${agentId}/skills`),
+  setSkills: (agentId: string | number, skillIds: number[]) => http.put(`/agents/${agentId}/skills`, skillIds),
+  bindSkill: (agentId: string | number, skillId: number) => http.post(`/agents/${agentId}/skills/${skillId}`),
+  unbindSkill: (agentId: string | number, skillId: number) => http.delete(`/agents/${agentId}/skills/${skillId}`),
+  listTools: (agentId: string | number) => http.get(`/agents/${agentId}/tools`),
+  setTools: (agentId: string | number, toolNames: string[]) => http.put(`/agents/${agentId}/tools`, toolNames),
+}
+
+// ==================== Dashboard ====================
+export const dashboardApi = {
+  overview: () => http.get('/dashboard/overview'),
+  trend: (days = 30) => http.get('/dashboard/trend', { params: { days } }),
+  agentRanking: (days = 7, topN = 10) => http.get('/dashboard/agent-ranking', { params: { days, topN } }),
+  cronJobRuns: (cronJobId: string | number, limit = 20) => http.get(`/dashboard/cron-runs/${cronJobId}`, { params: { limit } }),
+  recentRuns: (limit = 20) => http.get('/dashboard/cron-runs', { params: { limit } }),
+}
+
+// ==================== Plugins ====================
+export const pluginApi = {
+  list: () => http.get('/plugins'),
+  get: (name: string) => http.get(`/plugins/${name}`),
+  disable: (name: string) => http.post(`/plugins/${name}/disable`),
+  enable: (name: string) => http.post(`/plugins/${name}/enable`),
+  updateConfig: (name: string, config: Record<string, any>) => http.put(`/plugins/${name}/config`, config),
+}
+
+// ==================== Audit Events ====================
+export const auditApi = {
+  listEvents: (params: {
+    action?: string
+    resourceType?: string
+    startTime?: string
+    endTime?: string
+    page?: number
+    size?: number
+  }) => http.get('/audit/events', { params }),
 }

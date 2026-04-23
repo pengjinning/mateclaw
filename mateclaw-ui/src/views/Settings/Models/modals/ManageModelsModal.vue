@@ -1,14 +1,16 @@
 <template>
-  <div v-if="show && provider" class="modal-overlay" @click.self="$emit('close')">
+  <div v-if="show && provider" class="modal-overlay">
     <div class="modal modal-wide">
       <div class="modal-header">
         <h2>
-          <img
-            :src="getProviderIcon(provider.id)"
-            :alt="provider.name"
-            class="modal-provider-icon"
-            @error="onIconError"
-          />
+          <span class="modal-provider-icon-shell">
+            <img
+              :src="getProviderIcon(provider.id)"
+              :alt="provider.name"
+              class="modal-provider-icon"
+              @error="onIconError"
+            />
+          </span>
           {{ t('settings.model.manageTitle') }} · {{ provider.name }}
         </h2>
         <div class="modal-header-actions">
@@ -49,6 +51,9 @@
                 <input type="checkbox" :value="model.id" :checked="selectedNewModelIds.includes(model.id)" @change="$emit('toggleModel', model.id)" />
                 <span class="discover-model-name">{{ model.name }}</span>
                 <span class="discover-model-id">{{ model.id }}</span>
+                <span v-if="model.probeOk === true" class="probe-badge probe-ok" title="Verified reachable">
+                  ✓ verified
+                </span>
               </label>
             </div>
             <div class="discover-actions">
@@ -60,6 +65,17 @@
                 {{ applyingModels ? t('settings.model.discovery.adding') : t('settings.model.discovery.addSelected') }}
                 ({{ selectedNewModelIds.length }})
               </button>
+            </div>
+            <!-- Show models that were discovered but failed the probe, so users see
+                 why they are not offered in the "add selected" list -->
+            <div v-if="discoveredUnavailable.length > 0" class="discover-unavailable">
+              <div class="discover-unavailable-title">
+                ⚠ {{ discoveredUnavailable.length }} discovered model(s) failed the reachability probe and were not listed above:
+              </div>
+              <div v-for="model in discoveredUnavailable" :key="model.id" class="discover-unavailable-item">
+                <span class="discover-model-id">{{ model.id }}</span>
+                <span class="discover-unavailable-reason">{{ model.probeError || 'not reachable' }}</span>
+              </div>
             </div>
           </div>
         </div>
@@ -134,12 +150,13 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { DiscoverResult, ProviderInfo, ProviderModelInfo, TestResult } from '@/types'
 
 const { t } = useI18n()
 
-defineProps<{
+const props = defineProps<{
   show: boolean
   provider: ProviderInfo | null
   modelForm: { id: string; name: string }
@@ -155,6 +172,13 @@ defineProps<{
   getProviderIcon: (providerId: string) => string
   onIconError: (e: Event) => void
 }>()
+
+// Models from discovery that failed the probe — shown in a warning block
+// so users understand why they are not in the "add selected" list
+const discoveredUnavailable = computed(() => {
+  const all = props.discoverResult?.discoveredModels || []
+  return all.filter(m => m && m.probeOk === false)
+})
 
 defineEmits<{
   close: []
@@ -176,7 +200,42 @@ defineEmits<{
 .modal-header { display: flex; align-items: center; justify-content: space-between; padding: 18px 20px; border-bottom: 1px solid var(--mc-border-light); }
 .modal-header h2 { color: var(--mc-text-primary); margin: 0; font-size: 18px; display: flex; align-items: center; }
 .modal-header-actions { display: flex; align-items: center; gap: 10px; }
-.modal-provider-icon { width: 22px; height: 22px; border-radius: 4px; object-fit: contain; vertical-align: middle; margin-right: 6px; }
+.modal-provider-icon-shell {
+  width: 38px;
+  height: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-right: 8px;
+  padding: 7px;
+  border-radius: 12px;
+  border: 1px solid rgba(123, 88, 67, 0.18);
+  background: linear-gradient(180deg, #ffffff, #f5ede6);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.92),
+    0 6px 16px rgba(25, 14, 8, 0.14);
+  flex-shrink: 0;
+}
+
+.modal-provider-icon {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  vertical-align: middle;
+  filter: drop-shadow(0 1px 1px rgba(44, 24, 10, 0.12));
+}
+
+:global(html.dark) .modal-provider-icon-shell {
+  border-color: rgba(255, 248, 241, 0.28);
+  background: linear-gradient(180deg, #fffdfb, #f3e8dc);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.96),
+    0 8px 22px rgba(0, 0, 0, 0.26);
+}
+
+:global(html.dark) .modal-provider-icon {
+  filter: drop-shadow(0 1px 1px rgba(44, 24, 10, 0.18));
+}
 .modal-close { background: none; border: none; font-size: 24px; line-height: 1; cursor: pointer; color: var(--mc-text-secondary); }
 .modal-close:hover { color: var(--mc-text-primary); }
 .modal-body { padding: 20px; overflow-y: auto; flex: 1; min-height: 0; }
@@ -207,6 +266,12 @@ defineEmits<{
 .discover-checkbox:hover { background: var(--mc-bg-sunken); }
 .discover-model-name { font-weight: 500; color: var(--mc-text-primary); }
 .discover-model-id { color: var(--mc-text-tertiary); margin-left: auto; font-size: 12px; }
+.probe-badge { font-size: 10px; padding: 1px 6px; border-radius: 4px; font-weight: 600; margin-left: 6px; }
+.probe-ok { background: rgba(34, 197, 94, 0.12); color: rgb(21, 128, 61); }
+.discover-unavailable { margin-top: 12px; padding: 10px 12px; border-radius: 8px; background: rgba(234, 179, 8, 0.08); border: 1px solid rgba(234, 179, 8, 0.3); }
+.discover-unavailable-title { font-size: 12px; font-weight: 600; color: rgb(161, 98, 7); margin-bottom: 6px; }
+.discover-unavailable-item { display: flex; justify-content: space-between; align-items: center; padding: 3px 0; font-size: 12px; }
+.discover-unavailable-reason { color: var(--mc-text-tertiary); margin-left: 10px; max-width: 60%; text-align: right; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; }
 .discover-actions { display: flex; justify-content: flex-end; margin-top: 8px; }
 
 .model-list { display: grid; gap: 12px; }

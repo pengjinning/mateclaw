@@ -3,12 +3,14 @@ package vip.mate.auth.controller;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
+import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
 import vip.mate.auth.model.LoginRequest;
 import vip.mate.auth.model.LoginResponse;
 import vip.mate.auth.model.UserEntity;
 import vip.mate.auth.service.AuthService;
 import vip.mate.common.result.R;
+import vip.mate.exception.MateClawException;
 
 import java.util.List;
 
@@ -48,8 +50,15 @@ public class AuthController {
     public R<Void> changePassword(
             @PathVariable Long id,
             @RequestParam String oldPassword,
-            @RequestParam String newPassword) {
-        authService.changePassword(id, oldPassword, newPassword);
+            @RequestParam String newPassword,
+            Authentication auth) {
+        // Resolve user from the JWT principal — the {id} path segment is
+        // informational. A user may only change their own password.
+        UserEntity me = authService.findByUsername(auth.getName());
+        if (me == null) {
+            throw new MateClawException("err.auth.user_not_found", "用户不存在");
+        }
+        authService.changePassword(me.getId(), oldPassword, newPassword);
         return R.ok();
     }
 }

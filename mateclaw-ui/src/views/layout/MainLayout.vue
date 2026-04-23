@@ -13,7 +13,7 @@
           <img src="/logo/mateclaw_logo_s.png" alt="MateClaw" class="logo-img" />
         </div>
         <transition name="fade">
-          <div v-if="!sidebarCollapsed" class="logo-text">
+          <div v-if="!effectiveCollapsed" class="logo-text">
             <span class="logo-name">Mate<span class="logo-name-highlight">Claw</span></span>
             <span class="logo-version">v{{ appVersion }}</span>
           </div>
@@ -24,7 +24,7 @@
           :aria-label="sidebarToggleLabel"
           @click="toggleSidebar"
         >
-          <svg v-if="!sidebarCollapsed" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <svg v-if="!effectiveCollapsed" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <polyline points="15 18 9 12 15 6"/>
           </svg>
           <svg v-else width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -33,59 +33,97 @@
         </button>
       </div>
 
+      <!-- 工作区切换 -->
+      <WorkspaceSwitcher :collapsed="effectiveCollapsed" />
+
       <!-- 导航菜单 -->
       <nav class="sidebar-nav">
         <template v-for="group in navGroups" :key="group.key">
           <div class="nav-group">
-            <div v-if="!sidebarCollapsed" class="nav-group-title">{{ group.label }}</div>
+            <div v-if="!effectiveCollapsed" class="nav-group-title">{{ group.label }}</div>
             <router-link
               v-for="item in group.items"
               :key="item.path"
               :to="item.path"
               class="nav-item"
               :class="{ active: isNavItemActive(item) }"
-              :title="sidebarCollapsed ? item.label : ''"
+              :title="effectiveCollapsed ? item.label : ''"
               @click="onNavClick"
             >
               <span class="nav-icon" v-html="item.icon"></span>
-              <span v-if="!sidebarCollapsed" class="nav-label">{{ item.label }}</span>
+              <span v-if="!effectiveCollapsed" class="nav-label">{{ item.label }}</span>
             </router-link>
           </div>
         </template>
       </nav>
 
-      <!-- 底部用户信息 -->
+      <!-- 底部 -->
       <div class="sidebar-footer">
-        <!-- 主题切换 -->
-        <div class="theme-toggle-row">
-          <button
-            v-for="opt in themeOptions"
-            :key="opt.value"
-            class="theme-btn"
-            :class="{ active: themeStore.mode === opt.value }"
-            :title="opt.label"
-            @click="themeStore.setMode(opt.value)"
-          >
-            <span v-html="opt.icon"></span>
-            <span v-if="!sidebarCollapsed" class="theme-btn-label">{{ opt.label }}</span>
+        <template v-if="!sidebarCollapsed || isMobile">
+          <!-- Doctor 健康指示器 -->
+          <button class="health-indicator" :class="healthStatus" @click="showDoctor = true" :title="t('doctor.title')">
+            <span class="health-dot"></span>
+            <span class="health-label">{{ t('doctor.title') }}</span>
           </button>
-        </div>
 
-        <div class="user-info">
-          <div class="user-avatar">{{ userInitial }}</div>
-          <transition name="fade">
-            <div v-if="!sidebarCollapsed" class="user-detail">
+          <div class="sidebar-utility-card">
+            <div class="compact-utility-row">
+              <span class="compact-utility-title">{{ t('nav.themeLabel') }}</span>
+              <div class="theme-toggle-row theme-toggle-row--compact">
+                <button
+                  v-for="opt in themeOptions"
+                  :key="opt.value"
+                  class="theme-btn theme-btn--compact"
+                  :class="{ active: themeStore.mode === opt.value }"
+                  :title="opt.label"
+                  @click="themeStore.setMode(opt.value)"
+                >
+                  <span v-html="opt.icon"></span>
+                </button>
+              </div>
+            </div>
+
+            <div class="compact-utility-row">
+              <span class="compact-utility-title">{{ t('nav.languageLabel') }}</span>
+              <div class="language-toggle-row language-toggle-row--compact">
+                <button
+                  v-for="opt in localeOptions"
+                  :key="opt.value"
+                  class="language-btn language-btn--compact"
+                  :class="{ active: currentLocaleValue === opt.value }"
+                  @click="changeLocale(opt.value)"
+                >
+                  <span class="language-abbr">{{ opt.short }}</span>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div class="user-info">
+            <div class="user-avatar">{{ userInitial }}</div>
+            <div class="user-detail">
               <div class="user-name">{{ username }}</div>
               <div class="user-role">{{ roleLabel }}</div>
             </div>
-          </transition>
-          <button v-if="!sidebarCollapsed" class="logout-btn" @click="logout" :title="t('nav.logout')">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
-              <polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/>
-            </svg>
-          </button>
-        </div>
+            <button class="change-password-btn" @click="showChangePassword = true" :title="t('auth.changePassword')">
+              <el-icon :size="16"><Lock /></el-icon>
+            </button>
+            <button class="logout-btn" @click="logout" :title="t('nav.logout')">
+              <el-icon :size="16"><SwitchButton /></el-icon>
+            </button>
+          </div>
+        </template>
+
+        <template v-else>
+          <div class="collapsed-footer-actions">
+            <button class="footer-icon-btn" :class="healthStatus" @click="showDoctor = true" :title="t('doctor.title')">
+              <span class="health-dot"></span>
+            </button>
+            <button class="footer-icon-btn" :title="t('nav.logout')" @click="logout">
+              <el-icon :size="16"><SwitchButton /></el-icon>
+            </button>
+          </div>
+        </template>
       </div>
     </aside>
 
@@ -102,43 +140,110 @@
         </button>
         <span class="mobile-topbar-title">Mate<span class="logo-name-highlight">Claw</span></span>
       </div>
-      <router-view />
+      <router-view :key="workspaceRouteKey" />
     </main>
+
+    <OnboardingWizard v-if="showOnboarding" @close="showOnboarding = false" />
+    <DoctorDrawer :visible="showDoctor" @close="showDoctor = false" @status="onHealthStatus" />
+
+    <ChangePasswordDialog v-model:visible="showChangePassword" />
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { useThemeStore } from '@/stores/useThemeStore'
 import { version as appVersion } from '../../../package.json'
 import type { ThemeMode } from '@/stores/useThemeStore'
+import { http, settingsApi, setupApi } from '@/api/index'
+import OnboardingWizard from '@/views/Onboarding/OnboardingWizard.vue'
+import DoctorDrawer from '@/views/Doctor/DoctorDrawer.vue'
+import WorkspaceSwitcher from '@/components/workspace/WorkspaceSwitcher.vue'
+import { useWorkspaceStore } from '@/stores/useWorkspaceStore'
+import { applyLocale, currentLocale, type AppLocale } from '@/i18n'
+import { SwitchButton, Lock } from '@element-plus/icons-vue'
+import ChangePasswordDialog from '@/components/ChangePasswordDialog.vue'
 
 const router = useRouter()
 const route = useRoute()
 const { t } = useI18n()
 const themeStore = useThemeStore()
+const workspaceStore = useWorkspaceStore()
 const sidebarCollapsed = ref(localStorage.getItem('mc-sidebar-collapsed') === 'true')
+const footerPanelOpen = ref(false)
+
+// Workspace 切换时通过 key 变化让 router-view 重新挂载，避免 hard reload 破坏运行状态
+const workspaceRouteKey = computed(() => `ws-${workspaceStore.currentWorkspaceId ?? 'none'}`)
+const showOnboarding = ref(false)
+const showDoctor = ref(false)
+const healthStatus = ref('unknown')
+
+function onHealthStatus(status: string) {
+  healthStatus.value = status
+}
+
+async function fetchHealthStatus() {
+  try {
+    const res: any = await http.get('/system/health')
+    const data = res?.data || res
+    healthStatus.value = data?.overall || 'healthy'
+  } catch {
+    healthStatus.value = 'unknown'
+  }
+}
 
 // 移动端状态
 const isMobile = ref(false)
 const mobileMenuOpen = ref(false)
 let mobileQuery: MediaQueryList | null = null
+// 中等屏幕自动折叠（≤1024px）
+let mediumQuery: MediaQueryList | null = null
+const userExplicitCollapse = ref(localStorage.getItem('mc-sidebar-collapsed') === 'true')
 
 function handleMobileChange(e: MediaQueryListEvent | MediaQueryList) {
   isMobile.value = e.matches
   if (!e.matches) mobileMenuOpen.value = false
+  if (e.matches) footerPanelOpen.value = false
 }
 
-onMounted(() => {
+function handleMediumChange(e: MediaQueryListEvent | MediaQueryList) {
+  if (e.matches && !userExplicitCollapse.value) {
+    sidebarCollapsed.value = true
+  } else if (!e.matches && !userExplicitCollapse.value) {
+    sidebarCollapsed.value = false
+  }
+}
+
+onMounted(async () => {
   mobileQuery = window.matchMedia('(max-width: 768px)')
   handleMobileChange(mobileQuery)
   mobileQuery.addEventListener('change', handleMobileChange)
+
+  mediumQuery = window.matchMedia('(max-width: 1024px)')
+  handleMediumChange(mediumQuery)
+  mediumQuery.addEventListener('change', handleMediumChange)
+
+  // Check onboarding status
+  if (!localStorage.getItem('mc-onboarding-done')) {
+    try {
+      const res: any = await setupApi.onboardingStatus()
+      if (res?.data && !res.data.hasDefaultModel) {
+        showOnboarding.value = true
+      }
+    } catch {
+      // If endpoint doesn't exist yet, skip onboarding
+    }
+  }
+
+  // Fetch initial health status for sidebar indicator
+  fetchHealthStatus()
 })
 
 onBeforeUnmount(() => {
   mobileQuery?.removeEventListener('change', handleMobileChange)
+  mediumQuery?.removeEventListener('change', handleMediumChange)
 })
 
 function onNavClick() {
@@ -149,7 +254,9 @@ const username = computed(() => localStorage.getItem('username') || 'User')
 const role = computed(() => localStorage.getItem('role') || 'user')
 const userInitial = computed(() => username.value.charAt(0).toUpperCase())
 const roleLabel = computed(() => role.value === 'admin' ? t('nav.roleAdmin') : t('nav.roleUser'))
+const effectiveCollapsed = computed(() => sidebarCollapsed.value && !isMobile.value)
 const sidebarToggleLabel = computed(() => sidebarCollapsed.value ? t('common.expandSidebar') : t('common.collapseSidebar'))
+const currentLocaleValue = computed(() => currentLocale.value)
 
 const themeOptions = computed<{ value: ThemeMode; label: string; icon: string }[]>(() => [
   {
@@ -169,47 +276,46 @@ const themeOptions = computed<{ value: ThemeMode; label: string; icon: string }[
   },
 ])
 
+const localeOptions = computed<{ value: AppLocale; label: string; short: string }[]>(() => [
+  { value: 'zh-CN', label: t('settings.languageOptions.zhCN'), short: '中' },
+  { value: 'en-US', label: t('settings.languageOptions.enUS'), short: 'EN' },
+])
+
 const navGroups = computed(() => [
   {
-    key: 'chat',
-    label: t('nav.chat'),
+    key: 'core',
+    label: t('nav.core'),
     items: [
+      {
+        path: '/dashboard',
+        label: t('nav.dashboard', 'Dashboard'),
+        icon: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>`,
+      },
       {
         path: '/chat',
         label: t('nav.chat'),
         icon: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>`,
       },
+      {
+        path: '/agents',
+        label: t('nav.agents'),
+        icon: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M20 21a8 8 0 1 0-16 0"/></svg>`,
+      },
+      {
+        path: '/wiki',
+        label: t('nav.wiki'),
+        icon: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/><line x1="8" y1="7" x2="16" y2="7"/><line x1="8" y1="11" x2="14" y2="11"/></svg>`,
+      },
     ],
   },
   {
-    key: 'control',
-    label: t('nav.control'),
+    key: 'connect',
+    label: t('nav.connect'),
     items: [
       {
         path: '/channels',
         label: t('nav.channels'),
         icon: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07A19.5 19.5 0 0 1 4.69 12a19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 3.6 1.18h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L7.91 8.73a16 16 0 0 0 6.29 6.29l1.62-1.62a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 16.92z"/></svg>`,
-      },
-      {
-        path: '/sessions',
-        label: t('nav.sessions'),
-        icon: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>`,
-      },
-      {
-        path: '/cron-jobs',
-        label: t('nav.cronJobs'),
-        icon: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>`,
-      },
-    ],
-  },
-  {
-    key: 'agent',
-    label: t('nav.agent'),
-    items: [
-      {
-        path: '/workspace',
-        label: t('nav.workspace'),
-        icon: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg>`,
       },
       {
         path: '/skills',
@@ -222,40 +328,25 @@ const navGroups = computed(() => [
         icon: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>`,
       },
       {
-        path: '/datasources',
-        label: t('nav.datasources'),
-        icon: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>`,
-      },
-      {
-        path: '/mcp-servers',
-        label: t('nav.mcpServers'),
-        icon: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"/><rect x="2" y="14" width="20" height="8" rx="2" ry="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>`,
+        path: '/plugins',
+        label: t('nav.plugins'),
+        icon: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="7" width="20" height="14" rx="2" ry="2"/><path d="M16 3h-8v4h8V3z"/></svg>`,
       },
     ],
   },
   {
-    key: 'settings',
-    label: t('nav.settingsGroup'),
+    key: 'system',
+    label: t('nav.system'),
     items: [
       {
-        path: '/agents',
-        label: t('nav.agents'),
-        icon: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M20 21a8 8 0 1 0-16 0"/></svg>`,
+        path: '/settings/models',
+        label: t('nav.settings'),
+        icon: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M4.93 4.93a10 10 0 0 0 0 14.14"/></svg>`,
       },
       {
         path: '/security',
         label: t('nav.security'),
         icon: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>`,
-      },
-      {
-        path: '/token-usage',
-        label: t('nav.tokenUsage'),
-        icon: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1v22M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>`,
-      },
-      {
-        path: '/settings/models',
-        label: t('nav.settings'),
-        icon: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M4.93 4.93a10 10 0 0 0 0 14.14"/></svg>`,
       },
     ],
   },
@@ -263,7 +354,11 @@ const navGroups = computed(() => [
 
 function toggleSidebar() {
   sidebarCollapsed.value = !sidebarCollapsed.value
+  userExplicitCollapse.value = sidebarCollapsed.value
   localStorage.setItem('mc-sidebar-collapsed', String(sidebarCollapsed.value))
+  if (!sidebarCollapsed.value) {
+    footerPanelOpen.value = false
+  }
 }
 
 function isNavItemActive(item: { path: string; label: string }) {
@@ -276,12 +371,37 @@ function isNavItemActive(item: { path: string; label: string }) {
   return route.path === item.path
 }
 
+const showChangePassword = ref(false)
+
 function logout() {
   localStorage.removeItem('token')
   localStorage.removeItem('username')
   localStorage.removeItem('role')
   router.push('/login')
 }
+
+async function changeLocale(locale: AppLocale) {
+  applyLocale(locale)
+  footerPanelOpen.value = false
+  try {
+    await settingsApi.update({ language: locale })
+  } catch {
+    // keep local preference even if backend persistence fails
+  }
+}
+
+watch(() => route.fullPath, () => {
+  footerPanelOpen.value = false
+  if (isMobile.value) mobileMenuOpen.value = false
+})
+
+watch(() => sidebarCollapsed.value, (collapsed) => {
+  if (!collapsed) footerPanelOpen.value = false
+})
+
+watch(() => workspaceStore.currentWorkspaceId, () => {
+  footerPanelOpen.value = false
+})
 </script>
 
 <style scoped>
@@ -290,58 +410,91 @@ function logout() {
   height: 100vh;
   background: var(--mc-bg);
   overflow: hidden;
+  position: relative;
+}
+
+.app-layout::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(circle at top left, rgba(217, 109, 70, 0.12), transparent 22%),
+    radial-gradient(circle at bottom right, rgba(24, 74, 69, 0.08), transparent 18%);
+  pointer-events: none;
+}
+
+:global(html.dark) .app-layout::before {
+  background:
+    radial-gradient(circle at top left, rgba(235, 143, 101, 0.14), transparent 24%),
+    radial-gradient(circle at bottom right, rgba(92, 166, 157, 0.08), transparent 20%);
 }
 
 /* ===== 侧边栏 ===== */
 .sidebar {
-  width: 220px;
-  min-width: 220px;
-  background: var(--mc-sidebar-bg);
-  border-right: 1px solid var(--mc-sidebar-border);
+  width: 236px;
+  min-width: 236px;
+  margin: 14px 0 14px 14px;
+  background:
+    linear-gradient(180deg, var(--mc-panel-top), var(--mc-panel-bottom));
+  border: 1px solid var(--mc-sidebar-border);
+  border-radius: 28px;
+  box-shadow: var(--mc-shadow-soft);
   display: flex;
   flex-direction: column;
   transition: width 0.2s ease, min-width 0.2s ease;
   overflow: hidden;
+  position: relative;
+  z-index: 1;
 }
 
 .sidebar.collapsed {
-  width: 56px;
-  min-width: 56px;
+  width: 74px;
+  min-width: 74px;
+}
+
+.sidebar::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: var(--mc-glow);
+  pointer-events: none;
 }
 
 .sidebar-logo {
   display: flex;
   align-items: center;
-  padding: 14px 12px;
+  padding: 14px 14px 12px;
   border-bottom: 1px solid var(--mc-border-light);
-  gap: 10px;
-  min-height: 58px;
+  gap: 12px;
+  min-height: 64px;
 }
 
 .sidebar.collapsed .sidebar-logo {
   flex-direction: column;
   justify-content: center;
-  padding: 10px 6px;
-  gap: 8px;
-  min-height: 88px;
+  padding: 12px 10px;
+  gap: 6px;
+  min-height: 92px;
 }
 
 .logo-icon {
-  width: 32px;
-  height: 32px;
-  border-radius: 8px;
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
   display: flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
   overflow: hidden;
+  background: linear-gradient(135deg, rgba(217, 109, 70, 0.18), rgba(24, 74, 69, 0.08));
+  border: 1px solid rgba(217, 109, 70, 0.14);
 }
 
 .logo-img {
-  width: 32px;
-  height: 32px;
+  width: 34px;
+  height: 34px;
   object-fit: contain;
-  filter: drop-shadow(0 2px 6px rgba(217, 119, 87, 0.25));
+  filter: drop-shadow(0 8px 18px rgba(217, 109, 70, 0.22));
 }
 
 .logo-emoji { font-size: 16px; }
@@ -350,10 +503,11 @@ function logout() {
 
 .logo-name {
   display: block;
-  font-size: 15px;
-  font-weight: 700;
+  font-size: 16px;
+  font-weight: 800;
   color: var(--mc-sidebar-logo-name);
   white-space: nowrap;
+  letter-spacing: -0.03em;
 }
 
 .logo-name-highlight {
@@ -362,21 +516,23 @@ function logout() {
 
 .logo-version {
   display: block;
-  font-size: 11px;
+  font-size: 10px;
   color: var(--mc-text-tertiary);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
 }
 
 .collapse-btn {
-  width: 24px;
-  height: 24px;
-  border: none;
-  background: none;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--mc-border-light);
+  background: var(--mc-bg-muted);
   cursor: pointer;
   color: var(--mc-text-tertiary);
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: 4px;
+  border-radius: 10px;
   flex-shrink: 0;
   padding: 0;
   margin-left: auto;
@@ -405,21 +561,23 @@ function logout() {
 .sidebar-nav {
   flex: 1;
   overflow-y: auto;
-  padding: 8px 0;
+  padding: 8px 0 4px;
+  scrollbar-width: none;
 }
 
 .sidebar-nav::-webkit-scrollbar { width: 4px; }
 .sidebar-nav::-webkit-scrollbar-thumb { background: var(--mc-border); border-radius: 2px; }
+.sidebar-nav::-webkit-scrollbar { display: none; }
 
 .nav-group { margin-bottom: 2px; }
 
 .nav-group-title {
-  padding: 8px 16px 4px;
-  font-size: 11px;
+  padding: 8px 18px 4px;
+  font-size: 10px;
   font-weight: 600;
   color: var(--mc-sidebar-group-title);
   text-transform: uppercase;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.1em;
   white-space: nowrap;
 }
 
@@ -427,12 +585,12 @@ function logout() {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 8px 12px;
+  padding: 10px 12px;
   color: var(--mc-sidebar-text);
   text-decoration: none;
-  font-size: 14px;
-  border-radius: 6px;
-  margin: 1px 8px;
+  font-size: 13px;
+  border-radius: 13px;
+  margin: 2px 10px;
   transition: all 0.15s ease;
   white-space: nowrap;
   overflow: hidden;
@@ -447,19 +605,11 @@ function logout() {
 .nav-item.active {
   background: var(--mc-sidebar-active);
   color: var(--mc-sidebar-text-active);
-  font-weight: 500;
+  font-weight: 600;
+  box-shadow: inset 0 0 0 1px rgba(217, 109, 70, 0.08);
 }
 
-.nav-item.active::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 4px;
-  bottom: 4px;
-  width: 3px;
-  background: var(--mc-primary);
-  border-radius: 0 3px 3px 0;
-}
+/* Active indicator bar removed — active state uses bg color + font weight only */
 
 .nav-icon { display: flex; align-items: center; flex-shrink: 0; }
 .nav-label { overflow: hidden; text-overflow: ellipsis; }
@@ -467,17 +617,75 @@ function logout() {
 /* 底部 */
 .sidebar-footer {
   border-top: 1px solid var(--mc-border-light);
-  padding: 10px 12px;
+  padding: 10px 12px 12px;
+  background: var(--mc-sidebar-footer-bg);
+  backdrop-filter: blur(14px);
+  position: relative;
 }
+.health-indicator { display: flex; align-items: center; gap: 8px; width: 100%; padding: 8px 10px; border: 1px solid var(--mc-border-light); background: var(--mc-bg-muted); border-radius: 12px; cursor: pointer; color: var(--mc-text-secondary); font-size: 12px; margin-bottom: 8px; }
+.health-indicator:hover { background: var(--mc-bg-sunken); }
+.health-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.health-indicator.healthy .health-dot { background: var(--mc-success); }
+.health-indicator.warning .health-dot { background: var(--mc-primary); }
+.health-indicator.error .health-dot { background: var(--mc-danger); }
+.health-indicator.unknown .health-dot { background: var(--mc-text-tertiary); }
+
+.sidebar-utility-card {
+  margin-bottom: 8px;
+  padding: 8px 10px;
+  border-radius: 16px;
+  border: 1px solid var(--mc-border-light);
+  background: color-mix(in srgb, var(--mc-sidebar-footer-bg) 74%, transparent);
+}
+
+.compact-utility-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.compact-utility-row + .compact-utility-row {
+  margin-top: 6px;
+}
+
+.compact-utility-title {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--mc-text-secondary);
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+.utility-label { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.12em; color: var(--mc-text-tertiary); margin: 0 0 8px; padding-left: 2px; }
 
 /* 主题切换 */
 .theme-toggle-row {
   display: flex;
   gap: 2px;
-  background: var(--mc-bg-sunken);
-  border-radius: 8px;
-  padding: 3px;
-  margin-bottom: 10px;
+  background: var(--mc-bg-muted);
+  border-radius: 14px;
+  padding: 4px;
+  margin-bottom: 12px;
+  border: 1px solid var(--mc-border-light);
+}
+
+.theme-toggle-row--compact {
+  margin-bottom: 0;
+  padding: 2px;
+  gap: 3px;
+  border-radius: 999px;
+}
+
+.language-toggle-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.language-toggle-row--compact {
+  display: flex;
+  gap: 6px;
 }
 
 .theme-btn {
@@ -497,6 +705,14 @@ function logout() {
   white-space: nowrap;
 }
 
+.theme-btn--compact {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: 999px;
+  flex: 0 0 auto;
+}
+
 .theme-btn:hover {
   color: var(--mc-text-secondary);
 }
@@ -504,7 +720,7 @@ function logout() {
 .theme-btn.active {
   background: var(--mc-bg-elevated);
   color: var(--mc-text-primary);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+  box-shadow: var(--mc-shadow-soft);
 }
 
 .theme-btn-label {
@@ -512,17 +728,83 @@ function logout() {
   text-overflow: ellipsis;
 }
 
+.language-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: flex-start;
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: 14px;
+  border: 1px solid var(--mc-border-light);
+  background: var(--mc-bg-muted);
+  color: var(--mc-text-secondary);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.language-btn:hover {
+  background: var(--mc-bg-sunken);
+  color: var(--mc-text-primary);
+}
+
+.language-btn.active {
+  border-color: rgba(217, 109, 70, 0.18);
+  background: var(--mc-primary-bg);
+  color: var(--mc-primary);
+}
+
+.language-abbr {
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  background: var(--mc-panel-raised);
+  color: inherit;
+  font-size: 11px;
+  font-weight: 800;
+  flex-shrink: 0;
+}
+
+.language-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.language-btn--compact {
+  width: 34px;
+  min-width: 34px;
+  justify-content: center;
+  padding: 4px 0;
+  border-radius: 999px;
+}
+
+.language-btn--compact .language-abbr {
+  width: 20px;
+  height: 20px;
+  font-size: 10px;
+}
+
 .user-info {
   display: flex;
   align-items: center;
   gap: 8px;
+  padding: 8px 9px;
+  border-radius: 14px;
+  background: var(--mc-bg-muted);
+  border: 1px solid var(--mc-border-light);
 }
 
 .user-avatar {
-  width: 32px;
-  height: 32px;
-  background: linear-gradient(135deg, var(--mc-primary), var(--mc-primary-hover));
-  border-radius: 50%;
+  width: 30px;
+  height: 30px;
+  background: linear-gradient(135deg, var(--mc-primary), var(--mc-accent));
+  border-radius: 12px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -535,7 +817,7 @@ function logout() {
 .user-detail { flex: 1; overflow: hidden; }
 
 .user-name {
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 500;
   color: var(--mc-text-primary);
   white-space: nowrap;
@@ -543,11 +825,12 @@ function logout() {
   text-overflow: ellipsis;
 }
 
-.user-role { font-size: 11px; color: var(--mc-text-tertiary); }
+.user-role { font-size: 10px; color: var(--mc-text-tertiary); }
 
+.change-password-btn,
 .logout-btn {
-  width: 28px;
-  height: 28px;
+  width: 26px;
+  height: 26px;
   border: none;
   background: none;
   cursor: pointer;
@@ -560,9 +843,133 @@ function logout() {
   flex-shrink: 0;
 }
 
+.change-password-btn:hover {
+  background: var(--mc-primary-bg);
+  color: var(--mc-primary);
+}
+
 .logout-btn:hover {
   background: var(--mc-danger-bg);
   color: var(--mc-danger);
+}
+
+.collapsed-footer-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: center;
+}
+
+.footer-icon-btn {
+  width: 42px;
+  height: 42px;
+  border-radius: 14px;
+  border: 1px solid var(--mc-border-light);
+  background: var(--mc-bg-muted);
+  color: var(--mc-text-secondary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.footer-icon-btn:hover {
+  background: var(--mc-bg-sunken);
+  color: var(--mc-text-primary);
+}
+
+.footer-icon-btn.healthy .health-dot { background: var(--mc-success); }
+.footer-icon-btn.warning .health-dot { background: var(--mc-primary); }
+.footer-icon-btn.error .health-dot { background: var(--mc-danger); }
+.footer-icon-btn.unknown .health-dot { background: var(--mc-text-tertiary); }
+
+.footer-icon-btn--accent {
+  color: var(--mc-primary);
+  background: var(--mc-primary-bg);
+  border-color: rgba(217, 109, 70, 0.18);
+}
+
+.sidebar-utility-panel {
+  position: absolute;
+  left: calc(100% + 14px);
+  bottom: 16px;
+  width: 236px;
+  padding: 14px;
+  border-radius: 22px;
+  background: var(--mc-sidebar-floating-bg);
+  border: 1px solid var(--mc-border);
+  box-shadow: var(--mc-shadow-medium);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  backdrop-filter: blur(18px);
+}
+
+.panel-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.panel-option-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.panel-option-btn {
+  width: 100%;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 14px;
+  border: 1px solid var(--mc-border-light);
+  background: var(--mc-bg-muted);
+  color: var(--mc-text-secondary);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  transition: all 0.15s ease;
+}
+
+.panel-option-btn:hover {
+  background: var(--mc-bg-sunken);
+  color: var(--mc-text-primary);
+}
+
+.panel-option-btn.active {
+  background: var(--mc-primary-bg);
+  color: var(--mc-primary);
+  border-color: rgba(217, 109, 70, 0.18);
+}
+
+.panel-option-icon {
+  width: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.panel-user {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px;
+  border-radius: 16px;
+  background: var(--mc-bg-muted);
+  border: 1px solid var(--mc-border-light);
+}
+
+.panel-user-meta {
+  min-width: 0;
+  flex: 1;
+}
+
+.logout-btn--panel {
+  flex-shrink: 0;
 }
 
 /* ===== 主内容区 ===== */
@@ -572,6 +979,9 @@ function logout() {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  position: relative;
+  z-index: 1;
+  padding: 14px 14px 14px 18px;
 }
 
 /* ===== 移动端元素（桌面端隐藏） ===== */
@@ -599,9 +1009,10 @@ function logout() {
     z-index: 1000;
     width: 260px;
     min-width: 260px;
+    margin: 10px;
     transform: translateX(-100%);
     transition: transform 0.25s ease;
-    box-shadow: none;
+    box-shadow: var(--mc-shadow-medium);
   }
 
   .sidebar.mobile-open {
@@ -630,9 +1041,12 @@ function logout() {
     display: flex;
     align-items: center;
     gap: 10px;
-    padding: 10px 14px;
-    background: var(--mc-sidebar-bg);
-    border-bottom: 1px solid var(--mc-border-light);
+    margin: 0 0 12px;
+    padding: 12px 14px;
+    background: var(--mc-surface-overlay);
+    border: 1px solid var(--mc-border);
+    border-radius: 18px;
+    box-shadow: var(--mc-shadow-soft);
     flex-shrink: 0;
   }
 
@@ -658,6 +1072,58 @@ function logout() {
 
   .mobile-menu-btn:hover {
     background: var(--mc-bg-sunken);
+  }
+
+  .sidebar-utility-panel {
+    display: none;
+  }
+
+  .sidebar-utility-card {
+    padding: 10px;
+  }
+
+  .compact-utility-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .theme-toggle-row--compact,
+  .language-toggle-row--compact {
+    width: 100%;
+    justify-content: stretch;
+  }
+
+  .theme-btn--compact,
+  .language-btn--compact {
+    flex: 1;
+    width: auto;
+  }
+
+  .sidebar-footer {
+    background: transparent;
+    backdrop-filter: none;
+  }
+}
+
+@media (max-width: 480px) {
+  .mobile-topbar {
+    padding: 8px 10px;
+    margin: 0 0 8px;
+    border-radius: 12px;
+    gap: 8px;
+  }
+
+  .mobile-topbar-title {
+    font-size: 14px;
+  }
+
+  .mobile-menu-btn {
+    width: 32px;
+    height: 32px;
+  }
+
+  .main-content {
+    padding: 8px;
   }
 }
 </style>

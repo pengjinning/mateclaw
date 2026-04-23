@@ -245,13 +245,16 @@ public class StateGraphPlanExecuteAgent extends BaseAgent implements StructuredS
 
         // 上下文窗口管理：裁剪超出模型 context window 的历史（含当前消息预算）
         if (conversationWindowManager != null) {
+            Long parsedAgentId = null;
+            try { parsedAgentId = Long.valueOf(agentId); } catch (Exception ignored) {}
             historyMessages = conversationWindowManager.fitToWindow(
                     historyMessages,
                     systemPrompt != null ? systemPrompt : "",
                     userMessage,
                     maxInputTokens,
                     chatModel,
-                    conversationId);
+                    conversationId,
+                    parsedAgentId);
         }
 
         List<Message> messages = new ArrayList<>(historyMessages);
@@ -266,6 +269,7 @@ public class StateGraphPlanExecuteAgent extends BaseAgent implements StructuredS
                 systemPrompt != null ? systemPrompt : "你是一个有帮助的AI助手。");
         inputs.put(MateClawStateKeys.CONVERSATION_ID, conversationId);
         inputs.put(MateClawStateKeys.AGENT_ID, agentId != null ? agentId : "");
+        inputs.put(MateClawStateKeys.WORKSPACE_BASE_PATH, workspaceBasePath != null ? workspaceBasePath : "");
         // 注入会话消息（复用 MateClawStateKeys.MESSAGES，与 ReAct 一致）
         inputs.put(MateClawStateKeys.MESSAGES, messages);
         // 注入 working context

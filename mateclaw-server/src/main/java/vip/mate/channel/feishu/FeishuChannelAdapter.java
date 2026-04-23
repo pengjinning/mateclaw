@@ -110,7 +110,17 @@ public class FeishuChannelAdapter extends AbstractChannelAdapter {
         if ("websocket".equals(connectionMode)) {
             startWebSocket(appId, appSecret);
         } else {
-            log.info("[feishu] Webhook mode, waiting for callbacks at /api/v1/channels/webhook/feishu");
+            // RFC-025 Change 3: webhook 模式下 encrypt_key 必须配置，否则 fail-fast 拒绝启动；
+            // 没有加密密钥 + 无签名校验 = 任何人可伪造 webhook 请求触发 agent 消息
+            String encryptKey = getConfigString("encrypt_key", null);
+            if (encryptKey == null || encryptKey.isBlank()) {
+                throw new IllegalStateException(
+                        "Feishu channel in webhook mode requires encrypt_key in configJson " +
+                        "(fail-closed to prevent unauthenticated webhook abuse). " +
+                        "Configure encrypt_key on the Feishu Event Subscriptions page and mirror " +
+                        "it in this channel's configJson, or switch connection_mode to websocket.");
+            }
+            log.info("[feishu] Webhook mode (encrypt_key configured), waiting for callbacks at /api/v1/channels/webhook/feishu");
         }
 
         log.info("[feishu] Feishu channel initialized: appId={}, mode={}, domain={}",
@@ -485,11 +495,12 @@ public class FeishuChannelAdapter extends AbstractChannelAdapter {
                 .content(textContent != null ? textContent : "")
                 .contentType(messageType)
                 .contentParts(contentParts)
+                .inputMode("audio".equals(messageType) ? "voice" : "text")
                 .timestamp(LocalDateTime.now())
                 .rawPayload(rawPayload)
                 .build();
 
-        // replyToken 保留完整 chatId（发送消息需要完整 ID）
+        // replyToken ��留完整 chatId（��送消息需要完整 ID）
         channelMessage.setReplyToken(chatId);
         onMessage(channelMessage);
     }

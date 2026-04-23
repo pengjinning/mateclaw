@@ -64,6 +64,9 @@
       </div>
     </div>
 
+    <!-- Embedding 模型（RFC Embedding UI） -->
+    <EmbeddingModelsSection />
+
     <div v-if="savedTip" class="save-tip">{{ savedTip }}</div>
 
     <!-- Provider Config Modal -->
@@ -79,6 +82,8 @@
       @close="closeProviderModal"
       @save="onSaveProvider"
       @toggle-advanced="advancedOpen = !advancedOpen"
+      @oauth-login="handleOAuthLogin"
+      @oauth-revoke="handleOAuthRevoke"
     />
 
     <!-- Manage Models Modal -->
@@ -117,6 +122,7 @@ import { ElMessage } from 'element-plus'
 import type { ProviderInfo, ProviderModelInfo } from '@/types'
 import { useProviders } from './useProviders'
 import ProviderCard from './ProviderCard.vue'
+import EmbeddingModelsSection from './EmbeddingModelsSection.vue'
 import ProviderConfigModal from './modals/ProviderConfigModal.vue'
 import ManageModelsModal from './modals/ManageModelsModal.vue'
 
@@ -168,6 +174,8 @@ const {
   providerStatus,
   getProviderIcon,
   onIconError,
+  handleOAuthLogin,
+  handleOAuthRevoke,
 } = useProviders()
 
 const localProviders = computed(() => providers.value.filter(p => p.isLocal))
@@ -192,18 +200,30 @@ async function onDeleteProvider(provider: ProviderInfo) {
 }
 
 async function onAddProviderModel() {
-  await addProviderModel()
-  showSavedTip(t('settings.model.modelAdded'))
+  try {
+    await addProviderModel()
+    showSavedTip(t('settings.model.modelAdded'))
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : t('settings.model.modelAddFailed'))
+  }
 }
 
 async function onRemoveProviderModel(model: ProviderModelInfo) {
-  await removeProviderModel(model)
-  showSavedTip(t('settings.model.modelRemoved'))
+  try {
+    await removeProviderModel(model)
+    showSavedTip(t('settings.model.modelRemoved'))
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : t('settings.model.modelRemoveFailed'))
+  }
 }
 
 async function onSetActiveModel(model: ProviderModelInfo) {
-  await setActiveModel(model)
-  showSavedTip(t('settings.model.activeChanged'))
+  try {
+    await setActiveModel(model)
+    showSavedTip(t('settings.model.activeChanged'))
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : t('settings.model.activeChangeFailed'))
+  }
 }
 
 async function onApplyModels() {

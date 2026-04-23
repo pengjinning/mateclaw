@@ -43,6 +43,15 @@ public class ChannelMessage {
     private String contentType;
 
     /**
+     * 用户输入方式：text / voice / image / mixed
+     * <p>
+     * 各渠道 Adapter 在解析入站消息时设置。
+     * Router 据此决定是否触发 TTS 语音回复、是否注入语音场景提示词。
+     */
+    @Builder.Default
+    private String inputMode = "text";
+
+    /**
      * 结构化消息内容（多模态）。
      * 各渠道 Adapter 在解析原生消息时构建此列表，
      * Router 据此传给 AgentService，使 Agent 能看到完整的多模态输入。

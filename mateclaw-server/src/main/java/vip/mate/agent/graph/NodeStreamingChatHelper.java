@@ -6,6 +6,7 @@ import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.prompt.Prompt;
+import org.springframework.web.reactive.function.client.WebClientResponseException;
 import vip.mate.channel.web.ChatStreamTracker;
 
 import reactor.core.Disposable;
@@ -15,6 +16,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -97,9 +99,9 @@ public class NodeStreamingChatHelper {
 
     // ==================== 重试配置 ====================
 
-    private static final int MAX_RETRIES = 3;
-    private static final long BACKOFF_BASE_MS = 1000;
-    private static final long BACKOFF_CAP_MS = 10_000;
+    private static final int MAX_RETRIES = 5;
+    private static final long BACKOFF_BASE_MS = 3000;
+    private static final long BACKOFF_CAP_MS = 60_000;
 
     /**
      * 判断错误是否可重试（基于状态码/异常类型）
@@ -149,6 +151,19 @@ public class NodeStreamingChatHelper {
         // Client errors (400 Bad Request — unsupported format, invalid params, etc.) — NOT retryable
         if (msg.contains("400") || msg.contains("Bad Request")
                 || msg.contains("invalid_request_error") || msg.contains("unsupported")) {
+            return ErrorType.CLIENT_ERROR;
+        }
+        // DashScope-specific "model name does not map to a valid endpoint" — reported as
+        // "[InvalidParameter] url error, please check url" (see
+        // https://help.aliyun.com/zh/model-studio/error-code#error-url). Despite the wording
+        // it's not a URL issue — it's the provider rejecting an unknown/unsupported model id
+        // on the native protocol. Treat as client error so we do NOT retry.
+        if (msg.contains("[InvalidParameter]")
+                || msg.contains("InvalidParameter")
+                || msg.contains("url error")
+                || msg.contains("Model not exist")
+                || msg.contains("model_not_found")
+                || msg.contains("Model not found")) {
             return ErrorType.CLIENT_ERROR;
         }
         // Server errors
@@ -210,10 +225,15 @@ public class NodeStreamingChatHelper {
                 if (lastResult.errorType() == ErrorType.THINKING_BLOCK_ERROR) {
                     return lastResult; // 已经重试过了
                 }
-                // 成功或不可重试
+                // 成功
                 if (lastResult.errorMessage() == null || lastResult.errorType() == ErrorType.NONE) {
                     return lastResult;
                 }
+                // Any other non-null errored result with a classified type that doStreamCall
+                // chose NOT to retry (i.e. UNKNOWN, or RATE_LIMIT/SERVER_ERROR past MAX_RETRIES)
+                // must exit — otherwise we silently spin through attempts and waste seconds
+                // per turn on unrecoverable errors like DashScope's "url error" / unknown model.
+                return lastResult;
             }
             // lastResult == null 表示需要重试
         }
@@ -246,8 +266,16 @@ public class NodeStreamingChatHelper {
                                        boolean broadcast, int attempt) {
         if (attempt > 0) {
             long delay = Math.min(BACKOFF_BASE_MS * (1L << (attempt - 1)), BACKOFF_CAP_MS);
+            // 加入 jitter 防止雷群效应（Hermes 风格）
+            delay += ThreadLocalRandom.current().nextLong(0, Math.max(1, delay / 2));
+            delay = Math.min(delay, BACKOFF_CAP_MS);
             log.warn("[{}] Retry attempt {}/{} after {}ms for conversation {}",
                     phase, attempt, MAX_RETRIES, delay, conversationId);
+            // 广播给前端：用户可见的重试倒计时
+            if (broadcast) {
+                broadcastDelta(conversationId, "warning",
+                        buildDeltaJson("⏱️ 请求频率受限，等待 " + (delay / 1000) + " 秒后重试（第 " + attempt + "/" + MAX_RETRIES + " 次）..."));
+            }
             try {
                 Thread.sleep(delay);
             } catch (InterruptedException ie) {
@@ -263,6 +291,9 @@ public class NodeStreamingChatHelper {
         AtomicReference<Throwable> errorRef = new AtomicReference<>();
         AtomicInteger promptTokens = new AtomicInteger(0);
         AtomicInteger completionTokens = new AtomicInteger(0);
+        // RFC-014: Anthropic prompt cache 计数（其它 provider 永远为 0）
+        AtomicInteger cacheReadTokens = new AtomicInteger(0);
+        AtomicInteger cacheWriteTokens = new AtomicInteger(0);
 
         // 重复检测器：检测 LLM 退化输出（如不断重复同一句话）
         RepetitionDetector contentRepDetector = new RepetitionDetector();
@@ -311,7 +342,10 @@ public class NodeStreamingChatHelper {
                             return;
                         }
                         thinkingAccum.append(thinkingDelta);
-                        if (broadcast) {
+                        // thinkingLevel=off 时不广播 thinking（模型仍可能产生，但前端不展示）
+                        boolean suppressThinking = "off".equalsIgnoreCase(
+                                vip.mate.agent.ThinkingLevelHolder.get());
+                        if (broadcast && !suppressThinking) {
                             broadcastDelta(conversationId, "thinking_delta", thinkingDelta);
                         }
                     }
@@ -330,6 +364,10 @@ public class NodeStreamingChatHelper {
                         if (usage.getCompletionTokens() != null && usage.getCompletionTokens() > 0) {
                             completionTokens.set(usage.getCompletionTokens().intValue());
                         }
+                        // RFC-014: 反射抽取 Anthropic prompt cache 字段（DashScope/OpenAI 自然返回 0）
+                        var cache = vip.mate.llm.cache.CacheUsageExtractor.extract(usage);
+                        if (cache.cacheReadTokens() > 0)  cacheReadTokens.set(cache.cacheReadTokens());
+                        if (cache.cacheWriteTokens() > 0) cacheWriteTokens.set(cache.cacheWriteTokens());
                     }
                 })
                 .subscribe(
@@ -366,7 +404,8 @@ public class NodeStreamingChatHelper {
                                 phase, contentAccum.length(), thinkingAccum.length(),
                                 toolCallAccumulators.size(), conversationId);
                         return assembleStoppedResult(contentAccum, thinkingAccum, toolCallAccumulators,
-                                promptTokens.get(), completionTokens.get(), phase);
+                                promptTokens.get(), completionTokens.get(),
+                                cacheReadTokens.get(), cacheWriteTokens.get(), phase);
                     }
                     log.info("[{}] Stop requested during LLM call, no content accumulated, aborting: conversationId={}",
                             phase, conversationId);
@@ -398,7 +437,9 @@ public class NodeStreamingChatHelper {
                             buildDeltaJson("LLM 响应中断，使用已生成的部分内容继续"));
                 }
                 return assembleResult(contentAccum, thinkingAccum, toolCallAccumulators,
-                        promptTokens.get(), completionTokens.get(), phase, true, error.getMessage());
+                        promptTokens.get(), completionTokens.get(),
+                        cacheReadTokens.get(), cacheWriteTokens.get(),
+                        phase, true, error.getMessage());
             }
 
             // ===== 无内容：分类错误并决定是否重试 =====
@@ -422,7 +463,7 @@ public class NodeStreamingChatHelper {
             // Client error (400): 不重试（参数/格式错误重试也不会变）
             if (errorType == ErrorType.CLIENT_ERROR) {
                 log.error("[{}] Client error (400), not retrying: {}", phase, error.getMessage());
-                return buildErrorResultWithType("请求参数错误: " + extractUserFriendlyError(error),
+                return buildErrorResultWithType("Bad request: " + extractUserFriendlyError(error),
                         conversationId, phase, errorType);
             }
 
@@ -448,14 +489,16 @@ public class NodeStreamingChatHelper {
             // warning 已在 dispose 时广播，无需重复
         }
         return assembleResult(contentAccum, thinkingAccum, toolCallAccumulators,
-                promptTokens.get(), completionTokens.get(), phase,
+                promptTokens.get(), completionTokens.get(),
+                cacheReadTokens.get(), cacheWriteTokens.get(), phase,
                 truncatedByRepetition, truncatedByRepetition ? "output_truncated_repetition" : null);
     }
 
     /** 组装 stopped partial 结果（用户主动停止，有已累积内容） */
     private StreamResult assembleStoppedResult(StringBuilder contentAccum, StringBuilder thinkingAccum,
                                                 List<ToolCallAccumulator> toolCallAccumulators,
-                                                int promptTok, int completionTok, String phase) {
+                                                int promptTok, int completionTok,
+                                                int cacheReadTok, int cacheWriteTok, String phase) {
         List<AssistantMessage.ToolCall> finalToolCalls = buildFinalToolCalls(toolCallAccumulators);
         String fullContent = contentAccum.toString();
         String fullThinking = thinkingAccum.toString();
@@ -475,13 +518,14 @@ public class NodeStreamingChatHelper {
 
         return new StreamResult(fullContent, fullThinking, assembledMessage,
                 finalToolCalls, !finalToolCalls.isEmpty(), promptTok, completionTok,
-                true, null, ErrorType.NONE, true);
+                true, null, ErrorType.NONE, true, cacheReadTok, cacheWriteTok);
     }
 
     /** 组装最终 StreamResult（成功或 partial） */
     private StreamResult assembleResult(StringBuilder contentAccum, StringBuilder thinkingAccum,
                                          List<ToolCallAccumulator> toolCallAccumulators,
                                          int promptTok, int completionTok,
+                                         int cacheReadTok, int cacheWriteTok,
                                          String phase, boolean partial, String errorMsg) {
         List<AssistantMessage.ToolCall> finalToolCalls = buildFinalToolCalls(toolCallAccumulators);
         String fullContent = contentAccum.toString();
@@ -510,7 +554,7 @@ public class NodeStreamingChatHelper {
 
         return new StreamResult(fullContent, fullThinking, assembledMessage,
                 finalToolCalls, !finalToolCalls.isEmpty(), promptTok, completionTok,
-                partial, errorMsg, ErrorType.NONE);
+                partial, errorMsg, ErrorType.NONE, false, cacheReadTok, cacheWriteTok);
     }
 
     /** 构建纯错误 StreamResult（无任何内容） */
@@ -614,14 +658,50 @@ public class NodeStreamingChatHelper {
     /** 从异常链提取用户友好的错误信息 */
     private static String extractUserFriendlyError(Throwable error) {
         String msg = error.getMessage();
-        if (msg == null) return error.getClass().getSimpleName();
+        if (msg == null) msg = error.getClass().getSimpleName();
+
+        // 若是 WebClientResponseException，先把 response body 也并入判定样本，
+        // 因为 Ollama 的 "does not support tools" 错误只在 body 里，不在 status line 里。
+        String bodySample = "";
+        Throwable cursor = error;
+        for (int i = 0; cursor != null && i < 5; i++, cursor = cursor.getCause()) {
+            if (cursor instanceof WebClientResponseException wre) {
+                try {
+                    String body = wre.getResponseBodyAsString();
+                    if (body != null && !body.isEmpty()) {
+                        bodySample = body.length() > 512 ? body.substring(0, 512) : body;
+                    }
+                } catch (Exception ignored) {
+                }
+                break;
+            }
+        }
+        String combined = msg + " " + bodySample;
+
+        // ↓↓↓ 具体错误翻译（优先级由高到低）↓↓↓
+
+        // Ollama / 其他 provider 在模型不支持 function calling 时返回此文案：
+        //   "<model> does not support tools"
+        // 这不是模型坏，而是用户选错了模型 —— 给出可操作的切换建议。
+        if (bodySample.contains("does not support tools") || msg.contains("does not support tools")) {
+            return "当前模型不支持工具调用（function calling）。请在 设置 → 模型 里切换到支持 tools 的模型，"
+                    + "例如 qwen3、qwen2.5:7b+、llama3.1:8b+、mistral-nemo、command-r 等。";
+        }
+
+        // DashScope "url error" is really "model name not mapped to any valid endpoint".
+        if (msg.contains("url error") || msg.contains("[InvalidParameter]")
+                || msg.contains("Model not exist") || msg.contains("model_not_found")
+                || msg.contains("Model not found")
+                || combined.contains("model not found") || combined.contains("not_found_error")) {
+            return "Model name not available on this provider — verify the model exists and is supported (Settings → Models)";
+        }
         // 对 Jackson 反序列化错误，提取关键信息
-        if (msg.contains("engine_overloaded")) return "模型服务过载，请稍后重试";
-        if (msg.contains("unsupported image format") || msg.contains("unsupported")) return "不支持的文件格式（如 SVG），请使用 PNG/JPG 等光栅图片";
-        if (msg.contains("invalid_request_error") || msg.contains("400 Bad Request")) return "请求参数错误，请检查输入";
-        if (msg.contains("rate_limit") || msg.contains("429")) return "请求频率过高，请稍后重试";
-        if (msg.contains("timeout") || msg.contains("Timeout")) return "请求超时，请重试";
-        if (msg.contains("502") || msg.contains("503") || msg.contains("504")) return "模型服务暂时不可用";
+        if (msg.contains("engine_overloaded")) return "Model service overloaded, please retry later";
+        if (msg.contains("unsupported image format") || msg.contains("unsupported")) return "Unsupported file format (e.g. SVG), use PNG/JPG instead";
+        if (msg.contains("invalid_request_error") || msg.contains("400 Bad Request")) return "Bad request, please check input";
+        if (msg.contains("rate_limit") || msg.contains("429")) return "Rate limit exceeded, please retry later";
+        if (msg.contains("timeout") || msg.contains("Timeout")) return "Request timeout, please retry";
+        if (msg.contains("502") || msg.contains("503") || msg.contains("504")) return "Model service temporarily unavailable";
         // 截断过长的原始消息
         return msg.length() > 100 ? msg.substring(0, 100) + "..." : msg;
     }
@@ -673,14 +753,18 @@ public class NodeStreamingChatHelper {
             /** 错误类型分类 */
             ErrorType errorType,
             /** 用户主动停止（stopRequested）导致的提前返回 */
-            boolean stopped
+            boolean stopped,
+            /** RFC-014: Anthropic prompt cache 命中字节数（其它 provider 为 0） */
+            int cacheReadTokens,
+            /** RFC-014: Anthropic prompt cache 写入字节数（其它 provider 为 0） */
+            int cacheWriteTokens
     ) {
         /** 兼容旧调用方 — 无 partial/error/stopped 的正常结果 */
         public StreamResult(String text, String thinking, AssistantMessage assistantMessage,
                             List<AssistantMessage.ToolCall> toolCalls, boolean hasToolCalls,
                             int promptTokens, int completionTokens) {
             this(text, thinking, assistantMessage, toolCalls, hasToolCalls,
-                    promptTokens, completionTokens, false, null, ErrorType.NONE, false);
+                    promptTokens, completionTokens, false, null, ErrorType.NONE, false, 0, 0);
         }
 
         /** 兼容 10-arg 调用点 */
@@ -689,7 +773,17 @@ public class NodeStreamingChatHelper {
                             int promptTokens, int completionTokens,
                             boolean partial, String errorMessage, ErrorType errorType) {
             this(text, thinking, assistantMessage, toolCalls, hasToolCalls,
-                    promptTokens, completionTokens, partial, errorMessage, errorType, false);
+                    promptTokens, completionTokens, partial, errorMessage, errorType, false, 0, 0);
+        }
+
+        /** 兼容 12-arg 调用点（pre-RFC-014） */
+        public StreamResult(String text, String thinking, AssistantMessage assistantMessage,
+                            List<AssistantMessage.ToolCall> toolCalls, boolean hasToolCalls,
+                            int promptTokens, int completionTokens,
+                            boolean partial, String errorMessage, ErrorType errorType,
+                            boolean stopped) {
+            this(text, thinking, assistantMessage, toolCalls, hasToolCalls,
+                    promptTokens, completionTokens, partial, errorMessage, errorType, stopped, 0, 0);
         }
 
         /** 是否有不可忽略的错误（无内容 + 有错误） */

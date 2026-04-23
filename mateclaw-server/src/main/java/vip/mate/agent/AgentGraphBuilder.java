@@ -33,10 +33,14 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.util.LinkedMultiValueMap;
 import org.springframework.util.MultiValueMap;
 import org.springframework.util.StringUtils;
+import org.springframework.http.client.JdkClientHttpRequestFactory;
 import org.springframework.web.client.RestClient;
+import java.net.http.HttpClient;
+import java.time.Duration;
 import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.reactive.function.client.WebClientResponseException;
 import reactor.core.publisher.Flux;
+import vip.mate.agent.ThinkingLevelHolder;
 import vip.mate.agent.graph.StateGraphReActAgent;
 import vip.mate.agent.graph.NodeStreamingChatHelper;
 import vip.mate.agent.graph.executor.ToolExecutionExecutor;
@@ -51,6 +55,7 @@ import vip.mate.agent.graph.plan.edge.StepProgressDispatcher;
 import vip.mate.agent.graph.plan.node.*;
 import vip.mate.agent.graph.plan.state.PlanStateKeys;
 import vip.mate.agent.graph.state.MateClawStateKeys;
+import vip.mate.agent.binding.service.AgentBindingService;
 import vip.mate.agent.model.AgentEntity;
 import vip.mate.config.GraphObservationProperties;
 import vip.mate.exception.MateClawException;
@@ -64,11 +69,13 @@ import vip.mate.planning.service.PlanningService;
 import vip.mate.skill.service.SkillService;
 import vip.mate.system.service.SystemSettingService;
 import vip.mate.tool.ToolRegistry;
+import vip.mate.memory.spi.MemoryManager;
 import vip.mate.workspace.document.WorkspaceFileService;
 import vip.mate.tool.guard.service.ToolGuardService;
 import vip.mate.workspace.conversation.ConversationService;
 import vip.mate.approval.ApprovalWorkflowService;
 import vip.mate.channel.web.ChatStreamTracker;
+import vip.mate.wiki.service.WikiContextService;
 
 import java.lang.reflect.Field;
 import java.util.ArrayList;
@@ -91,6 +98,7 @@ import java.util.Set;
 public class AgentGraphBuilder {
 
     private final ToolRegistry toolRegistry;
+    private final AgentBindingService agentBindingService;
     private final SkillService skillService;
     private final vip.mate.skill.runtime.SkillRuntimeService skillRuntimeService;
     private final ConversationService conversationService;
@@ -111,8 +119,13 @@ public class AgentGraphBuilder {
     private final ObjectMapper objectMapper;
     private final GraphObservationProperties graphObservationProperties;
     private final vip.mate.config.ToolTimeoutProperties toolTimeoutProperties;
+    private final MemoryManager memoryManager;
     private final WorkspaceFileService workspaceFileService;
     private final vip.mate.agent.context.ConversationWindowManager conversationWindowManager;
+    private final vip.mate.llm.chatgpt.ChatGPTResponsesClient chatGPTResponsesClient;
+    private final WikiContextService wikiContextService;
+    private final vip.mate.workspace.core.service.WorkspaceService workspaceService;
+    private final vip.mate.llm.cache.AnthropicCacheOptionsFactory anthropicCacheOptionsFactory;
 
     /**
      * 根据 AgentEntity 构建完整的 Agent 实例
@@ -123,24 +136,28 @@ public class AgentGraphBuilder {
         // 过滤掉 denied 工具，使模型完全看不到它们（防止 prompt injection 利用 schema）
         toolSet = toolSet.withDeniedToolsFiltered(toolGuardConfigService.getDeniedTools());
 
+        // Per-agent tool 绑定过滤：如果 agent 有自定义 tool 绑定，则只保留绑定的工具
+        Set<String> boundTools = agentBindingService.getBoundToolNames(entity.getId());
+        toolSet = toolSet.withAllowedToolsOnly(boundTools); // null = 全局默认
+
         // 统一使用全局默认模型（AgentEntity.modelName 为历史残留字段，不参与运行时选择）
         ModelConfigEntity runtimeModel;
         try {
             runtimeModel = modelConfigService.getDefaultModel();
         } catch (Exception e) {
-            throw new MateClawException("无法构建 Agent：请先在「设置 → 模型」中配置并启用默认模型");
+            throw new MateClawException("err.agent.no_default_model", "无法构建 Agent：请先在「设置 → 模型」中配置并启用默认模型");
         }
 
         ModelProviderEntity provider;
         try {
             provider = modelProviderService.getProviderConfig(runtimeModel.getProvider());
         } catch (Exception e) {
-            throw new MateClawException("模型 " + runtimeModel.getModelName()
+            throw new MateClawException("err.agent.model_not_configured", "模型 " + runtimeModel.getModelName()
                     + " 的 Provider（" + runtimeModel.getProvider() + "）未配置，请检查模型设置");
         }
         ModelProtocol protocol = ModelProtocol.fromChatModel(provider.getChatModel());
 
-        // 内置搜索：DashScope 或 Kimi 开启时，移除 WebSearchTool 避免冲突
+        // 内置搜索检测（DashScope / Kimi），但不再移除 WebSearchTool — 两者协同而非互斥
         boolean builtinSearchEnabled = false;
         Map<String, Object> providerKwargs = modelProviderService.readProviderGenerateKwargs(provider);
         if (protocol == ModelProtocol.DASHSCOPE_NATIVE) {
@@ -149,10 +166,9 @@ public class AgentGraphBuilder {
             builtinSearchEnabled = true;
         }
         if (builtinSearchEnabled) {
-            int before = toolSet.size();
-            toolSet = toolSet.excluding(Set.of("search"));
-            log.info("内置搜索已开启 (provider={}), 移除 WebSearchTool (tools: {} -> {})",
-                    provider.getProviderId(), before, toolSet.size());
+            // Phase 2: 不再移除 search 工具，改为在 prompt 中设定优先级引导
+            // 内置搜索作为首选，search 工具作为补充/兜底
+            log.info("内置搜索已开启 (provider={})，search 工具保留作为补充通道", provider.getProviderId());
         }
         int maxIter = entity.getMaxIterations() != null ? entity.getMaxIterations() : 25;
 
@@ -160,7 +176,7 @@ public class AgentGraphBuilder {
 
         // 当前仅支持 DashScope 和 OpenAI-compatible，其他协议直接拒绝
         if (!supportsStateGraph(protocol)) {
-            throw new MateClawException("当前不支持协议 " + protocol.getId()
+            throw new MateClawException("err.agent.protocol_not_supported", "当前不支持协议 " + protocol.getId()
                     + "，请切换到 DashScope 或 OpenAI-compatible 模型");
         }
 
@@ -191,6 +207,19 @@ public class AgentGraphBuilder {
         agent.maxInputTokens = runtimeModel.getMaxInputTokens();
         agent.topP = runtimeModel.getTopP();
         agent.toolCallingEnabled = toolCallingEnabled;
+
+        // 查找工作区活动目录
+        if (entity.getWorkspaceId() != null) {
+            try {
+                var workspace = workspaceService.getById(entity.getWorkspaceId());
+                if (workspace != null && workspace.getBasePath() != null && !workspace.getBasePath().isBlank()) {
+                    agent.workspaceBasePath = workspace.getBasePath();
+                    log.info("Agent {} bound to workspace basePath: {}", entity.getName(), agent.workspaceBasePath);
+                }
+            } catch (Exception e) {
+                log.warn("Failed to lookup workspace basePath for agent {}: {}", entity.getName(), e.getMessage());
+            }
+        }
 
         log.info("Built agent instance: {} (type={}, protocol={}, tools={}, toolCallingEnabled={})",
                 entity.getName(), entity.getAgentType(), protocol.getId(),
@@ -223,7 +252,7 @@ public class AgentGraphBuilder {
             ChatModel fallbackModel = buildFallbackModel(chatModel);
             NodeStreamingChatHelper streamingHelper = new NodeStreamingChatHelper(streamTracker, fallbackModel);
             ToolExecutionExecutor executor = new ToolExecutionExecutor(toolSet, toolGuardService, approvalService, streamTracker, toolTimeoutProperties);
-            PlanGenerationNode planGenerationNode = new PlanGenerationNode(chatModel, planningService, streamingHelper, conversationWindowManager);
+            PlanGenerationNode planGenerationNode = new PlanGenerationNode(chatModel, planningService, streamingHelper, conversationWindowManager, toolSet);
             StepExecutionNode stepExecutionNode = new StepExecutionNode(chatModel, toolSet, executor, planningService, streamTracker, reasoningEffort, streamingHelper, conversationWindowManager);
             PlanSummaryNode planSummaryNode = new PlanSummaryNode(chatModel, planningService, streamingHelper);
             DirectAnswerNode directAnswerNode = new DirectAnswerNode();
@@ -305,10 +334,10 @@ public class AgentGraphBuilder {
                     .addEdge(PlanStateKeys.DIRECT_ANSWER_NODE, StateGraph.END);
 
             return graph.compile(CompileConfig.builder()
-                    .recursionLimit(maxIterations * 3 + 10)
+                    .recursionLimit(maxIterations > 0 ? maxIterations * 3 + 10 : 300)
                     .build());
         } catch (Exception e) {
-            throw new MateClawException("Plan-Execute StateGraph 编译失败: " + e.getMessage());
+            throw new MateClawException("err.agent.plan_compile_failed", "Plan-Execute StateGraph 编译失败: " + e.getMessage());
         }
     }
 
@@ -317,7 +346,7 @@ public class AgentGraphBuilder {
             ChatModel fallbackModel = buildFallbackModel(chatModel);
             NodeStreamingChatHelper streamingHelper = new NodeStreamingChatHelper(streamTracker, fallbackModel);
             ToolExecutionExecutor executor = new ToolExecutionExecutor(toolSet, toolGuardService, approvalService, streamTracker, toolTimeoutProperties);
-            ReasoningNode reasoningNode = new ReasoningNode(chatModel, toolSet, reasoningEffort, streamingHelper, conversationWindowManager, streamTracker);
+            ReasoningNode reasoningNode = new ReasoningNode(chatModel, toolSet, reasoningEffort, streamingHelper, conversationWindowManager, streamTracker, 0, wikiContextService);
             ActionNode actionNode = new ActionNode(executor, streamTracker);
             ObservationProcessor observationProcessor = new ObservationProcessor(graphObservationProperties);
             ObservationNode observationNode = new ObservationNode(observationProcessor, streamTracker);
@@ -414,11 +443,11 @@ public class AgentGraphBuilder {
                     .addEdge(MateClawStateKeys.FINAL_ANSWER_NODE, StateGraph.END);
 
             return graph.compile(CompileConfig.builder()
-                    .recursionLimit(maxIterations * 3 + 10)
+                    .recursionLimit(maxIterations > 0 ? maxIterations * 3 + 10 : 300)
                     .withLifecycleListener(new ReActLifecycleListener())
                     .build());
         } catch (Exception e) {
-            throw new MateClawException("StateGraph v2 编译失败: " + e.getMessage());
+            throw new MateClawException("err.agent.graph_compile_failed", "StateGraph v2 编译失败: " + e.getMessage());
         }
     }
 
@@ -427,16 +456,32 @@ public class AgentGraphBuilder {
     private boolean supportsStateGraph(ModelProtocol protocol) {
         return protocol == ModelProtocol.DASHSCOPE_NATIVE
                 || protocol == ModelProtocol.OPENAI_COMPATIBLE
-                || protocol == ModelProtocol.ANTHROPIC_MESSAGES;
+                || protocol == ModelProtocol.ANTHROPIC_MESSAGES
+                || protocol == ModelProtocol.OPENAI_CHATGPT;
     }
 
     // ==================== 模型构建 ====================
 
     /**
      * 构建运行时 ChatModel（不包装为 ChatClient）
-     * 用于 StateGraph 节点直接调用
+     * 用于 StateGraph 节点直接调用。使用注入的共享 {@link #retryTemplate} 作为 Spring AI
+     * 内层重试策略。
      */
     public ChatModel buildRuntimeChatModel(ModelConfigEntity runtimeModel) {
+        return buildRuntimeChatModel(runtimeModel, this.retryTemplate);
+    }
+
+    /**
+     * 构建运行时 ChatModel，并指定自定义的 Spring AI {@link RetryTemplate}。
+     * <p>
+     * 用于调用方（如 Wiki 消化管线）已经有自己的外层重试策略，
+     * 希望绕过 Spring AI 内层重试、独占重试控制权的场景：传入
+     * {@code RetryTemplate.builder().maxAttempts(1).build()} 即可把内层降级为"只跑一次"。
+     * <p>
+     * DashScope 和 OpenAI-ChatGPT 分支不走 Spring AI 的 RetryTemplate 接口，
+     * 本参数对它们无效（它们各自有内部重试或直通）。
+     */
+    public ChatModel buildRuntimeChatModel(ModelConfigEntity runtimeModel, RetryTemplate retryOverride) {
         ModelProviderEntity provider = modelProviderService.getProviderConfig(runtimeModel.getProvider());
         ModelProtocol protocol = ModelProtocol.fromChatModel(provider.getChatModel());
 
@@ -449,13 +494,19 @@ public class AgentGraphBuilder {
                     .build();
         }
 
+        if (protocol == ModelProtocol.OPENAI_CHATGPT) {
+            Double temp = runtimeModel.getTemperature() != null ? runtimeModel.getTemperature() : 0.7;
+            return new vip.mate.llm.chatgpt.ChatGPTChatModel(
+                    chatGPTResponsesClient, runtimeModel.getModelName(), temp);
+        }
+
         if (protocol == ModelProtocol.OPENAI_COMPATIBLE) {
             OpenAiApi api = buildOpenAiApi(provider);
             OpenAiChatOptions options = buildOpenAiOptions(runtimeModel, provider);
             return OpenAiChatModel.builder()
                     .openAiApi(api)
                     .defaultOptions(options)
-                    .retryTemplate(retryTemplate)
+                    .retryTemplate(retryOverride)
                     .observationRegistry(observationRegistryProvider.getIfAvailable(() -> ObservationRegistry.NOOP))
                     .build();
         }
@@ -466,12 +517,12 @@ public class AgentGraphBuilder {
             return AnthropicChatModel.builder()
                     .anthropicApi(api)
                     .defaultOptions(options)
-                    .retryTemplate(retryTemplate)
+                    .retryTemplate(retryOverride)
                     .observationRegistry(observationRegistryProvider.getIfAvailable(() -> ObservationRegistry.NOOP))
                     .build();
         }
 
-        throw new MateClawException("StateGraph 当前仅支持 DashScope 原生协议、OpenAI-compatible 协议和 Anthropic Messages 协议: " + protocol.getId());
+        throw new MateClawException("err.agent.protocol_limited", "StateGraph 当前仅支持 DashScope 原生协议、OpenAI-compatible 协议和 Anthropic Messages 协议: " + protocol.getId());
     }
 
     /**
@@ -518,14 +569,15 @@ public class AgentGraphBuilder {
     // ==================== Prompt 构建 ====================
 
     private String buildEnhancedPrompt(AgentEntity entity, boolean builtinSearchEnabled) {
-        // 优先从工作区 MD 文件组装系统提示词
-        String workspacePrompt = workspaceFileService.buildSystemPrompt(entity.getId());
-        String basePrompt = (workspacePrompt != null && !workspacePrompt.isBlank())
-                ? workspacePrompt
+        // 通过 MemoryManager 从所有 MemoryProvider 组装系统提示词（快照冻结）
+        String memoryPrompt = memoryManager.buildSystemPromptBlock(entity.getId());
+        String basePrompt = (memoryPrompt != null && !memoryPrompt.isBlank())
+                ? memoryPrompt
                 : (entity.getSystemPrompt() != null ? entity.getSystemPrompt() : "");
 
-        // 使用 skill runtime 构建技能增强（分层注入，不再全量拼接）
-        String skillEnhancement = skillRuntimeService.buildSkillPromptEnhancement();
+        // 使用 skill runtime 构建技能增强（per-agent 绑定过滤）
+        Set<Long> boundSkillIds = agentBindingService.getBoundSkillIds(entity.getId());
+        String skillEnhancement = skillRuntimeService.buildSkillPromptEnhancement(boundSkillIds);
 
         // 工具调用指导
         String toolGuidance = """
@@ -559,11 +611,40 @@ public class AgentGraphBuilder {
                 - Treat `MEMORY.md` as a compact mental model, not a raw transcript dump
                 - When answering tasks involving prior decisions, preferences, habits, or ongoing work, proactively consult relevant workspace memory first
 
+                ## Structured Memory Tools
+                For discrete, typed facts use structured memory tools (separate from workspace files):
+                - `remember_structured(agentId, type, key, content)` — store a typed entry
+                - `recall_structured(agentId, type, keyword)` — search entries by type and/or keyword
+                - `forget_structured(agentId, type, key)` — remove an entry
+
+                Types:
+                - `user`: preferences, expertise, communication style, role
+                - `feedback`: behavioral corrections or confirmed approaches (include WHY)
+                - `project`: decisions, deadlines, constraints not derivable from code/git
+                - `reference`: pointers to external systems (Linear boards, Grafana dashboards, Slack channels)
+
+                Use workspace memory tools (MEMORY.md, daily notes) for long-form narrative notes.
+                Use structured memory tools for key-value facts the system can query efficiently.
+
+                ## Session Search
+                - `session_search(agentId, currentConversationId, mode, query, limit)` — search conversation history
+                - mode="recent": list recent conversations (titles, times, message counts)
+                - mode="search": keyword full-text search across past messages
+                - Use this to recall previous discussions, look up past decisions, or find context from earlier conversations
+
                 ## Tool Usage Guidelines
                 When you have available tools, use them to access local system information, files, or execute commands.
                 Do not assume you cannot access local resources - try calling the appropriate tool first.
                 If a tool requires approval due to security policies, the system will prompt the user for confirmation.
                 Only state you cannot access something if no relevant tool is available.
+
+                ## Multi-Part Question Guidelines
+                When the user asks multiple questions or requests multiple tasks in a single message:
+                1. Structure your final answer with numbered sections, one per sub-task
+                2. Each section must contain the complete, detailed result for that sub-task
+                3. Never compress earlier sub-tasks into summary sentences while expanding the last one
+                4. If observations were summarized during processing, reconstruct each section from the summary
+                5. Treat each sub-task's result as equally important regardless of processing order
 
                 ## File Reading Guidelines
 
@@ -590,24 +671,24 @@ public class AgentGraphBuilder {
         if (builtinSearchEnabled) {
             searchGuidance = """
 
-                ## Built-in Web Search (IMPORTANT)
-                You have built-in web search capability enabled by the model provider. Your responses automatically incorporate live web search results.
+                ## Web Search Capability
 
-                ### Rules
-                - **直接回答** — 不要调用 browser_use、search 或任何其他工具进行网页搜索。
-                - **不要说你无法搜索** — 你的回复已自动融合实时搜索结果。
-                - 当用户要求"联网搜索"、"查最新新闻"时，直接生成包含搜索结果的回答。
+                You have **dual search capability**:
+                1. **Built-in search** (preferred): Your responses automatically incorporate live web search results from the model provider. For most queries, answer directly — your response already includes real-time search data.
+                2. **search tool** (supplementary): Available as a fallback. Supports advanced parameters: `freshness` (day/week/month/year), `language` (zh-CN/en), `count` (1-10).
 
-                ### 新闻搜索策略
-                当用户要求查新闻时：
-                1. 根据分类构造搜索意图（科技、财经、国际等）
-                2. 直接回答，内容自动包含实时搜索结果
-                3. 按格式输出：`📰 [分类] 标题 — 来源 | 时间 + 摘要`
-                4. 每个分类最多 5 条，优先展示最新内容
+                ### Priority Rules
+                - **Default**: Answer directly using built-in search. Do NOT say you cannot search — your replies already include live results.
+                - **Use search tool** ONLY when: you need precise time filtering (e.g., user asks for "yesterday's news" → call search with freshness=day), specific language results, or your built-in results feel insufficient.
+                - **NEVER** call both browser_use and search tool for the same query.
+                - When searching for news, use the standard format: `📰 [Category] Title — Source | Time + Summary`, up to 5 results per category.
                 """;
         }
 
-        return basePrompt + skillEnhancement + toolGuidance + searchGuidance;
+        // Wiki 知识库上下文注入
+        String wikiContext = wikiContextService.buildWikiContext(entity.getId());
+
+        return basePrompt + skillEnhancement + toolGuidance + searchGuidance + wikiContext;
     }
 
     // ==================== 模型选项构建 ====================
@@ -730,20 +811,21 @@ public class AgentGraphBuilder {
 
     OpenAiApi buildOpenAiApi(ModelProviderEntity provider) {
         if (provider == null || !modelProviderService.isProviderConfigured(provider.getProviderId())) {
-            throw new MateClawException("Provider 未完成配置，请在模型设置中填写有效的 API Key 和 Base URL");
+            throw new MateClawException("err.agent.provider_not_configured", "Provider 未完成配置，请在模型设置中填写有效的 API Key 和 Base URL");
         }
         String apiKey = provider.getApiKey();
         if (!modelProviderService.hasUsableApiKey(apiKey)) {
-            throw new MateClawException("Provider API Key 未配置或无效: " + provider.getProviderId());
+            throw new MateClawException("err.agent.provider_apikey_invalid", "Provider API Key 未配置或无效: " + provider.getProviderId());
         }
         String baseUrl = normalizeOpenAiBaseUrl(provider.getBaseUrl());
         if (!StringUtils.hasText(baseUrl)) {
-            throw new MateClawException("Provider Base URL 未配置: " + provider.getProviderId());
+            throw new MateClawException("err.agent.provider_baseurl_missing", "Provider Base URL 未配置: " + provider.getProviderId());
         }
         Map<String, Object> kwargs = modelProviderService.readProviderGenerateKwargs(provider);
         MultiValueMap<String, String> headers = buildOpenAiHeaders(kwargs);
         String completionsPath = resolveOpenAiCompletionsPath(baseUrl, kwargs);
-        RestClient.Builder restClientBuilder = restClientBuilderProvider.getIfAvailable(RestClient::builder);
+        RestClient.Builder restClientBuilder = applyHttpTimeouts(
+                restClientBuilderProvider.getIfAvailable(RestClient::builder));
         WebClient.Builder webClientBuilder = webClientBuilderProvider.getIfAvailable(WebClient::builder);
 
         // Spring AI OpenAiApi 构造函数会先 set User-Agent 为 "spring-ai"，再 addAll 我们的 headers，
@@ -831,7 +913,7 @@ public class AgentGraphBuilder {
             apiKey = readApiKeyFromDefaultChatModel();
         }
         if (!modelProviderService.hasUsableApiKey(apiKey)) {
-            throw new MateClawException("DashScope API Key 未配置，请在模型设置中填写 dashscope 的 API Key，或设置 DASHSCOPE_API_KEY 环境变量");
+            throw new MateClawException("err.agent.dashscope_key_missing", "DashScope API Key 未配置，请在模型设置中填写 dashscope 的 API Key，或设置 DASHSCOPE_API_KEY 环境变量");
         }
         builder.apiKey(apiKey.trim());
 
@@ -854,14 +936,15 @@ public class AgentGraphBuilder {
 
     private AnthropicApi buildAnthropicApi(ModelProviderEntity provider) {
         if (provider == null || !modelProviderService.isProviderConfigured(provider.getProviderId())) {
-            throw new MateClawException("Anthropic Provider 未完成配置，请在模型设置中填写有效的 API Key 和 Base URL");
+            throw new MateClawException("err.agent.anthropic_not_configured", "Anthropic Provider 未完成配置，请在模型设置中填写有效的 API Key 和 Base URL");
         }
         String apiKey = provider.getApiKey();
         if (!modelProviderService.hasUsableApiKey(apiKey)) {
-            throw new MateClawException("Anthropic API Key 未配置或无效: " + provider.getProviderId());
+            throw new MateClawException("err.agent.anthropic_key_invalid", "Anthropic API Key 未配置或无效: " + provider.getProviderId());
         }
         String baseUrl = provider.getBaseUrl();
-        RestClient.Builder restClientBuilder = restClientBuilderProvider.getIfAvailable(RestClient::builder);
+        RestClient.Builder restClientBuilder = applyHttpTimeouts(
+                restClientBuilderProvider.getIfAvailable(RestClient::builder));
         WebClient.Builder webClientBuilder = webClientBuilderProvider.getIfAvailable(WebClient::builder);
 
         AnthropicApi.Builder builder = AnthropicApi.builder()
@@ -879,19 +962,53 @@ public class AgentGraphBuilder {
         if (StringUtils.hasText(runtimeModel.getModelName())) {
             builder.model(runtimeModel.getModelName());
         }
-        // Anthropic API does not allow temperature and top_p to be specified simultaneously.
-        // Prefer temperature; only fall back to top_p when temperature is absent.
-        if (runtimeModel.getTemperature() != null) {
-            builder.temperature(runtimeModel.getTemperature());
-        } else if (runtimeModel.getTopP() != null) {
-            builder.topP(runtimeModel.getTopP());
-        }
-        if (runtimeModel.getMaxTokens() != null) {
-            builder.maxTokens(runtimeModel.getMaxTokens());
+
+        // Extended thinking: 通过 ThinkingLevelHolder 获取请求级思考深度
+        String thinkingLevel = ThinkingLevelHolder.get();
+        boolean thinkingEnabled = thinkingLevel != null && !"off".equalsIgnoreCase(thinkingLevel);
+
+        if (thinkingEnabled) {
+            // Anthropic thinking 模式下：temperature 必须为 1，不能设 top_p
+            // budget_tokens 根据级别映射
+            int budgetTokens = switch (thinkingLevel.toLowerCase()) {
+                case "low" -> 4096;
+                case "medium" -> 8192;
+                case "high" -> 16384;
+                case "max" -> 32768;
+                default -> 16384;
+            };
+            builder.thinking(org.springframework.ai.anthropic.api.AnthropicApi.ThinkingType.ENABLED, budgetTokens);
+            // Thinking 模式要求 max_tokens 足够大（含 thinking tokens）
+            builder.maxTokens(Math.max(budgetTokens + 4096,
+                    runtimeModel.getMaxTokens() != null ? runtimeModel.getMaxTokens() : 8192));
+            // Anthropic thinking 模式要求 temperature=1
+            builder.temperature(1.0);
         } else {
-            // Anthropic requires max_tokens; set a safe default
-            builder.maxTokens(4096);
+            // 非 thinking 模式：正常设置参数
+            // Anthropic API does not allow temperature and top_p to be specified simultaneously.
+            if (runtimeModel.getTemperature() != null) {
+                builder.temperature(runtimeModel.getTemperature());
+            } else if (runtimeModel.getTopP() != null) {
+                builder.topP(runtimeModel.getTopP());
+            }
+            // RFC-025 Change 5: 非正值 maxTokens 会被 Anthropic API 直接拒绝；本地提前拦截
+            // 并 fallback 到 4096，避免错误信息在运行时才暴露、也防止坏配置透传
+            Integer configuredMax = runtimeModel.getMaxTokens();
+            if (configuredMax != null && configuredMax > 0) {
+                builder.maxTokens(configuredMax);
+            } else {
+                if (configuredMax != null) {
+                    log.warn("Ignoring non-positive Anthropic maxTokens={} for model {}; falling back to 4096",
+                            configuredMax, runtimeModel.getModelName());
+                }
+                builder.maxTokens(4096);
+            }
         }
+        // RFC-014: 接入 Anthropic prompt caching（spring-ai 1.1.4 一等支持）
+        // 通过 cacheOptions 配置 system / tools / conversation history 自动打 cache_control，
+        // 多轮对话场景可节省 50–75% 输入 token 成本。
+        builder.cacheOptions(anthropicCacheOptionsFactory.build());
+
         return builder.internalToolExecutionEnabled(false).build();
     }
 
@@ -1189,6 +1306,30 @@ public class AgentGraphBuilder {
             });
         }
         return headers;
+    }
+
+    /**
+     * RFC-012 M1：给 LLM 调用走的 RestClient 显式配置超时，避免 socket 永久挂起等待。
+     * <p>
+     * 使用 {@link JdkClientHttpRequestFactory}（基于 Java 11+ {@link HttpClient}），原因：
+     * <ul>
+     *   <li>原生支持 HTTP/2 / ALPN 协商（Kimi 等现代 LLM provider 默认 HTTP/2）</li>
+     *   <li>自动处理 {@code Content-Encoding: gzip} 解压（{@code SimpleClientHttpRequestFactory}
+     *       基于旧的 {@code HttpURLConnection}，不会自动解压，会把 gzip 流误标为
+     *       {@code application/octet-stream} 导致 RestClient 抛 "Error extracting response"）</li>
+     *   <li>对 chunked transfer + 非标准 content-type 的回退处理符合现代 spec</li>
+     * </ul>
+     * <p>
+     * connectTimeout=10s（任何 LLM 提供方都不该超过这个建立连接时间）；
+     * readTimeout=180s（覆盖 nginx 60s 网关超时 + 留足真实长响应余量；超时后由上层 retry 接管）。
+     */
+    private RestClient.Builder applyHttpTimeouts(RestClient.Builder builder) {
+        HttpClient httpClient = HttpClient.newBuilder()
+                .connectTimeout(Duration.ofSeconds(10))
+                .build();
+        JdkClientHttpRequestFactory rf = new JdkClientHttpRequestFactory(httpClient);
+        rf.setReadTimeout(Duration.ofSeconds(180));
+        return builder.requestFactory(rf);
     }
 
     /**

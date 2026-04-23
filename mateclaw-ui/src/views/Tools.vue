@@ -1,21 +1,24 @@
 <template>
-  <div class="page-container">
-    <div class="page-header">
-      <div>
-        <h1 class="page-title">{{ t('tools.title') }}</h1>
-        <p class="page-desc">{{ t('tools.desc') }}</p>
-      </div>
-      <button class="btn-primary" @click="openCreateModal">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
-        </svg>
-        {{ t('tools.registerButton') }}
-      </button>
-    </div>
+  <div class="mc-page-shell">
+    <div class="mc-page-frame">
+      <div class="mc-page-inner tools-page">
+        <div class="mc-page-header">
+          <div>
+            <div class="mc-page-kicker">Execution Surface</div>
+            <h1 class="mc-page-title">{{ t('tools.title') }}</h1>
+            <p class="mc-page-desc">{{ t('tools.desc') }}</p>
+          </div>
+          <button class="btn-primary" @click="openCreateModal">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+            </svg>
+            {{ t('tools.registerButton') }}
+          </button>
+        </div>
 
-    <!-- 工具列表 -->
-    <div class="tools-table-wrap">
-      <table class="tools-table">
+        <!-- 工具列表 -->
+        <div class="tools-table-wrap mc-surface-card">
+          <table class="tools-table">
         <thead>
           <tr>
             <th>{{ t('tools.columns.tool') }}</th>
@@ -76,11 +79,13 @@
             </td>
           </tr>
         </tbody>
-      </table>
+          </table>
+        </div>
+      </div>
     </div>
 
     <!-- Modal -->
-    <div v-if="showModal" class="modal-overlay" @click.self="closeModal">
+    <div v-if="showModal" class="modal-overlay">
       <div class="modal">
         <div class="modal-header">
           <h2>{{ editingTool ? t('tools.modal.editTitle') : t('tools.modal.newTitle') }}</h2>
@@ -198,24 +203,21 @@ async function toggleTool(tool: Tool) {
 </script>
 
 <style scoped>
-.page-container { height: 100%; overflow-y: auto; padding: 24px; background: var(--mc-bg); }
-.page-header { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 24px; }
-.page-title { font-size: 20px; font-weight: 700; color: var(--mc-text-primary); margin: 0 0 4px; }
-.page-desc { font-size: 14px; color: var(--mc-text-secondary); margin: 0; }
-.btn-primary { display: flex; align-items: center; gap: 6px; padding: 8px 16px; background: var(--mc-primary); color: white; border: none; border-radius: 8px; font-size: 14px; font-weight: 500; cursor: pointer; }
+.tools-page { gap: 18px; }
+.btn-primary { display: flex; align-items: center; gap: 6px; padding: 10px 16px; background: linear-gradient(135deg, var(--mc-primary), var(--mc-primary-hover)); color: white; border: none; border-radius: 14px; font-size: 14px; font-weight: 600; cursor: pointer; box-shadow: var(--mc-shadow-soft); }
 .btn-primary:hover { background: var(--mc-primary-hover); }
 .btn-primary:disabled { background: var(--mc-border); cursor: not-allowed; }
-.btn-secondary { padding: 8px 16px; background: var(--mc-bg-elevated); color: var(--mc-text-primary); border: 1px solid var(--mc-border); border-radius: 8px; font-size: 14px; cursor: pointer; }
+.btn-secondary { padding: 8px 16px; background: var(--mc-bg-elevated); color: var(--mc-text-primary); border: 1px solid var(--mc-border); border-radius: 12px; font-size: 14px; cursor: pointer; }
 .btn-secondary:hover { background: var(--mc-bg-sunken); }
-.tools-table-wrap { background: var(--mc-bg-elevated); border: 1px solid var(--mc-border); border-radius: 12px; overflow: hidden; }
+.tools-table-wrap { overflow: hidden; }
 .tools-table { width: 100%; border-collapse: collapse; }
-.tools-table th { padding: 12px 16px; text-align: left; font-size: 12px; font-weight: 600; color: var(--mc-text-secondary); text-transform: uppercase; letter-spacing: 0.05em; background: var(--mc-bg-sunken); border-bottom: 1px solid var(--mc-border); }
+.tools-table th { padding: 14px 16px; text-align: left; font-size: 12px; font-weight: 700; color: var(--mc-text-secondary); text-transform: uppercase; letter-spacing: 0.08em; background: var(--mc-bg-muted); border-bottom: 1px solid var(--mc-border); }
 .tool-row { border-bottom: 1px solid var(--mc-border-light); transition: background 0.1s; }
-.tool-row:hover { background: var(--mc-bg-sunken); }
+.tool-row:hover { background: var(--mc-bg-muted); }
 .tool-row:last-child { border-bottom: none; }
 .tools-table td { padding: 14px 16px; font-size: 14px; color: var(--mc-text-primary); }
 .tool-info { display: flex; align-items: center; gap: 10px; }
-.tool-icon-wrap { width: 32px; height: 32px; background: var(--mc-bg-sunken); border-radius: 8px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; color: var(--mc-text-secondary); }
+.tool-icon-wrap { width: 36px; height: 36px; background: linear-gradient(135deg, rgba(217,109,87,0.12), rgba(24,74,69,0.08)); border-radius: 12px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; color: var(--mc-text-secondary); }
 .tool-name { font-weight: 500; color: var(--mc-text-primary); }
 .tool-desc { font-size: 12px; color: var(--mc-text-tertiary); margin-top: 1px; }
 .bean-name { background: var(--mc-bg-sunken); padding: 2px 8px; border-radius: 4px; font-size: 12px; color: var(--mc-text-primary); }
@@ -230,7 +232,7 @@ async function toggleTool(tool: Tool) {
 .toggle-switch input:checked + .toggle-slider { background: var(--mc-primary); }
 .toggle-switch input:checked + .toggle-slider::before { transform: translateX(16px); }
 .row-actions { display: flex; gap: 4px; }
-.row-btn { width: 28px; height: 28px; border: 1px solid var(--mc-border); background: var(--mc-bg-elevated); border-radius: 6px; cursor: pointer; display: flex; align-items: center; justify-content: center; color: var(--mc-text-secondary); transition: all 0.15s; }
+.row-btn { width: 30px; height: 30px; border: 1px solid var(--mc-border); background: var(--mc-bg-muted); border-radius: 10px; cursor: pointer; display: flex; align-items: center; justify-content: center; color: var(--mc-text-secondary); transition: all 0.15s; }
 .row-btn:hover { background: var(--mc-bg-sunken); }
 .row-btn.danger:hover { background: var(--mc-danger-bg); border-color: var(--mc-danger); color: var(--mc-danger); }
 .empty-row { padding: 40px !important; }

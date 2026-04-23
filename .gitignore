@@ -74,6 +74,7 @@ mateclaw-server/src/main/resources/static/
 
 # mateclaw local runtime data (H2 DB, logs, etc. - do not commit)
 mateclaw-server/data/
+/data/
 
 # VitePress build output and cache (do not commit)
 docs/.vitepress/cache/
@@ -89,3 +90,7 @@ deploy/nginx/ssl/*.pem
 
 # Deploy env
 deploy/.env
+
+# Claude Code local settings
+.claude/settings.local.json
+.claude/plans/

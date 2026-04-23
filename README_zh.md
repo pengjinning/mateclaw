@@ -1,6 +1,12 @@
 <div align="center">
 
+<p align="center">
+  <img src="mateclaw-ui/public/logo/mateclaw_logo_s.png" alt="MateClaw Logo" width="120">
+</p>
+
 # MateClaw
+
+<p align="center"><b>让 AI 真正去思考、行动、记忆，并把结果交付出来。</b></p>
 
 [![GitHub 仓库](https://img.shields.io/badge/GitHub-仓库-black.svg?logo=github)](https://github.com/matevip/mateclaw)
 [![文档](https://img.shields.io/badge/文档-在线-green.svg?logo=readthedocs&label=Docs)](https://claw.mate.vip/docs)
@@ -11,349 +17,214 @@
 [![Vue](https://img.shields.io/badge/Vue-3-4FC08D.svg?logo=vuedotjs)](https://vuejs.org/)
 [![最后提交](https://img.shields.io/github/last-commit/matevip/mateclaw)](https://github.com/matevip/mateclaw)
 [![许可证](https://img.shields.io/badge/license-Apache--2.0-red.svg?logo=opensourceinitiative&label=License)](LICENSE)
-[![GitHub Star](https://img.shields.io/github/stars/matevip/mateclaw?style=flat&logo=github&color=yellow&label=Stars)](https://github.com/matevip/mateclaw/stargazers)
-[![GitHub Fork](https://img.shields.io/github/forks/matevip/mateclaw?style=flat&logo=github&color=purple&label=Forks)](https://github.com/matevip/mateclaw/network)
 
 [[官网](https://claw.mate.vip)] [[在线演示](https://claw-demo.mate.vip)] [[文档](https://claw.mate.vip/docs)] [[English](README.md)]
 
-<p align="center">
-  <img src="mateclaw-ui/public/logo/mateclaw_logo_s.png" alt="MateClaw Logo" width="120">
-</p>
-
-<p align="center"><b>懂你所需，利爪随行。</b></p>
-
 </div>
 
-基于 **Java + Vue 3** 的个人 AI 助手系统，由 [Spring AI Alibaba](https://github.com/alibaba/spring-ai-alibaba) 驱动。支持多 Agent 编排、灵活的工具/技能系统与 MCP 协议、多层记忆体系、多渠道接入。
-
-> **核心能力：**
->
-> **多 Agent 编排** — ReAct（思考→行动→观察循环）和 Plan-and-Execute（自动将复杂任务拆解为有序子步骤）。创建多个独立 Agent，各有专属人格和工具。
->
-> **工具与技能系统** — 内置工具（网络搜索、日期时间）+ MCP 协议接入外部工具。预置 GitHub 和 Filesystem MCP 服务，启用即用。从 ClawHub 市场或自定义源安装技能包。
->
-> **多层记忆** — 短期上下文窗口自动压缩、事件驱动的对话后记忆提取、工作空间文件（PROFILE.md / MEMORY.md / 每日笔记）、定时记忆整合。
->
-> **全域触达** — Web 控制台、钉钉、飞书、企业微信、Telegram、Discord、QQ。一个 MateClaw，按需连接。
->
-> **多厂商模型** — 20+ 厂商：DashScope、OpenAI、Anthropic、Google Gemini、DeepSeek、Kimi、MiniMax、智谱、火山引擎、OpenRouter、Ollama、LM Studio、llama.cpp、MLX 等。在 Web 界面中配置。
->
-> **桌面应用** — 基于 Electron 的桌面应用，支持自动更新。下载即用。
+<p align="center">
+  <img src="assets/images/preview.png" alt="MateClaw 预览" width="800">
+</p>
 
 ---
 
-## 目录
+一个智能体引擎。一个知识系统。一个记忆层。一个工具运行时。一个多渠道入口。
 
-- [快速开始](#快速开始)
-- [截图](#截图)
-- [架构](#架构)
-- [技术栈](#技术栈)
-- [功能特性](#功能特性)
-- [文档](#文档)
-- [路线图](#路线图)
-- [参与贡献](#参与贡献)
-- [联系我们](#联系我们)
-- [许可证](#许可证)
+**一个产品。完整交付。**
+
+MateClaw 是基于 **Java + Vue 3** 构建的个人 AI 操作系统，由 [Spring AI Alibaba](https://github.com/alibaba/spring-ai-alibaba) 驱动。它不是聊天框，不是工作流编排器，不只是又一个编码助手。它是从推理到记忆到交付的完整系统——一次部署，全部搞定。
+
+三件事让它截然不同：
+
+1. **智能体做事，不只聊天** — ReAct + 计划执行。不是一问一答——是迭代推理，直到任务真正完成
+2. **知识被塑造，而非仅仅被存储** — LLM Wiki 把原始资料消化成结构化的链接页面。仓库和图书馆的区别
+3. **端到端，不妥协** — Web 控制台、桌面端、7 个 IM 渠道、工具防护、企业认证。一个团队、一次部署、一个体验
+
+---
+
+## 为什么选 MateClaw
+
+大多数 AI 工具只做好一件事。MateClaw 做好整件事。
+
+| 能力 | MateClaw | [OpenClaw](https://github.com/openclaw/openclaw) | [CoPaw](https://github.com/agentscope-ai/CoPaw) | [QClaw](https://cntechpost.com/2026/03/20/tencent-opens-qclaw-public-testing-amid-fierce-ai-rivalry/) | [Claude Code](https://github.com/anthropics/claude-code) | [Cursor](https://cursor.com) | [Windsurf](https://windsurf.com) |
+|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| 智能体编排 | **ReAct + 计划执行** | 多智能体团队 | 多智能体协作 | 专家智能体 | Agent Teams + 子智能体 | 后台 Agent（云端 VM） | Cascade 引擎 |
+| 知识系统 | **LLM Wiki（消化式）** | Intelligence Mode + Wiki | 个人知识库 | 知识图谱 | CLAUDE.md（无 RAG） | 代码库索引 | 无 |
+| 记忆 | **提取 + 整理 + 涌现** | SQLite + Dreaming + Wiki | ReMe（混合检索） | 三层记忆 | 三层（CLAUDE.md + 自动 + 文件） | 无持久记忆 | Memories（~48h 学习） |
+| 工具防护与审批 | **RBAC + 审批流** | HITL + 风险等级 | 无 | 无 | 权限 + 沙箱 + Hooks | 无 | Turbo Mode（自动放行） |
+| 多渠道 IM | **7 个渠道** | 25+ 渠道 | 7 个渠道 | 5 个渠道 | 3 个渠道（预览） | 仅 IDE | 仅 IDE |
+| Web 管理界面 | **完整管理仪表盘** | Control UI | Console UI | 控制面板 | 企业版仪表盘 | 无 | 无 |
+| 桌面端 | **Electron + 内嵌 JRE** | macOS 菜单栏 | Electron（Beta） | Win/Mac 应用 | Claude Desktop（Mac/Win） | VS Code 分支 | VS Code 分支 |
+| 多模态创作 | **TTS/STT/图/音乐/视频** | TTS/视频/音乐/图片 | 视觉输入 | 无 | 仅视觉输入 | 无 | 无 |
+| 技能生态 | **ClawHub 市场** | ClawHub 注册表 | Python 技能 | 模板 | 340+ 插件, 1300+ 技能 | MCP 市场 | MCP 一键集成 |
+| 企业认证 | **RBAC + JWT** | 基础（密码） | 基础认证 | 无 | SSO/SCIM/RBAC | SSO + 团队版 | 团队版 |
+| 开源 | **Apache 2.0** | MIT | Apache 2.0 | 部分 | 否（源码可见） | 否 | 否 |
+| 定价 | **免费** | 免费 | 免费 | 免费（公测） | $20–200/月 | $0–200/月 | $0–200/月 |
+| 技术栈 | **Java + Vue 3** | TypeScript | Python + TS | OpenClaw 衍生 | TypeScript | Electron (VS Code) | Electron (VS Code) |
+
+**MateClaw 的差异化在哪？**
+
+这张表里的每个产品都有真正的实力。MateClaw 的独特空间在这里：
+
+- **计划-执行编排** — 把复杂工作分解为有序步骤，逐一执行，动态调整计划。别人有多智能体，但结构化任务规划+动态重规划是稀缺能力
+- **LLM Wiki 消化式知识库** — 别人索引和搜索。MateClaw 的 Wiki 把原始资料转化为结构化、有链接的页面——搜索引擎和百科全书的区别
+- **Java 生态** — 为已经在生产环境运行 Spring Boot 的团队而生。一个 JAR，一次部署。无需 Python 运行时，无需 Node.js 依赖链
+- **完整管理仪表盘** — 智能体、模型、工具、技能、渠道、安全、定时任务、Token 用量——全在一个 Web 界面。不是 CLI 优先的附属品
+- **完整多模态创作** — TTS、STT、图片、音乐、视频生成作为内置一等功能。OpenClaw 在这方面同样强；其他竞品不具备
+- **免费开源，没有星号** — Apache 2.0。无按量计费，无按席收费，无功能阉割。Claude Code 起步 $20/月，Cursor 和 Windsurf 最高 $200/月
+
+---
+
+## 架构全景
+
+<p align="center">
+  <img src="assets/architecture-biz-zh.svg" alt="业务架构" width="800">
+</p>
+
+<details>
+<summary><b>技术架构</b></summary>
+<p align="center">
+  <img src="assets/architecture-tech-zh.svg" alt="技术架构" width="800">
+</p>
+</details>
+
+---
+
+## 核心能力
+
+### 智能体引擎
+
+- **ReAct 智能体** — 思考、行动、观察、循环。迭代推理直到完成任务
+- **计划-执行智能体** — 将复杂工作分解为有序步骤，逐一执行
+- **动态配置** — 运行时从数据库加载智能体的人格、工具和约束
+- **运行时韧性** — 上下文裁剪、智能截断、僵死流清理、异常恢复
+
+### 知识与记忆
+
+- **LLM Wiki 知识库** — AI 驱动的知识库，将原始资料消化为结构化、有链接的页面
+- **工作区记忆** — `AGENTS.md`、`SOUL.md`、`PROFILE.md`、`MEMORY.md`、每日笔记
+- **记忆生命周期** — 对话后自动提取、定时整理、记忆涌现工作流
+- **记忆应该积累** — 理解随时间加深，而非每次查询都从零开始
+
+### 工具、技能与 MCP
+
+- **内置工具** — 联网搜索、文件操作、记忆访问、日期时间等
+- **MCP 集成** — 支持 stdio、SSE、Streamable HTTP 三种传输
+- **技能系统** — 可安装的 `SKILL.md` 技能包 + ClawHub 市场
+- **工具防护** — 审批流、文件路径保护、运行时过滤
+
+### 多模态创作
+
+语音合成 · 语音识别 · 图片生成 · 音乐生成 · 视频生成
+
+### 模型灵活性
+
+14+ 供应商支持，包括 DashScope、OpenAI、Anthropic、Gemini、DeepSeek、Kimi、Ollama、LM Studio、MLX 等。在 Web 界面中配置一切。
+
+### 用户触点
+
+- **Web 控制台** — 对话、智能体、工具、技能、知识、模型、安全、设置
+- **桌面端** — Electron + 内嵌 JRE 21，无需安装 Java
+- **多渠道** — 钉钉、飞书、企业微信、Telegram、Discord、QQ
 
 ---
 
 ## 快速开始
 
-### 前置条件
+### 环境要求
 
-- Java 17+
-- Node.js 20.19+ 或 22.12+，以及 pnpm
-- Maven 3.9+（或使用 `mvnw`）
-- 至少一个 LLM API Key（如 [DashScope](https://dashscope.aliyun.com/)）
+- Java 17+ · Node.js 18+ · pnpm · Maven 3.9+
 
-> Vite 7 不支持 Node.js 21.x。本仓库建议在项目根目录先执行 `nvm use`，切换到 `.nvmrc` 固定的版本后再启动前端。
-
-### 方式一：本地开发
-
-建议使用两个终端分别启动后端和前端。
-
-**终端 1：启动后端**
+### 本地开发
 
 ```bash
+# 后端
 cd mateclaw-server
-export DASHSCOPE_API_KEY=your-key-here
-mvn spring-boot:run
-# 后端运行在 http://localhost:18088
-# H2 控制台：http://localhost:18088/h2-console
-# API 文档（SpringDoc OpenAPI）：http://localhost:18088/swagger-ui.html
-```
+mvn spring-boot:run          # http://localhost:18088
 
-**终端 2：启动前端**
-
-```bash
-cd ..
-nvm use
+# 前端
 cd mateclaw-ui
-pnpm install
-pnpm dev
-# 前端运行在 http://localhost:5173（代理 /api 到 :18088）
+pnpm install && pnpm dev     # http://localhost:5173
 ```
 
-**3. 登录控制台**
+默认登录：`admin` / `admin123`
 
-打开 http://localhost:5173，使用 `admin` / `admin123` 登录。
-
-### 方式二：Docker 部署
+### Docker 部署
 
 ```bash
 cp .env.example .env
-# 编辑 .env，填写 DASHSCOPE_API_KEY 等变量
-
-docker compose up -d
-# 服务运行在 http://localhost:18080（MySQL + 后端）
+docker compose up -d          # http://localhost:18080
 ```
 
-### 方式三：桌面应用
+### 桌面端
 
-从 [GitHub Releases](https://github.com/matevip/mateclaw/releases) 下载安装包：
-
-| 平台 | 文件 | 说明 |
-|------|------|------|
-| **macOS (Apple Silicon)** | `MateClaw_<version>_arm64.dmg` | 推荐 M1/M2/M3/M4/M5 Mac 使用 |
-| **macOS (Apple Silicon)** | `MateClaw_<version>_arm64.zip` | zip 格式（Apple Silicon） |
-| **macOS (Intel)** | `MateClaw_<version>_x64.dmg` | 适用于 Intel Mac |
-| **macOS (Intel)** | `MateClaw_<version>_x64.zip` | zip 格式（Intel） |
-| **Windows (x64)** | `MateClaw_<version>_Setup.exe` | 适用于大多数 Windows 电脑（64 位） |
-| **Windows (x64)** | `MateClaw_<version>_x64_Setup.exe` | 显式 x64 构建 |
-| **Windows (ARM64)** | `MateClaw_<version>_arm64_Setup.exe` | 适用于 ARM 架构 Windows（如 Surface Pro X） |
-
-双击运行。应用内置 JRE 21 + Spring Boot 后端，无需安装 Java。支持从 GitHub Releases 自动更新。
-
-> **macOS 用户**：如果系统阻止打开，右键 → 打开 → 再次点击打开，或前往系统设置 → 隐私与安全性 → 仍要打开。
+从 [GitHub Releases](https://github.com/matevip/mateclaw/releases) 下载安装包。内嵌 JRE 21，无需额外安装 Java。
 
 ---
 
-## 截图
+## 技术栈
 
-<p align="center">
-  <img src="assets/images/chat-echarts-demo.png" alt="MateClaw 对话界面 — ECharts 可视化" width="800">
-</p>
-
-<p align="center"><em>对话控制台 — AI 自我介绍并自动生成 ECharts 环形图</em></p>
+| 层次 | 技术 |
+|------|------|
+| 后端 | Spring Boot 3.5 · Spring AI Alibaba 1.1 |
+| 智能体 | StateGraph 运行时 |
+| 数据库 | H2（开发）/ MySQL 8.0+（生产）|
+| ORM | MyBatis Plus 3.5 |
+| 认证 | Spring Security + JWT |
+| 前端 | Vue 3 · TypeScript · Vite |
+| UI | Element Plus · TailwindCSS 4 |
+| 桌面端 | Electron · electron-updater |
 
 ---
 
-## 架构
+## 项目结构
 
 ```
 mateclaw/
-├── mateclaw-server/          # Spring Boot 后端
-│   ├── src/main/java/vip/mate/
-│   │   ├── agent/            # Agent 引擎（ReAct、Plan-and-Execute、StateGraph）
-│   │   ├── planning/         # 任务规划（Plan / SubPlan 模型）
-│   │   ├── tool/             # 工具系统（内置 + MCP 适配器）
-│   │   ├── skill/            # 技能管理（工作空间 + ClawHub）
-│   │   ├── channel/          # 渠道适配器（Web、钉钉、飞书等）
-│   │   ├── workspace/        # 会话、消息、工作空间文件
-│   │   ├── memory/           # 记忆提取与整合
-│   │   ├── llm/              # 多厂商模型配置
-│   │   ├── cron/             # 定时任务（CronJob）
-│   │   ├── auth/             # Spring Security + JWT
-│   │   └── config/           # Spring Bean 配置
-│   └── src/main/resources/
-│       ├── application.yml   # 主配置（开发环境用 H2）
-│       ├── prompts/          # 提示词模板
-│       └── db/               # 数据库脚本（schema.sql、data.sql）
-├── mateclaw-ui/              # Vue 3 SPA 前端
-│   └── src/
-│       ├── views/            # 页面（ChatConsole、AgentWorkspace、SkillMarket 等）
-│       ├── components/       # 复用组件
-│       ├── stores/           # Pinia 状态管理（领域驱动）
-│       ├── api/              # Axios HTTP 客户端
-│       ├── router/           # Vue Router
-│       ├── types/            # TypeScript 类型
-│       └── i18n/             # 国际化（zh-CN、en-US）
-├── mateclaw-desktop/         # Electron 桌面应用
-├── docs/                     # VitePress 文档站（中 + 英）
+├── mateclaw-server/     Spring Boot 后端
+├── mateclaw-ui/         Vue 3 SPA 前端
+├── mateclaw-desktop/    Electron 桌面端
 ├── docker-compose.yml
 └── .env.example
 ```
 
 ---
 
-## 技术栈
-
-| 层次 | 技术选型 |
-|------|---------|
-| 后端框架 | Spring Boot 3.5 + Spring AI Alibaba 1.1 |
-| 大模型接入 | DashScope、OpenAI、Anthropic、Gemini、DeepSeek、Kimi、MiniMax、智谱、火山引擎、OpenRouter、Ollama、LM Studio、llama.cpp、MLX |
-| Agent 引擎 | StateGraph（ReAct + Plan-and-Execute） |
-| 数据库 | H2（开发）/ MySQL 8.0+（生产） |
-| ORM | MyBatis Plus 3.5 |
-| 认证 | Spring Security + JWT |
-| API 文档 | SpringDoc OpenAPI 3 |
-| 前端框架 | Vue 3 + TypeScript + Vite |
-| 状态管理 | Pinia |
-| UI 组件 | Element Plus |
-| 样式 | TailwindCSS 4 |
-| 桌面端 | Electron + electron-updater |
-| 文档站 | VitePress |
-
----
-
-## 功能特性
-
-### Agent 系统
-
-- **ReAct Agent** — 思考→行动→观察推理循环，支持工具调用
-- **Plan-and-Execute** — 自动将复杂任务拆解为有序子步骤，带进度追踪
-- **动态 Agent** — 运行时从数据库加载 Agent 配置
-- **多 Agent** — 创建多个独立 Agent，各有专属系统提示词、工具和人格
-
-### 工具与技能系统
-
-- **内置工具** — 网络搜索（Serper/Tavily）、日期时间、工作空间记忆读写
-- **MCP 协议** — 通过 Model Context Protocol 接入外部工具（stdio、SSE、Streamable HTTP 传输）。在 Web 界面中完成全生命周期管理 — 添加、编辑、启用/禁用、测试连接
-- **预置 MCP 服务** — GitHub（`@modelcontextprotocol/server-github`）和 Filesystem 开箱即用。在 MCP 管理页面启用并填入 Token 即可，无需改代码
-- **技能包** — 安装/卸载带 `SKILL.md` 清单的技能包
-- **ClawHub 市场** — 从 ClawHub 注册中心浏览和安装技能
-- **工作空间技能** — 基于约定的技能目录 `~/.mateclaw/skills/{name}/`
-
-### 记忆系统
-
-- **短期记忆** — 会话上下文窗口，Token 超出预算时自动压缩
-- **对话后提取** — 事件驱动的异步 LLM 分析，写入 PROFILE.md / MEMORY.md / 每日笔记
-- **记忆整合** — 定时每日涌现（CronJob 凌晨 2:00），将每日笔记合并为长期记忆
-- **工作空间文件** — 每个 Agent 独立的 AGENTS.md、SOUL.md、PROFILE.md、MEMORY.md、memory/*.md
-- **Agent 记忆工具** — Agent 在对话中可主动读写自己的工作空间文件
-
-### 多渠道接入
-
-- **Web 控制台** — SSE 流式输出，富消息渲染（Markdown、代码、计划）
-- **钉钉** — Webhook + 事件订阅
-- **飞书** — Webhook + 事件订阅
-- **企业微信** — 回调接口
-- **Telegram** — Bot API + Webhook
-- **Discord** — Bot + Slash Commands
-- **QQ** — QQ Bot API
-
-### 模型厂商
-
-在 Web 界面中配置（设置 → 模型）。支持的厂商：
-
-| 厂商 | 模型 |
-|------|------|
-| **云端厂商** | |
-| DashScope（阿里云） | Qwen3.5-Max、Qwen3.5-Plus、Qwen3-Max、Qwen3-Plus、Qwen-Max、Qwen-Plus、Qwen-Turbo、Qwen-Long、DeepSeek-V3.2 |
-| ModelScope | Qwen3.5-122B-A10B、GLM-5 |
-| 阿里云百炼 Coding Plan | Qwen3.5-Plus、Qwen3-Coder-Next、GLM-5、GLM-4.7、MiniMax-M2.5、Kimi-K2.5 |
-| OpenAI | GPT-5.2、GPT-5、GPT-5-Mini、GPT-5-Nano、GPT-4.1、GPT-4.1-Mini、GPT-4.1-Nano、o3、o4-mini、GPT-4o |
-| Azure OpenAI | GPT-5、GPT-4.1、GPT-4o 等 |
-| Anthropic | Claude Opus 4.6、Claude Sonnet 4.6（通过模型发现） |
-| Google Gemini | Gemini 3.1 Pro、Gemini 3 Flash、Gemini 2.5 Pro、Gemini 2.5 Flash、Gemini 2.0 Flash |
-| DeepSeek | DeepSeek-Chat、DeepSeek-Reasoner |
-| Kimi（月之暗面） | Kimi-K2.5、Kimi-K2-Thinking、Kimi for Coding（国内版 / 国际版 / Code 版） |
-| MiniMax | MiniMax-M2.7、MiniMax-M2.5（国际版 / 国内版） |
-| 智谱 AI | GLM-5.1、GLM-5、GLM-5-Turbo、GLM-5V-Turbo（国内版 / 国际版） |
-| 火山引擎 | 豆包-1.5-Pro-256K、豆包-1.5-Lite、豆包-1.5-Thinking-Pro、豆包-1.5-Vision-Pro |
-| OpenRouter | GPT-5、Claude Opus 4.6、Gemini 2.5 Pro、Llama 4 Maverick、DeepSeek R1 及 200+ 模型 |
-| **本地厂商** | |
-| Ollama | Qwen3、Gemma 4、Gemma 3、Llama 3.1、DeepSeek R1、Mistral（启动时自动检测） |
-| LM Studio | 任意本地服务的模型 |
-| llama.cpp | 任意本地服务的模型 |
-| MLX（Apple Silicon） | 任意本地服务的模型 |
-
-### 安全
-
-- **Spring Security + JWT** — 基于 Token 的认证
-- **工具防护** — 敏感工具操作的审批规则
-- **文件校验** — 工作空间文件路径穿越防护
-- **技能安全** — 技能安装时的安全校验
-
-### 定时任务
-
-- **CronJob 系统** — 使用 5 位 cron 表达式创建定时任务
-- **记忆整合** — 每个 Agent 每日自动触发
-- **自定义任务** — 调度任意提示词定期执行
-
----
-
 ## 文档
 
-| 主题 | 说明 |
-|------|------|
-| [项目介绍](https://mateclaw.mate.vip/zh/intro) | MateClaw 是什么、核心概念 |
-| [快速开始](https://mateclaw.mate.vip/zh/quickstart) | 安装与运行（本地、Docker、桌面） |
-| [控制台](https://mateclaw.mate.vip/zh/console) | Web 界面：聊天与 Agent 配置 |
-| [Agent 引擎](https://mateclaw.mate.vip/zh/agents) | ReAct、Plan-and-Execute、StateGraph |
-| [模型配置](https://mateclaw.mate.vip/zh/models) | 配置云端、本地和自定义厂商 |
-| [工具系统](https://mateclaw.mate.vip/zh/tools) | 内置工具与自定义工具开发 |
-| [技能系统](https://mateclaw.mate.vip/zh/skills) | 技能包与 ClawHub 市场 |
-| [MCP](https://mateclaw.mate.vip/zh/mcp) | Model Context Protocol 集成 |
-| [记忆系统](https://mateclaw.mate.vip/zh/memory) | 多层记忆体系 |
-| [渠道接入](https://mateclaw.mate.vip/zh/channels) | 钉钉、飞书、Telegram、Discord 等 |
-| [安全机制](https://mateclaw.mate.vip/zh/security) | 认证与工具防护 |
-| [桌面应用](https://mateclaw.mate.vip/zh/desktop) | 桌面应用使用指南 |
-| [API 参考](https://mateclaw.mate.vip/zh/api) | REST API 文档 |
-| [配置指南](https://mateclaw.mate.vip/zh/config) | 配置参考 |
-| [常见问题](https://mateclaw.mate.vip/zh/faq) | 常见问题与故障排查 |
+完整文档请访问 **[claw.mate.vip/docs](https://claw.mate.vip/docs)**
 
 ---
 
 ## 路线图
 
-| 方向 | 事项 | 状态 |
-|------|------|------|
-| **Agent** | 多 Agent 协作与任务委派 | 计划中 |
-| **Agent** | 多模态输入（图片、音频、视频） | 计划中 |
-| **模型** | 大小模型智能路由 | 计划中 |
-| **记忆** | 向量数据库长期记忆（RAG） | 计划中 |
-| **记忆** | 多模态记忆融合 | 计划中 |
-| **技能** | 丰富 ClawHub 生态 | 进行中 |
-| **渠道** | 微信个人号（iLink Bot） | 计划中 |
-| **渠道** | 邮件渠道 | 计划中 |
-| **桌面** | Linux 支持 | 计划中 |
-| **安全** | 多租户支持 | 计划中 |
-| **控制台** | Web 端插件市场 | 计划中 |
-
-_状态说明：_ **进行中** — 正在开发；**计划中** — 排期中或设计阶段。
+- 更丰富的多智能体协作
+- 更智能的模型路由
+- 更深度的多模态理解
+- 更强的长期记忆
+- 更丰富的 ClawHub 生态
 
 ---
 
 ## 参与贡献
 
-MateClaw 欢迎各种形式的贡献！无论是 Bug 修复、新功能、文档改进，还是新的渠道/工具集成，我们都非常欢迎。
-
 ```bash
-# 克隆仓库
 git clone https://github.com/matevip/mateclaw.git
 cd mateclaw
-
-# 后端
-cd mateclaw-server
-mvn clean compile
-
-# 前端
-cd ../mateclaw-ui
-pnpm install
-pnpm dev
+cd mateclaw-server && mvn clean compile
+cd ../mateclaw-ui && pnpm install && pnpm dev
 ```
 
-提交 PR 前请阅读 [CONTRIBUTING.md](https://github.com/matevip/mateclaw/blob/main/CONTRIBUTING.md)（如有）。
-
 ---
 
-## 联系我们
+## 为什么叫这个名字
 
-<!-- TODO: 补充社交账号 -->
+**Mate** 是陪伴。**Claw** 是能力。
 
-| Discord | X (Twitter) | 钉钉群 |
-|---------|-------------|--------|
-| 即将上线 | 即将上线 | 即将上线 |
-
----
-
-## 为什么叫 MateClaw？
-
-**Mate** — 伙伴，始终陪伴在你身边。**Claw** — 利爪，锋利有力，随时抓取任何任务。MateClaw 是你的个人 AI 伙伴，在你需要时伸出利爪。采用单体模块化设计，部署简单、扩展灵活、定制方便。
+一个陪在你身边的系统，一个能真正抓住工作、推动它前进的系统。
 
 ---
 
 ## 许可证
 
-MateClaw 基于 [Apache License 2.0](LICENSE) 发布。
+[Apache License 2.0](LICENSE)

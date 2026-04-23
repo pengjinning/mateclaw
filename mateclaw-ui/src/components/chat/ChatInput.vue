@@ -61,9 +61,7 @@
     <div v-if="pendingApproval?.status === 'pending_approval'" class="approval-bar">
       <div class="approval-bar__info">
         <span class="approval-bar__icon">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
-          </svg>
+          <el-icon><WarningFilled /></el-icon>
         </span>
         <span class="approval-bar__label">{{ t('chat.approvalAllow') }}</span>
         <span class="approval-bar__tool">{{ pendingApproval.toolName }}</span>
@@ -75,9 +73,7 @@
           class="approval-bar__btn approval-bar__btn--deny"
           @click="emit('deny', pendingApproval.pendingId)"
         >
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-            <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-          </svg>
+          <el-icon><CloseBold /></el-icon>
           {{ t('chat.deny') }}
         </button>
         <button
@@ -85,9 +81,7 @@
           class="approval-bar__btn approval-bar__btn--approve"
           @click="emit('approve', pendingApproval.pendingId)"
         >
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-            <polyline points="20 6 9 17 4 12"/>
-          </svg>
+          <el-icon><Select /></el-icon>
           {{ t('chat.approve') }}
         </button>
       </div>
@@ -98,9 +92,7 @@
       <!-- 排队消息指示器 -->
       <div v-if="queuedMessage && queuedMessage.status !== 'cancelled'" class="queued-indicator">
         <div class="queued-indicator__info">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
-          </svg>
+          <el-icon><Timer /></el-icon>
           <span class="queued-indicator__text">
             {{ queuedMessage.status === 'sending' ? t('chat.queuedSending') : t('chat.queuedWillSend') }}
             <span v-if="queueSize > 1" class="queued-indicator__count">({{ queueSize }})</span>
@@ -141,9 +133,31 @@
           :disabled="disabled || loading || uploading"
           @click="openFilePicker"
         >
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M21.44 11.05l-8.49 8.49a6 6 0 0 1-8.49-8.49l9.2-9.19a4 4 0 1 1 5.66 5.66l-9.19 9.2a2 2 0 1 1-2.83-2.83l8.49-8.48"/>
-          </svg>
+          <el-icon><Paperclip /></el-icon>
+        </button>
+
+        <!-- 深度思考开关 -->
+        <button
+          type="button"
+          class="action-btn thinking-btn"
+          :class="{ active: thinkingEnabled }"
+          :disabled="disabled"
+          @click="emit('toggle-thinking')"
+          :title="thinkingEnabled ? t('chat.thinkingOn') : t('chat.thinkingOff')"
+        >
+          <el-icon><MagicStick /></el-icon>
+        </button>
+
+        <!-- Talk Mode 按钮 -->
+        <button
+          v-if="enableTalkMode"
+          type="button"
+          class="action-btn talk-btn"
+          :disabled="disabled || loading"
+          @click="emit('talk')"
+          :title="t('talk.title')"
+        >
+          <el-icon><Microphone /></el-icon>
         </button>
 
         <!-- 发送/停止/中断按钮 -->
@@ -155,19 +169,11 @@
           @click="handleSubmit"
         >
           <!-- 有输入时始终显示发送图标（运行中发送 = interrupt） -->
-          <svg v-if="canSend" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <line x1="22" y1="2" x2="11" y2="13"/>
-            <polygon points="22 2 15 22 11 13 2 9 22 2"/>
-          </svg>
+          <el-icon v-if="canSend"><Promotion /></el-icon>
           <!-- 运行中无输入：停止图标 -->
-          <svg v-else-if="loading" width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-            <rect x="3" y="3" width="18" height="18" rx="2"/>
-          </svg>
+          <el-icon v-else-if="loading"><CloseBold /></el-icon>
           <!-- 空闲无输入 -->
-          <svg v-else width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <line x1="22" y1="2" x2="11" y2="13"/>
-            <polygon points="22 2 15 22 11 13 2 9 22 2"/>
-          </svg>
+          <el-icon v-else><Promotion /></el-icon>
         </button>
       </div>
     </div>
@@ -196,6 +202,7 @@
 <script setup lang="ts">
 import { ref, computed, nextTick, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { CloseBold, MagicStick, Microphone, Paperclip, Promotion, Select, Timer, WarningFilled } from '@element-plus/icons-vue'
 import type { ChatAttachment, PendingApprovalMeta, StreamPhase, QueuedMessage } from '@/types'
 
 interface Props {
@@ -227,6 +234,10 @@ interface Props {
   queuedMessage?: QueuedMessage | null
   /** 排队消息总数 */
   queueSize?: number
+  /** 是否启用 Talk Mode 按钮 */
+  enableTalkMode?: boolean
+  /** 深度思考开关状态 */
+  thinkingEnabled?: boolean
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -243,6 +254,8 @@ const props = withDefaults(defineProps<Props>(), {
   streamPhase: 'idle',
   queuedMessage: null,
   queueSize: 0,
+  enableTalkMode: false,
+  thinkingEnabled: false,
 })
 
 const emit = defineEmits<{
@@ -254,6 +267,8 @@ const emit = defineEmits<{
   'attachment-remove': [storedName: string]
   approve: [pendingId: string]
   deny: [pendingId: string]
+  talk: []
+  'toggle-thinking': []
 }>()
 
 const { t } = useI18n()
@@ -280,7 +295,7 @@ const canSend = computed(() => {
 const inputPlaceholder = computed(() => {
   if (props.loading) {
     if (props.queuedMessage) return t('chat.queuedReplace')
-    return props.placeholder + ' (Enter to send / interrupt)'
+    return props.placeholder
   }
   return props.placeholder
 })
@@ -398,8 +413,9 @@ defineExpose({
 
 <style scoped>
 .chat-input-wrapper {
-  padding: 18px 24px 22px;
+  padding: 10px 14px 12px;
   background: var(--mc-bg-elevated, #f8fafc);
+  flex-shrink: 0;
 }
 
 .chat-input-wrapper.is-focused {
@@ -411,7 +427,7 @@ defineExpose({
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
-  margin-bottom: 12px;
+  margin-bottom: 8px;
 }
 
 .attachment-chip {
@@ -499,8 +515,8 @@ defineExpose({
   align-items: flex-end;
   background: var(--mc-input-bg, #ffffff);
   border: none;
-  border-radius: 18px;
-  padding: 12px 12px 12px 16px;
+  border-radius: 16px;
+  padding: 8px 10px 8px 12px;
   box-shadow: 0 2px 12px rgba(0, 0, 0, 0.08), 0 0 0 1px rgba(0, 0, 0, 0.04);
   transition: box-shadow 0.15s;
 }
@@ -518,7 +534,7 @@ defineExpose({
   font-size: 14px;
   line-height: 1.6;
   color: var(--mc-input-text, #1e293b);
-  min-height: 44px;
+  min-height: 38px;
   max-height: 160px;
   font-family: inherit;
 }
@@ -535,13 +551,13 @@ defineExpose({
 /* 操作按钮 */
 .input-actions {
   display: flex;
-  gap: 8px;
+  gap: 6px;
   align-items: center;
 }
 
 .action-btn {
-  width: 36px;
-  height: 36px;
+  width: 34px;
+  height: 34px;
   border: none;
   border-radius: 50%;
   display: flex;
@@ -561,6 +577,33 @@ defineExpose({
 .action-btn:disabled {
   opacity: 0.4;
   cursor: not-allowed;
+}
+
+.thinking-btn {
+  position: relative;
+}
+.thinking-btn.active {
+  color: var(--el-color-primary, #409eff);
+}
+.thinking-btn.active::after {
+  content: '';
+  position: absolute;
+  bottom: 4px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--el-color-primary, #409eff);
+}
+.thinking-btn:hover:not(:disabled) {
+  color: var(--el-color-primary, #409eff);
+  background: var(--el-color-primary-light-9, rgba(64, 158, 255, 0.08));
+}
+
+.talk-btn:hover:not(:disabled) {
+  color: var(--mc-primary, #D97757);
+  background: var(--mc-primary-light, rgba(217, 119, 87, 0.08));
 }
 
 .send-btn {
@@ -590,7 +633,7 @@ defineExpose({
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-top: 8px;
+  margin-top: 6px;
   padding: 0 4px;
 }
 
@@ -620,10 +663,10 @@ defineExpose({
   justify-content: space-between;
   gap: 12px;
   background: var(--mc-input-bg, #ffffff);
-  border-radius: 18px;
-  padding: 10px 10px 10px 16px;
+  border-radius: 16px;
+  padding: 8px 8px 8px 12px;
   box-shadow: 0 2px 12px rgba(0, 0, 0, 0.08), 0 0 0 1px rgba(217, 119, 87, 0.3);
-  min-height: 56px;
+  min-height: 50px;
 }
 
 .approval-bar__info {
@@ -699,9 +742,9 @@ defineExpose({
 }
 
 .approval-bar__btn--deny:hover {
-  background: #fee2e2;
-  color: #dc2626;
-  border-color: #fca5a5;
+  background: var(--mc-danger-bg, #fee2e2);
+  color: var(--mc-danger, #ef4444);
+  border-color: var(--mc-danger-border, #fca5a5);
 }
 
 /* 输入区域容器 */
@@ -716,8 +759,8 @@ defineExpose({
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 6px 16px;
-  margin-bottom: 4px;
+  padding: 5px 12px;
+  margin-bottom: 3px;
   border-radius: 10px;
   background: rgba(59, 130, 246, 0.06);
   border: 1px solid rgba(59, 130, 246, 0.15);
@@ -728,7 +771,33 @@ defineExpose({
   align-items: center;
   gap: 6px;
   font-size: 12px;
-  color: #3b82f6;
+  color: var(--mc-info, #3b82f6);
+}
+
+@media (max-width: 768px) {
+  .chat-input-wrapper {
+    padding: 8px 10px 10px;
+  }
+
+  .input-area {
+    gap: 8px;
+    padding: 7px 8px 7px 10px;
+    border-radius: 14px;
+  }
+
+  .chat-textarea {
+    min-height: 34px;
+    line-height: 1.55;
+  }
+
+  .action-btn {
+    width: 32px;
+    height: 32px;
+  }
+
+  .attachment-chip__label span:first-child {
+    max-width: 180px;
+  }
 }
 
 .queued-indicator__text {
@@ -748,19 +817,19 @@ defineExpose({
 }
 
 .queued-indicator__cancel:hover {
-  color: #ef4444;
-  border-color: #fca5a5;
-  background: #fee2e2;
+  color: var(--mc-danger, #ef4444);
+  border-color: var(--mc-danger-border, #fca5a5);
+  background: var(--mc-danger-bg, #fee2e2);
 }
 
 /* 中断发送按钮样式 */
 .send-btn.is-interrupt {
-  background: #f59e0b;
+  background: var(--mc-warning, #f59e0b);
   color: white;
 }
 
 .send-btn.is-interrupt:hover:not(:disabled) {
-  background: #d97706;
+  background: var(--mc-warning-hover, #d97706);
 }
 
 /* ===== 移动端适配 ===== */
