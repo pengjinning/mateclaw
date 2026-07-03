@@ -2,18 +2,29 @@ package vip.mate.tool.mcp.service;
 
 import cn.hutool.json.JSONUtil;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
+import io.modelcontextprotocol.spec.McpSchema;
+import jakarta.annotation.PreDestroy;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Service;
 import vip.mate.exception.MateClawException;
+import vip.mate.tool.mcp.event.McpConnectionLostEvent;
+import vip.mate.tool.mcp.event.McpServerChangedEvent;
 import vip.mate.tool.mcp.model.McpServerEntity;
 import vip.mate.tool.mcp.repository.McpServerMapper;
 import vip.mate.tool.mcp.runtime.McpClientManager;
 import vip.mate.tool.mcp.runtime.McpClientManager.ConnectionResult;
 
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.regex.Pattern;
 
 /**
@@ -30,8 +41,81 @@ public class McpServerService {
 
     private final McpServerMapper mcpServerMapper;
     private final McpClientManager mcpClientManager;
+    private final ApplicationEventPublisher eventPublisher;
 
     private static final Pattern NAME_PATTERN = Pattern.compile("^[a-zA-Z0-9_\\-. ]{1,128}$");
+
+    /**
+     * Connecting to an MCP server blocks on network / subprocess I/O and can
+     * take up to connectTimeout + readTimeout seconds (or hang on an
+     * unreachable endpoint). Running it on the request thread freezes the
+     * admin UI's create/toggle/update call. We offload it to this small pool
+     * so the API returns immediately with status {@code connecting}; the UI
+     * then polls for the final {@code connected}/{@code error} state.
+     */
+    private final ExecutorService connectExecutor = Executors.newFixedThreadPool(2, r -> {
+        Thread t = new Thread(r, "mcp-connect");
+        t.setDaemon(true);
+        return t;
+    });
+
+    @PreDestroy
+    public void shutdownConnectExecutor() {
+        connectExecutor.shutdownNow();
+    }
+
+    /**
+     * Debounce window for runtime-triggered reconnects (issue #317). A live
+     * tool call and an agent rebuild can both detect the same dead connection
+     * within milliseconds, and a crash-looping server would otherwise respawn
+     * on every {@code listTools()} miss. We collapse repeated reconnect requests
+     * for the same server inside this window.
+     */
+    private static final long RECONNECT_DEBOUNCE_MS = 10_000;
+
+    /** serverId -> last runtime reconnect attempt epoch millis. */
+    private final ConcurrentHashMap<Long, Long> lastRuntimeReconnectAt = new ConcurrentHashMap<>();
+
+    /**
+     * Heal a connection that died at runtime: a stale {@code listTools()} or a
+     * stdio subprocess that exited on its own (e.g. the user restarted the MCP
+     * service). Reloads the server config and reconnects asynchronously,
+     * debounced so a flapping server can't saturate the reconnect pool. The
+     * reconnect publishes {@link McpServerChangedEvent} on success, which clears
+     * the agent cache so the next turn rebuilds against the live tools.
+     */
+    @EventListener
+    public void onConnectionLost(McpConnectionLostEvent event) {
+        Long serverId = event.serverId();
+        if (serverId == null) {
+            return;
+        }
+        McpServerEntity server = mcpServerMapper.selectById(serverId);
+        if (server == null || !Boolean.TRUE.equals(server.getEnabled())) {
+            // Removed or disabled in the meantime — nothing to heal.
+            return;
+        }
+
+        long now = System.currentTimeMillis();
+        Long previous = lastRuntimeReconnectAt.get(serverId);
+        if (previous != null && now - previous < RECONNECT_DEBOUNCE_MS) {
+            log.debug("Skipping MCP reconnect for '{}' ({}): within debounce window", server.getName(), event.reason());
+            return;
+        }
+        lastRuntimeReconnectAt.put(serverId, now);
+
+        log.warn("MCP server '{}' connection lost ({}); reconnecting", server.getName(), event.reason());
+        reconnectAsync(server);
+    }
+
+    /** Publish a connection-state change so AgentService rebuilds its agent cache (issue #289). */
+    private void publishChanged(String reason) {
+        try {
+            eventPublisher.publishEvent(new McpServerChangedEvent(reason));
+        } catch (Exception e) {
+            log.warn("Failed to publish MCP server change event ({}): {}", reason, e.getMessage());
+        }
+    }
 
     // ==================== CRUD ====================
 
@@ -65,7 +149,7 @@ public class McpServerService {
             entity.setConnectTimeoutSeconds(30);
         }
         if (entity.getReadTimeoutSeconds() == null) {
-            entity.setReadTimeoutSeconds(30);
+            entity.setReadTimeoutSeconds(60);
         }
         entity.setLastStatus("disconnected");
         entity.setToolCount(0);
@@ -73,9 +157,11 @@ public class McpServerService {
         mcpServerMapper.insert(entity);
         log.info("MCP server created: name={}, transport={}, id={}", entity.getName(), entity.getTransport(), entity.getId());
 
-        // Auto-connect if enabled
+        // Auto-connect if enabled — done asynchronously so a slow / unreachable
+        // server can't freeze the create request (issue: 配置 MCP 卡死).
         if (Boolean.TRUE.equals(entity.getEnabled())) {
-            connectSync(entity);
+            connectAsync(entity);
+            entity.setLastStatus("connecting");
         }
 
         return entity;
@@ -110,12 +196,16 @@ public class McpServerService {
 
         log.info("MCP server updated: name={}, id={}", existing.getName(), id);
 
-        // Reconnect if enabled, disconnect if disabled
+        // Reconnect if enabled, disconnect if disabled. Reconnect runs
+        // asynchronously so a slow / unreachable server can't freeze the
+        // update request (issue: 配置 MCP 卡死).
         if (Boolean.TRUE.equals(existing.getEnabled())) {
-            reconnectSync(existing);
+            reconnectAsync(existing);
+            existing.setLastStatus("connecting");
         } else {
             mcpClientManager.remove(id);
             updateStatus(id, "disconnected", null, 0);
+            publishChanged("server-disabled");
         }
 
         return existing;
@@ -130,6 +220,7 @@ public class McpServerService {
         // Disconnect first
         mcpClientManager.remove(id);
         mcpServerMapper.deleteById(id);
+        publishChanged("server-deleted");
         log.info("MCP server deleted: name={}, id={}", entity.getName(), id);
     }
 
@@ -139,13 +230,30 @@ public class McpServerService {
         mcpServerMapper.updateById(entity);
 
         if (enabled) {
-            connectSync(entity);
+            // Connect asynchronously so toggling on a slow / unreachable
+            // server can't freeze the request (issue: 配置 MCP 卡死).
+            connectAsync(entity);
+            entity.setLastStatus("connecting");
         } else {
             mcpClientManager.remove(id);
             updateStatus(id, "disconnected", null, 0);
+            publishChanged("server-disabled");
         }
 
         log.info("MCP server toggled: name={}, enabled={}", entity.getName(), enabled);
+        return entity;
+    }
+
+    /**
+     * Set the disclosure tier ({@code core} / {@code extension}) for the whole
+     * server's tool group. No reconnect needed — tiering only affects how the
+     * tools are advertised to the LLM.
+     */
+    public McpServerEntity setDisclosureTier(Long id, String tier) {
+        McpServerEntity entity = getById(id);
+        entity.setDisclosureTier(vip.mate.tool.disclosure.DisclosureTier.fromToken(tier).token());
+        mcpServerMapper.updateById(entity);
+        log.info("MCP server disclosure tier set: name={}, tier={}", entity.getName(), entity.getDisclosureTier());
         return entity;
     }
 
@@ -162,6 +270,30 @@ public class McpServerService {
     }
 
     /**
+     * List the tools the given MCP server has surfaced to the runtime.
+     *
+     * <p>Reads from {@link McpClientManager#getServerTools(Long)} which
+     * already caches the {@code listTools()} response on connect/refresh,
+     * so this is a constant-time lookup with no network roundtrip. The
+     * returned list is empty when the server is disconnected, in error
+     * state, or simply has no tools — never throws on those paths so the
+     * UI can render "no tools yet" rather than an error.
+     *
+     * <p>{@link #getById} is invoked first so a stale id (deleted server)
+     * still returns a 404 from the controller layer rather than silently
+     * "no tools".
+     */
+    public List<vip.mate.tool.mcp.model.McpToolDescriptor> listToolsByServer(Long id) {
+        getById(id); // throws if the server is gone — preserves 404 semantics
+        return mcpClientManager.getServerTools(id).stream()
+                .map(t -> new vip.mate.tool.mcp.model.McpToolDescriptor(
+                        t.name(),
+                        t.description(),
+                        t.inputSchema()))
+                .toList();
+    }
+
+    /**
      * 刷新所有启用的 MCP server
      */
     public void refreshAll() {
@@ -173,7 +305,7 @@ public class McpServerService {
             try {
                 ConnectionResult result = mcpClientManager.connect(server);
                 if (result.success()) {
-                    updateStatus(server.getId(), "connected", null, result.toolCount());
+                    onConnectSuccess(server.getId());
                 } else {
                     updateStatus(server.getId(), "error", result.message(), 0);
                 }
@@ -184,6 +316,9 @@ public class McpServerService {
         }
         log.info("MCP servers refresh complete: {} enabled, {} connected",
                 enabled.size(), mcpClientManager.getActiveCount());
+        // closeAll() above dropped every client; even if all reconnects failed,
+        // cached agents must drop the now-removed tools.
+        publishChanged("servers-refreshed");
     }
 
     /**
@@ -201,7 +336,7 @@ public class McpServerService {
             try {
                 ConnectionResult result = mcpClientManager.connect(server);
                 if (result.success()) {
-                    updateStatus(server.getId(), "connected", null, result.toolCount());
+                    onConnectSuccess(server.getId());
                 } else {
                     updateStatus(server.getId(), "error", result.message(), 0);
                 }
@@ -213,6 +348,11 @@ public class McpServerService {
         }
         log.info("MCP servers initialization complete: {} connected / {} total",
                 mcpClientManager.getActiveCount(), enabled.size());
+        // The embedded web server starts accepting chat requests before this
+        // @Order(200) runner finishes, so an agent may have been cached during
+        // the boot window with no MCP tools. Drop those stale snapshots now
+        // that connections are established (issue #289).
+        publishChanged("servers-initialized");
     }
 
     // ==================== Sanitization ====================
@@ -237,6 +377,9 @@ public class McpServerService {
         copy.setLastConnectedTime(entity.getLastConnectedTime());
         copy.setToolCount(entity.getToolCount());
         copy.setBuiltin(entity.getBuiltin());
+        // Disclosure tier is not sensitive and the UI relies on it to render the
+        // per-server core/extension pill — dropping it made the field always null.
+        copy.setDisclosureTier(entity.getDisclosureTier());
         copy.setCreateTime(entity.getCreateTime());
         copy.setUpdateTime(entity.getUpdateTime());
 
@@ -254,20 +397,37 @@ public class McpServerService {
 
     // ==================== Internal ====================
 
+    /**
+     * Mark the server {@code connecting} (so the UI reflects it immediately)
+     * and run the blocking {@link #connectSync} on the background pool. The
+     * caller's request thread returns at once.
+     */
+    private void connectAsync(McpServerEntity server) {
+        updateStatus(server.getId(), "connecting", null, 0);
+        connectExecutor.submit(() -> connectSync(server));
+    }
+
+    /** Async counterpart of {@link #reconnectSync}. See {@link #connectAsync}. */
+    private void reconnectAsync(McpServerEntity server) {
+        updateStatus(server.getId(), "connecting", null, 0);
+        connectExecutor.submit(() -> reconnectSync(server));
+    }
+
     private void connectSync(McpServerEntity server) {
-        // 同步连接，阻塞调用线程。后续可改为 @Async + 线程池实现真异步。
         try {
             ConnectionResult result = mcpClientManager.connect(server);
             if (result.success()) {
-                updateStatus(server.getId(), "connected", null, result.toolCount());
+                onConnectSuccess(server.getId());
             } else {
                 mcpClientManager.remove(server.getId());
                 updateStatus(server.getId(), "error", result.message(), 0);
+                publishChanged("connect-failed");
             }
         } catch (Exception e) {
             log.warn("Failed to connect MCP server '{}': {}", server.getName(), e.getMessage());
             mcpClientManager.remove(server.getId());
             updateStatus(server.getId(), "error", e.getMessage(), 0);
+            publishChanged("connect-error");
         }
     }
 
@@ -275,32 +435,95 @@ public class McpServerService {
         try {
             ConnectionResult result = mcpClientManager.replace(server);
             if (result.success()) {
-                updateStatus(server.getId(), "connected", null, result.toolCount());
+                onConnectSuccess(server.getId());
             } else {
                 mcpClientManager.remove(server.getId());
                 updateStatus(server.getId(), "error", result.message(), 0);
+                publishChanged("reconnect-failed");
             }
         } catch (Exception e) {
             log.warn("Failed to reconnect MCP server '{}': {}", server.getName(), e.getMessage());
             mcpClientManager.remove(server.getId());
             updateStatus(server.getId(), "error", e.getMessage(), 0);
+            publishChanged("reconnect-error");
         }
     }
 
+    /**
+     * Common success path for every connect entry point: snapshot the
+     * just-discovered tools into the {@code tools_cache_json} column in
+     * the same DB roundtrip as the status update, so downstream code that
+     * reads from the entity sees both pieces consistently.
+     *
+     * <p>Cache is only ever overwritten on success — failures preserve the
+     * last successful snapshot, keeping the agent picker rendering
+     * something useful while the upstream server is briefly down.
+     */
+    private void onConnectSuccess(Long serverId) {
+        List<McpSchema.Tool> tools = mcpClientManager.getServerTools(serverId);
+        String cacheJson = serializeToolsCache(tools);
+        updateStatusWithCache(serverId, "connected", null, tools.size(), cacheJson);
+        // Tools just became available — rebuild agent graphs so the next turn
+        // can actually call them (issue #289).
+        publishChanged("server-connected");
+    }
+
     private void updateStatus(Long id, String status, String error, int toolCount) {
+        // Failure paths do NOT touch the tools cache — keep the last
+        // successful snapshot so the picker stays populated.
+        updateStatusWithCache(id, status, error, toolCount, null);
+    }
+
+    private void updateStatusWithCache(Long id, String status, String error, int toolCount, String cacheJson) {
         try {
-            McpServerEntity update = new McpServerEntity();
-            update.setId(id);
-            update.setLastStatus(status);
-            update.setLastError(error);
-            update.setToolCount(toolCount);
+            LambdaUpdateWrapper<McpServerEntity> wrapper = new LambdaUpdateWrapper<>();
+            wrapper.eq(McpServerEntity::getId, id);
+            wrapper.set(McpServerEntity::getLastStatus, status);
+            wrapper.set(McpServerEntity::getLastError, error);
+            wrapper.set(McpServerEntity::getToolCount, toolCount);
             if ("connected".equals(status)) {
-                update.setLastConnectedTime(LocalDateTime.now());
+                wrapper.set(McpServerEntity::getLastConnectedTime, LocalDateTime.now());
             }
-            mcpServerMapper.updateById(update);
+            if (cacheJson != null) {
+                wrapper.set(McpServerEntity::getToolsCacheJson, cacheJson);
+                wrapper.set(McpServerEntity::getToolsCacheUpdatedAt, LocalDateTime.now());
+            }
+            wrapper.set(McpServerEntity::getUpdateTime, LocalDateTime.now());
+            mcpServerMapper.update(null, wrapper);
         } catch (Exception e) {
             log.warn("Failed to update MCP server status: {}", e.getMessage());
         }
+    }
+
+    /**
+     * Serialize the list returned by the upstream {@code listTools()} call
+     * into a stable JSON shape: an array of {@code {name, description,
+     * inputSchema}} entries. Schema is stored as the JSON text the upstream
+     * surfaces (already a JSON-Schema object) so the picker can show it
+     * verbatim without re-stringifying.
+     */
+    private String serializeToolsCache(List<McpSchema.Tool> tools) {
+        if (tools == null || tools.isEmpty()) {
+            return "[]";
+        }
+        List<Map<String, Object>> rows = new ArrayList<>(tools.size());
+        for (McpSchema.Tool t : tools) {
+            if (t == null || t.name() == null || t.name().isBlank()) continue;
+            Map<String, Object> row = new java.util.LinkedHashMap<>();
+            row.put("name", t.name());
+            row.put("description", t.description() != null ? t.description() : "");
+            // inputSchema in the MCP record is a JsonSchema record; let the
+            // JSON utility serialize it, falling back to "{}" if it can't.
+            try {
+                row.put("inputSchema", t.inputSchema() != null
+                        ? JSONUtil.parse(JSONUtil.toJsonStr(t.inputSchema()))
+                        : "{}");
+            } catch (Exception e) {
+                row.put("inputSchema", "{}");
+            }
+            rows.add(row);
+        }
+        return JSONUtil.toJsonStr(rows);
     }
 
     private void validateServer(McpServerEntity entity) {

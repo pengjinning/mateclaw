@@ -10,7 +10,19 @@
     <!-- 头像 -->
     <div class="msg-avatar" :class="`${role}-avatar`">
       <slot name="avatar">
-        <img v-if="role === 'assistant'" src="/logo/mateclaw_logo_s.png" alt="" class="avatar-logo" />
+        <!-- When the assistant has an active goal, wrap the logo in
+             GoalAvatarRing so the progress ring + breathing halo + hover
+             tooltip all sit naturally around the avatar. The component
+             renders only the slot content when no goal exists, so non-
+             goal turns look identical to before. The followup ↻ glyph
+             appears on messages that came from an auto-followup turn. -->
+        <GoalAvatarRing
+          v-if="role === 'assistant'"
+          :conversation-id="message.conversationId"
+          :show-followup-mark="isFollowupTurn"
+        >
+          <img src="/logo/mateclaw_logo_s.png" alt="" class="avatar-logo" />
+        </GoalAvatarRing>
         <span v-else>{{ avatarIcon }}</span>
       </slot>
     </div>
@@ -18,15 +30,56 @@
     <!-- 消息体 -->
     <div class="msg-body" :class="`${role}-body`">
       <div class="msg-bubble" :class="`${role}-bubble`">
+        <!-- Plan-step panel — always rendered at the top of the bubble whenever
+             this turn has a plan, in both the segmented and fallback render
+             paths, so plan-mode progress is never buried in a collapsed panel. -->
+        <PlanStepsPanel v-if="planMeta" :plan="planMeta" :is-generating="isGenerating" />
+
         <!-- ===== 分段式渲染模式（Claude Code 风格）===== -->
         <template v-if="useSegmentedView">
           <div class="segments-view">
-            <!-- 计划步骤面板（始终显示在 segments 之上） -->
-            <PlanStepsPanel v-if="planMeta" :plan="planMeta" :is-generating="isGenerating" />
-            <template v-for="(seg, index) in segments" :key="seg.id">
-              <ThinkingSegment v-if="seg.type === 'thinking'" :segment="seg" />
-              <ToolCallSegment v-if="seg.type === 'tool_call'" :segment="seg" />
-              <ContentSegment v-if="seg.type === 'content'" :segment="seg" :show-cursor="showCursor && seg.status === 'running'" />
+            <template v-for="iter in groupedIterations" :key="iter.key">
+              <!-- Iteration interrupted before any output landed — surface a chip
+                   so the user knows the agent moved on instead of silently
+                   skipping a turn. -->
+              <div v-if="iter.empty" class="iter-empty-chip">
+                <el-icon><WarningFilled /></el-icon>
+                <span>{{ $t('chat.iterationEmpty', { index: iter.index + 1 }) }}</span>
+              </div>
+              <!-- Render each iteration's segments in their original emission
+                   order (thinking / tool_call / content interleaved exactly as
+                   the model produced them) so tool boxes never reorder. -->
+              <template v-else>
+                <template v-for="seg in iter.items" :key="seg.id">
+                <ThinkingSegment v-if="seg.type === 'thinking' && debugMode" :segment="seg" />
+                <ToolCallSegment v-else-if="seg.type === 'tool_call'" :segment="seg" />
+                <template v-else-if="seg.type === 'content'">
+                  <button
+                    v-if="seg.superseded"
+                    class="superseded-toggle"
+                    type="button"
+                    @click="toggleSupersededSegment(seg.id)"
+                  >
+                    <el-icon><InfoFilled /></el-icon>
+                    <span>{{ $t('chat.supersededPreviewCollapsed') }}</span>
+                    <span class="superseded-toggle__action">
+                      {{ isSupersededExpanded(seg.id) ? $t('chat.collapse') : $t('chat.expand') }}
+                    </span>
+                  </button>
+                  <div v-if="seg.repetitionWarning && (!seg.superseded || isSupersededExpanded(seg.id))" class="repetition-warning">
+                    <el-icon><WarningFilled /></el-icon>
+                    <span class="repetition-warning__text">{{ $t('chat.contentRepetitionWarning') }}</span>
+                    <span v-if="seg.truncatedChars" class="repetition-warning__meta">({{ seg.truncatedChars }} chars)</span>
+                  </div>
+                  <ContentSegment
+                    v-if="!seg.superseded || isSupersededExpanded(seg.id)"
+                    :segment="seg"
+                    :show-cursor="showCursor && seg.status === 'running'"
+                    :class="{ 'content-segment--superseded': seg.superseded }"
+                  />
+                </template>
+                </template>
+              </template>
             </template>
           </div>
         </template>
@@ -72,9 +125,6 @@
 
           <Transition name="thinking-slide">
             <div v-if="executionExpanded" class="execution-content">
-              <!-- Plan 步骤进度 -->
-              <PlanStepsPanel v-if="planMeta" :plan="planMeta" :is-generating="isGenerating" />
-
               <!-- 工具调用列表 -->
               <div v-if="toolCallsMeta.length" class="tool-calls">
                 <div
@@ -94,7 +144,7 @@
                 </div>
               </div>
 
-              <div v-if="!toolCallsMeta.length && !planMeta" class="execution-empty">
+              <div v-if="!toolCallsMeta.length" class="execution-empty">
                 {{ currentPhaseName }}...
               </div>
             </div>
@@ -168,6 +218,74 @@
 
         </template><!-- /传统合并渲染模式 -->
 
+        <!--
+          INCOMPLETE banner: graph emitted finishReason=incomplete after
+          the thinking-only soft cap stopped the stream.
+          Lives outside the segmented/traditional fork so both rendering
+          modes show it. Click "regenerate" reuses the existing emit path
+          that the error-card already relies on.
+        -->
+        <div v-if="isIncomplete" class="incomplete-card">
+          <div class="incomplete-card__header">
+            <el-icon class="incomplete-card__icon"><WarningFilled /></el-icon>
+            <span class="incomplete-card__title">{{ $t('chat.incompleteTitle') }}</span>
+          </div>
+          <p class="incomplete-card__description">{{ $t('chat.incompleteDescription') }}</p>
+          <div class="incomplete-card__footer">
+            <button class="incomplete-card__retry" type="button" @click="$emit('regenerate')">
+              <el-icon><RefreshRight /></el-icon>
+              {{ $t('chat.incompleteRetry') }}
+            </button>
+          </div>
+        </div>
+
+        <!--
+          EVIDENCE_INSUFFICIENT banner (info color, not warning). Run completed
+          fully — the answer text is preserved above; the model just cited
+          source files / classes it didn't actually open. Without an explicit
+          card the trailing "[证据不足] …" line reads like a mid-answer cut.
+          No regenerate button: the user typically wants to either accept
+          the gap or follow up asking the model to read the listed files.
+        -->
+        <div v-if="isEvidenceInsufficient" class="evidence-card">
+          <div class="evidence-card__header">
+            <el-icon class="evidence-card__icon"><InfoFilled /></el-icon>
+            <span class="evidence-card__title">{{ $t('chat.evidenceTitle') }}</span>
+          </div>
+          <p class="evidence-card__description">{{ $t('chat.evidenceDescription') }}</p>
+        </div>
+
+        <!--
+          feedback_event card: recovery affordances for turns that ended
+          in a non-transient error. Backend's NodeStreamingChatHelper
+          handles transient TLS / IO retries silently; this card only
+          appears for the residue (auth, billing, model-not-found, raw
+          parse failures, etc.) that no amount of retry can fix without
+          user input. Buttons are data-driven from the event's `actions`
+          array so the backend can narrow the offering per error type
+          without a frontend release.
+        -->
+        <div v-if="feedbackInfo" class="feedback-card">
+          <div class="feedback-card__header">
+            <el-icon class="feedback-card__icon"><WarningFilled /></el-icon>
+            <span class="feedback-card__title">{{ $t('chat.feedback.title') }}</span>
+          </div>
+          <p class="feedback-card__description">{{ $t('chat.feedback.description') }}</p>
+          <div class="feedback-card__actions">
+            <button
+              v-for="action in feedbackInfo.actions"
+              :key="action"
+              class="feedback-card__btn"
+              :class="`feedback-card__btn--${action}`"
+              type="button"
+              @click="handleFeedbackAction(action)"
+            >
+              <el-icon v-if="action === 'retry' || action === 'regenerate'"><RefreshRight /></el-icon>
+              {{ feedbackActionLabel(action) }}
+            </button>
+          </div>
+        </div>
+
         <!-- 附件列表 -->
         <div v-if="attachments?.length" class="message-attachments">
           <div
@@ -195,6 +313,37 @@
               playsinline
             />
             <span class="message-attachment-video__name">{{ attachment.name }}</span>
+          </div>
+          <div
+            v-for="attachment in audioAttachments"
+            :key="'audio-' + attachment.storedName"
+            class="message-attachment-audio"
+          >
+            <audio
+              :src="getDisplayUrl(attachment)"
+              controls
+              preload="metadata"
+            />
+            <span class="message-attachment-audio__name">{{ attachment.name }}</span>
+          </div>
+          <!-- 3D model preview via @google/model-viewer Web Component
+               (registered globally in src/main.ts; renders &lt;model-viewer&gt;
+               as a custom HTML element). -->
+          <div
+            v-for="attachment in model3dAttachments"
+            :key="'model3d-' + attachment.storedName"
+            class="message-attachment-model3d"
+          >
+            <model-viewer
+              :src="getDisplayUrl(attachment)"
+              camera-controls
+              auto-rotate
+              shadow-intensity="1"
+              exposure="1"
+              alt="Generated 3D model"
+              class="message-attachment-model3d__viewer"
+            />
+            <span class="message-attachment-model3d__name">{{ attachment.name }}</span>
           </div>
           <button
             v-for="attachment in fileAttachments"
@@ -253,6 +402,18 @@
           >
             <el-icon><RefreshRight /></el-icon>
           </button>
+          <!-- Reply model attribution (assistant only) -->
+          <span
+            v-if="role === 'assistant' && replyModel"
+            class="action-model"
+            :title="replyModelTitle"
+          >{{ replyModel }}</span>
+          <!-- Multimodal sidecar routing badge (assistant only, when sidecar fired) -->
+          <span
+            v-if="role === 'assistant' && routingBadge"
+            class="action-routing"
+            :title="routingBadge.tooltip"
+          >🔀 {{ routingBadge.label }}</span>
           <!-- 时间戳（inline） -->
           <span class="action-time">{{ formattedTime }}</span>
         </div>
@@ -263,11 +424,13 @@
 <script setup lang="ts">
 import { computed, ref, watch, onBeforeUnmount } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { mcToast } from '@/composables/useMcToast'
 import {
   ArrowDown,
   CloseBold,
   CopyDocument,
   Document,
+  InfoFilled,
   Loading,
   Microphone,
   Opportunity,
@@ -277,25 +440,29 @@ import {
   VideoPause,
   WarningFilled,
 } from '@element-plus/icons-vue'
-import { useMarkdownRenderer } from '@/composables/useMarkdownRenderer'
+import { useStreamingMarkdown } from '@/composables/useStreamingMarkdown'
 import { useAuthenticatedAttachment } from '@/composables/useAuthenticatedAttachment'
 import { useToolLabel } from '@/composables/useToolLabel'
 import { http } from '@/api'
+import { copyToClipboard } from '@/utils/clipboard'
 import TypingCursor from './TypingCursor.vue'
 import BrowserTimeline from './BrowserTimeline.vue'
 import ToolCallSegment from './ToolCallSegment.vue'
 import ThinkingSegment from './ThinkingSegment.vue'
 import ContentSegment from './ContentSegment.vue'
+import GoalAvatarRing from '@/components/goal/GoalAvatarRing.vue'
+import { useGoalStore } from '@/stores/useGoalStore'
+import { useSystemSettingsStore } from '@/stores/useSystemSettingsStore'
+import { storeToRefs } from 'pinia'
 import PlanStepsPanel from './PlanStepsPanel.vue'
 import UserMessageContent from './UserMessageContent.vue'
 import type { BrowserAction } from './BrowserTimeline.vue'
 import type { Message, MessageSegment, ChatAttachment, ToolCallMeta, PlanMeta } from '@/types'
 import type { ChatErrorInfo } from '@/types/chatError'
 
-const { renderMarkdown } = useMarkdownRenderer()
-const { t } = useI18n()
+const { t, locale } = useI18n()
 const { getToolLabel } = useToolLabel()
-const { blobUrls, loadAllImages, loadAllVideos, downloadFile, openImage, getDisplayUrl, revokeAll } = useAuthenticatedAttachment()
+const { blobUrls, loadAllImages, loadAllVideos, loadAllAudios, loadAllModels, downloadFile, openImage, getDisplayUrl, revokeAll } = useAuthenticatedAttachment()
 
 interface Props {
   message: Message
@@ -327,6 +494,19 @@ const hovered = ref(false)
 
 const avatarIcon = computed(() => {
   return role.value === 'user' ? props.userIcon : props.assistantIcon
+})
+
+// Followup attribution: an assistant message that opened right after a
+// `goal_followup` SSE event belongs to an auto-followup turn. The chat
+// composable stamps the message via goalStore on `message_start`; this
+// computed reads it back so the ↻ glyph renders on exactly those turns.
+const goalStore = useGoalStore()
+const isFollowupTurn = computed(() => {
+  if (role.value !== 'assistant') return false
+  const cid = props.message.conversationId
+  const mid = props.message.id
+  if (!cid || mid == null) return false
+  return goalStore.isFollowupMessage(String(cid), String(mid))
 })
 
 // --- 错误卡片 ---
@@ -388,7 +568,13 @@ const hasContent = computed(() => {
   return !!(textPart?.text || props.message.content)
 })
 
-const showThinkingPanel = computed(() => !!thinkingContent.value)
+// Debug mode gates whether the model's reasoning ("thinking") is surfaced.
+// Off (default) keeps the transcript focused on tool activity + the answer,
+// directly addressing the "thinking piles up" complaint. Tool-call boxes stay
+// visible (they auto-collapse) so the user still sees what the agent did.
+const { debugMode } = storeToRefs(useSystemSettingsStore())
+
+const showThinkingPanel = computed(() => debugMode.value && !!thinkingContent.value)
 
 // 思考耗时（生成结束后显示）
 const thinkingDuration = computed(() => {
@@ -427,10 +613,12 @@ const toggleThinking = () => {
   emit('toggle-thinking', localThinkingExpanded.value)
 }
 
-const renderedThinkingContent = computed(() => {
-  if (!thinkingContent.value) return ''
-  return renderMarkdown(thinkingContent.value)
-})
+// Throttle thinking + main-content markdown while the turn streams; both render
+// once at full fidelity when generation stops.
+const { html: renderedThinkingContent } = useStreamingMarkdown(
+  () => thinkingContent.value,
+  () => isGenerating.value,
+)
 
 // --- 主内容 ---
 const isApprovalPlaceholder = (text: string) => {
@@ -456,10 +644,10 @@ const parseErrorText = computed(() => {
   return errorPart?.text || ''
 })
 
-const renderedContent = computed(() => {
-  if (!displayContent.value) return ''
-  return renderMarkdown(displayContent.value)
-})
+const { html: renderedContent } = useStreamingMarkdown(
+  () => displayContent.value,
+  () => isGenerating.value,
+)
 
 const showLoadingIndicator = computed(() => {
   return isGenerating.value && !displayContent.value
@@ -478,7 +666,7 @@ let copyTimer: ReturnType<typeof setTimeout> | null = null
 function copyMessage() {
   const text = displayContent.value || props.message.content || ''
   if (!text) return
-  navigator.clipboard.writeText(text).then(() => {
+  copyToClipboard(text).then(() => {
     copyState.value = 'copied'
     if (copyTimer) clearTimeout(copyTimer)
     copyTimer = setTimeout(() => { copyState.value = 'idle' }, 2000)
@@ -545,28 +733,148 @@ onBeforeUnmount(() => {
 })
 
 // --- 附件 ---
-const attachments = computed(() => props.message.attachments || [])
+// MessageContentPart media (image/audio/video produced by generation tools) live
+// in `contentParts` rather than `attachments`. Synthesize virtual attachment
+// entries so the existing render + auth-blob loader works for them too.
+//
+// Dedup against `props.message.attachments` by URL — user-uploaded images often
+// land in BOTH lists (the upload endpoint registers them as ChatAttachment AND
+// the message persistence echoes them back as a `type: 'image'` MessageContentPart).
+// Without this guard each user image shows twice in the bubble.
+const mediaPartAttachments = computed<ChatAttachment[]>(() => {
+  const parts = (props.message as any).contentParts as Array<any> | undefined
+  if (!parts || !parts.length) return []
+  const existingUrls = new Set(
+    (props.message.attachments || []).map(a => a.url).filter(Boolean)
+  )
+  const out: ChatAttachment[] = []
+  const seen = new Set<string>()
+  for (const p of parts) {
+    if (!p || !p.fileUrl) continue
+    if (p.type !== 'image' && p.type !== 'audio' && p.type !== 'video' && p.type !== 'model3d') continue
+    if (existingUrls.has(p.fileUrl) || seen.has(p.fileUrl)) continue
+    seen.add(p.fileUrl)
+    const fileName = p.fileName || p.fileUrl.split('/').pop() || `${p.type}-${out.length}`
+    const ct = p.contentType
+        || (p.type === 'image' ? 'image/png'
+            : p.type === 'audio' ? 'audio/mpeg'
+            : p.type === 'video' ? 'video/mp4'
+            : 'model/gltf-binary')
+    out.push({
+      name: fileName,
+      size: 0,
+      url: p.fileUrl,
+      storedName: fileName,
+      path: p.fileUrl,
+      contentType: ct,
+    })
+  }
+  return out
+})
+
+const attachments = computed(() => [
+  ...(props.message.attachments || []),
+  ...mediaPartAttachments.value,
+])
 const imageAttachments = computed(() => attachments.value.filter(a => a.contentType?.startsWith('image/')))
 const videoAttachments = computed(() => attachments.value.filter(a => a.contentType?.startsWith('video/')))
+const audioAttachments = computed(() => attachments.value.filter(a => a.contentType?.startsWith('audio/')))
+const model3dAttachments = computed(() => attachments.value.filter(a => a.contentType?.startsWith('model/')))
 const fileAttachments = computed(() => attachments.value.filter(a =>
-  !a.contentType?.startsWith('image/') && !a.contentType?.startsWith('video/')
+  !a.contentType?.startsWith('image/')
+    && !a.contentType?.startsWith('video/')
+    && !a.contentType?.startsWith('audio/')
+    && !a.contentType?.startsWith('model/')
 ))
 
-// 增量加载图片/视频附件的鉴权 blob URL（watch 覆盖首次 + 后续变化）
+// 增量加载图片/视频/音频附件的鉴权 blob URL（watch 覆盖首次 + 后续变化）
 watch(imageAttachments, (atts) => {
   if (atts.length > 0) loadAllImages(atts)
 }, { immediate: true })
 watch(videoAttachments, (atts) => {
   if (atts.length > 0) loadAllVideos(atts)
 }, { immediate: true })
+watch(audioAttachments, (atts) => {
+  if (atts.length > 0) loadAllAudios(atts)
+}, { immediate: true })
+// 3D models also need the auth-blob loader — <model-viewer src> doesn't carry
+// the Authorization header any more than <img>/<audio> do.
+watch(model3dAttachments, (atts) => {
+  if (atts.length > 0) loadAllModels(atts)
+}, { immediate: true })
 
 // --- 时间 ---
 const formattedTime = computed(() => {
-  if (!props.message.createTime) return ''
-  return new Date(props.message.createTime).toLocaleTimeString('zh-CN', {
+  const createTime = props.message.createTime
+  if (!createTime) return ''
+
+  const date = new Date(createTime)
+  if (Number.isNaN(date.getTime())) return ''
+
+  const now = new Date()
+
+  const sameDay = (a: Date, b: Date) =>
+    a.getFullYear() === b.getFullYear() &&
+    a.getMonth() === b.getMonth() &&
+    a.getDate() === b.getDate()
+
+  const currentLocale = locale.value
+
+  const time = date.toLocaleTimeString(currentLocale, {
     hour: '2-digit',
     minute: '2-digit',
   })
+
+  if (sameDay(date, now)) return time
+
+  const yesterday = new Date(now)
+  yesterday.setDate(now.getDate() - 1)
+
+  if (sameDay(date, yesterday)) {
+    return `${t('security.activity.yesterday')} ${time}`
+  }
+
+  return date.toLocaleString(currentLocale, {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+})
+
+// Reply model attribution: shows which model produced the assistant message.
+// Empty for streaming (server only emits runtimeModel after persistence) and
+// historical messages prior to MessageVO carrying the field.
+const replyModel = computed(() => props.message.runtimeModel || '')
+const replyModelTitle = computed(() => {
+  const provider = props.message.runtimeProvider
+  const base = t('chat.replyModel', { model: replyModel.value })
+  return provider ? `${base} (${provider})` : base
+})
+
+// Multimodal routing badge: rendered only when a sidecar actually fired this
+// turn (strategy=sidecar, sidecarModel populated). Skipped for the legacy
+// "primary handled it natively" case so non-routed turns stay clean.
+const routingBadge = computed(() => {
+  const r = props.message.metadata?.routing
+  if (!r || r.strategy !== 'sidecar' || !r.sidecarModel) return null
+  // Count routed attachments by required modality. We summarize as "1 image"
+  // / "2 images" rather than naming each file to keep the chip compact.
+  const required = r.requiredModalities || []
+  const kind = required.includes('VISION')
+    ? t('chat.routing.kind.image')
+    : required.includes('VIDEO')
+      ? t('chat.routing.kind.video')
+      : t('chat.routing.kind.media')
+  const label = `${r.sidecarModel} (${kind})`
+  const tooltip = t('chat.routing.tooltip', {
+    primary: replyModel.value || '?',
+    sidecar: r.sidecarModel,
+    sidecarProvider: r.sidecarProvider || '',
+    kind,
+  })
+  return { label, tooltip }
 })
 
 const formatFileSize = (size: number) => {
@@ -579,6 +887,18 @@ const formatFileSize = (size: number) => {
 
 // --- 执行过程面板 ---
 const executionExpanded = ref(false)
+const expandedSupersededSegments = ref(new Set<string>())
+
+function isSupersededExpanded(id: string) {
+  return expandedSupersededSegments.value.has(id)
+}
+
+function toggleSupersededSegment(id: string) {
+  const next = new Set(expandedSupersededSegments.value)
+  if (next.has(id)) next.delete(id)
+  else next.add(id)
+  expandedSupersededSegments.value = next
+}
 
 // --- 分段式渲染（Claude Code 风格） ---
 const parsedMetadata = computed(() => {
@@ -611,7 +931,13 @@ const segments = computed<MessageSegment[]>(() => {
     if (!hasThinking) {
       const thinkingPart = props.message.contentParts?.find(p => p.type === 'thinking')
       if (thinkingPart?.text) {
-        segs.unshift({ id: 'th-fb', type: 'thinking', status: 'completed', thinkingText: thinkingPart.text })
+        // Tag with iterationIndex=0 so groupedIterations puts it in the FIRST
+        // iteration's thinking bucket instead of the default-zero bucket
+        // colliding with later iteration content. Without this, the fallback
+        // thinking renders below the answer for any conversation that has
+        // multi-iteration RFC-22 segments tagged elsewhere.
+        const firstIter = segs.find(s => typeof s.iterationIndex === 'number')?.iterationIndex ?? 0
+        segs.unshift({ id: 'th-fb', type: 'thinking', status: 'completed', thinkingText: thinkingPart.text, iterationIndex: firstIter })
       }
     }
 
@@ -662,12 +988,144 @@ const segments = computed<MessageSegment[]>(() => {
   return segs
 })
 
-/** 是否使用分段模式渲染（有 segments 数据且包含多个分段） */
-const useSegmentedView = computed(() => segments.value.length > 1)
+/**
+ * Use segmented rendering when there are multiple segments, OR when the turn
+ * contains a delegation segment. Delegations live in `segments` but not in
+ * `metadata.toolCalls`, so the fallback path (which only reads toolCalls)
+ * renders nothing for them — a single-step plan that delegates to a subagent
+ * would otherwise show the subagent call as completely invisible. Forcing
+ * segmented view here makes delegation surface as a timeline entry.
+ */
+const useSegmentedView = computed(() =>
+  segments.value.length > 1 ||
+  segments.value.some(s => s.type === 'tool_call' && (s.toolName || '').startsWith('→'))
+)
+
+/**
+ * Group segments by iterationIndex so each ReAct iteration renders as its own
+ * thinking/tool-calls/content cluster. Falls back to a single ungrouped bucket
+ * for legacy messages (no iterationIndex tagged) so historical conversations
+ * keep rendering as before — including the existing "single-thinking reorder"
+ * normalization done in the `segments` computed above.
+ */
+const groupedIterations = computed(() => {
+  const segs = segments.value || []
+  const anyTagged = segs.some(s => typeof s.iterationIndex === 'number')
+  // Untagged (legacy / persisted-without-iterationIndex) messages render as a
+  // single bucket — but still in their ORIGINAL emission order, never split by
+  // type. Splitting into thinking/tool/content arrays was what made a tool box
+  // jump above or below its surrounding text depending on the message.
+  if (!anyTagged) {
+    return [{ key: 'all', index: 0, empty: segs.length === 0, items: segs }]
+  }
+  // Group by iteration for visual separation, but keep each bucket's segments
+  // in their original array order (segments[] is already in emission order, so
+  // a tool call stays exactly where the model emitted it relative to content).
+  const buckets = new Map<number, MessageSegment[]>()
+  for (const s of segs) {
+    const idx = s.iterationIndex ?? 0
+    if (!buckets.has(idx)) buckets.set(idx, [])
+    buckets.get(idx)!.push(s)
+  }
+  return [...buckets.entries()]
+    .sort(([a], [b]) => a - b)
+    .map(([index, items]) => ({
+      key: `iter-${index}`,
+      index,
+      empty: items.length === 0,
+      items,
+    }))
+})
 
 const toolCallsMeta = computed<ToolCallMeta[]>(() => {
   return parsedMetadata.value?.toolCalls || []
 })
+
+/**
+ * True when the assistant turn was auto-truncated by the backend's
+ * thinking-only soft-cap and ended in INCOMPLETE.
+ * Surfaced as a banner with a "continue / regenerate" affordance so the
+ * user knows the answer ended early on purpose, not silently skipped.
+ *
+ * Reads `metadata.finishReason` set by the graph's FinalAnswerNode via
+ * the finish_reason GraphEvent → StreamDelta → accumulator pipeline.
+ */
+const isIncomplete = computed<boolean>(() => {
+  if (props.message.role !== 'assistant') return false
+  return parsedMetadata.value?.finishReason === 'incomplete'
+})
+
+/**
+ * True when the graph completed normally but {@code SourceEvidenceLedger}
+ * found unsupported references. The visible answer is full and persisted;
+ * the trailing "[证据不足] …" line just lists which file/class citations
+ * were never confirmed by an actual tool result. Without this banner the
+ * user often misreads that single line as a mid-answer cut.
+ */
+const isEvidenceInsufficient = computed<boolean>(() => {
+  if (props.message.role !== 'assistant') return false
+  return parsedMetadata.value?.finishReason === 'evidence_insufficient'
+})
+
+/**
+ * Recovery-affordance payload from the graph's feedback_event. Populated
+ * for assistant turns that ended in a non-transient error (after the
+ * helper's TLS / IO retry loop has already given up). Shape mirrors
+ * GraphEventPublisher.feedback: { errorType, errorMessage, actions }.
+ *
+ * <p>Surfaces a card with buttons for each action: "retry" and
+ * "regenerate" both replay the last user message; "report" copies the
+ * error details for a bug report. The card sits right under the red
+ * "[错误] …" content so users see the recovery options inline rather
+ * than having to retype the whole prompt.
+ */
+interface FeedbackInfo {
+  errorType: string
+  errorMessage: string
+  actions: string[]
+  timestamp?: number
+}
+const feedbackInfo = computed<FeedbackInfo | undefined>(() => {
+  if (props.message.role !== 'assistant') return undefined
+  const raw = parsedMetadata.value?.feedbackEvent as FeedbackInfo | undefined
+  if (!raw || !Array.isArray(raw.actions) || raw.actions.length === 0) return undefined
+  return raw
+})
+
+function handleFeedbackAction(action: string) {
+  if (action === 'retry' || action === 'regenerate') {
+    emit('regenerate')
+    return
+  }
+  if (action === 'report') {
+    // Copy error details for a bug report. Lower-friction than a modal
+    // and works offline; users paste the result into wherever they file
+    // issues. Uses the clipboard helper with execCommand fallback for
+    // non-HTTPS contexts (e.g. internal IPs without TLS).
+    const lines = [
+      `Error type: ${feedbackInfo.value?.errorType || 'UNKNOWN'}`,
+      `Message: ${feedbackInfo.value?.errorMessage || ''}`,
+      `Conversation: ${(props.message as any).conversationId || ''}`,
+      `Message id: ${(props.message as any).id || ''}`,
+      `Timestamp: ${new Date(feedbackInfo.value?.timestamp || Date.now()).toISOString()}`,
+    ].join('\n')
+    copyToClipboard(lines).then(() => {
+      mcToast.success(t('chat.feedback.reportCopied'))
+    }).catch(() => {
+      console.error('[feedback_event] copy failed:\n' + lines)
+      mcToast.error(t('chat.feedback.reportFailed'))
+    })
+  }
+}
+
+function feedbackActionLabel(action: string): string {
+  // Action labels go through i18n so the same data-driven button list
+  // renders correctly in zh-CN / en-US. Falls back to the raw action
+  // key if a future backend introduces a label we haven't translated.
+  const key = `chat.feedback.${action}`
+  const localized = t(key)
+  return localized === key ? action : localized
+}
 
 const browserActionsMeta = computed<BrowserAction[]>(() => {
   return parsedMetadata.value?.browserActions || []
@@ -720,7 +1178,11 @@ const executionPhaseLabel = computed(() => {
   }
   if (planMeta.value) {
     const done = planMeta.value.stepResults?.filter(r => r?.status === 'completed').length || 0
-    return `Plan-Execute (${done}/${planMeta.value.steps.length})`
+    // Guard steps: a plan payload can arrive with steps undefined (mid-stream /
+    // malformed metadata). An unguarded .length here throws during render, which
+    // blanks the whole message subtree until a full remount (page refresh) — the
+    // "chat goes blank on switch, refresh fixes it" bug. Mirror the ?. used below.
+    return `Plan-Execute (${done}/${planMeta.value.steps?.length ?? 0})`
   }
   if (toolCallsMeta.value.length) {
     const done = toolCallsMeta.value.filter(t => t.status === 'completed').length
@@ -731,8 +1193,9 @@ const executionPhaseLabel = computed(() => {
 
 const showExecutionPanel = computed(() => {
   if (role.value !== 'assistant') return false
-  // 审批卡片有独立的渲染区域，但 execution panel 也应该在审批阶段展示上下文
-  return toolCallsMeta.value.length > 0 || !!planMeta.value
+  // The plan-step panel renders top-level outside this execution panel,
+  // so plan presence alone no longer keeps an (otherwise empty) panel open.
+  return toolCallsMeta.value.length > 0
     || (isGenerating.value && parsedMetadata.value?.currentPhase)
     || !!pendingApproval.value
 })
@@ -771,13 +1234,83 @@ watch(isGenerating, (generating) => {
   flex-direction: column;
   gap: 2px;
   padding: 4px 0;
+  min-width: 0;
+}
+
+/* Iteration "no output" chip (interrupted iteration). */
+.iter-empty-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  align-self: flex-start;
+  padding: 4px 10px;
+  margin: 4px 0;
+  font-size: 12px;
+  color: var(--mc-text-tertiary, #94a3b8);
+  background: var(--mc-bg-elevated, #f8fafc);
+  border: 1px dashed var(--mc-border, #e2e8f0);
+  border-radius: 12px;
+}
+
+/* Inline informational banner shown when the backend trimmed a repetitive
+   tail off a content segment. Amber, not red — this is informational. */
+.repetition-warning {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  margin: 6px 0 2px;
+  font-size: 12px;
+  color: #92400e;
+  background: rgba(245, 158, 11, 0.08);
+  border-left: 3px solid var(--mc-warning, #f59e0b);
+  border-radius: 4px;
+}
+.repetition-warning__text {
+  flex: 1;
+}
+.repetition-warning__meta {
+  color: var(--mc-text-tertiary, #94a3b8);
+  font-size: 11px;
+}
+
+.superseded-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  align-self: flex-start;
+  padding: 5px 10px;
+  margin: 4px 0 2px;
+  font-size: 12px;
+  color: var(--mc-text-secondary, #64748b);
+  background: var(--mc-bg-elevated, #f8fafc);
+  border: 1px dashed var(--mc-border, #e2e8f0);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.superseded-toggle:hover {
+  color: var(--mc-text-primary, #0f172a);
+  border-color: var(--mc-primary, #2563eb);
+}
+
+.superseded-toggle__action {
+  color: var(--mc-primary, #2563eb);
+}
+
+.content-segment--superseded {
+  opacity: 0.72;
 }
 
 .message-wrapper {
   display: flex;
   gap: 12px;
   align-items: flex-start;
-  max-width: 920px;
+  width: 100%;
+  /* Cap at 920px on wide screens but never exceed the actual content column —
+     keeps the bubble container-relative so it narrows with the chat panel. */
+  max-width: min(920px, 100%);
+  min-width: 0;
   margin-bottom: 6px;
 }
 
@@ -840,6 +1373,7 @@ watch(isGenerating, (generating) => {
   font-size: 15px;
   line-height: 1.7;
   word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 .assistant-bubble {
@@ -1226,6 +1760,31 @@ watch(isGenerating, (generating) => {
   user-select: none;
 }
 
+.action-model {
+  font-size: 11px;
+  color: var(--mc-text-secondary, #64748b);
+  margin-left: 4px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--mc-fill-2, rgba(100, 116, 139, 0.08));
+  font-family: var(--mc-mono-font, ui-monospace, "SF Mono", Menlo, monospace);
+  user-select: text;
+  white-space: nowrap;
+}
+
+.action-routing {
+  font-size: 11px;
+  color: var(--mc-primary, #d96d46);
+  margin-left: 4px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--mc-primary-bg, rgba(217, 109, 70, 0.1));
+  font-family: var(--mc-mono-font, ui-monospace, "SF Mono", Menlo, monospace);
+  user-select: text;
+  white-space: nowrap;
+  font-weight: 500;
+}
+
 /* ==================== 主内容区域 ==================== */
 .msg-content {
   position: relative;
@@ -1322,6 +1881,183 @@ watch(isGenerating, (generating) => {
   border-color: color-mix(in srgb, var(--mc-danger) 50%, transparent);
 }
 
+/* ==================== INCOMPLETE 截断卡片（重复检测 / thinking-only 软上限） ==================== */
+.incomplete-card {
+  margin-top: 8px;
+  padding: 12px 16px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--mc-warning, #d97706) 8%, var(--mc-bg-elevated));
+  border: 1px solid color-mix(in srgb, var(--mc-warning, #d97706) 30%, transparent);
+  font-size: 13px;
+  max-width: 480px;
+  line-height: 1.5;
+}
+
+.incomplete-card__header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.incomplete-card__icon {
+  flex-shrink: 0;
+  color: var(--mc-warning, #d97706);
+}
+
+.incomplete-card__title {
+  font-weight: 600;
+  color: var(--mc-warning, #d97706);
+  font-size: 14px;
+}
+
+.incomplete-card__description {
+  margin: 4px 0 8px;
+  color: var(--mc-text-primary);
+  font-size: 13px;
+  opacity: 0.85;
+}
+
+.incomplete-card__footer {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.incomplete-card__retry {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 12px;
+  border-radius: 6px;
+  border: 1px solid color-mix(in srgb, var(--mc-warning, #d97706) 35%, transparent);
+  background: color-mix(in srgb, var(--mc-warning, #d97706) 10%, var(--mc-bg-elevated));
+  color: var(--mc-warning, #d97706);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+
+.incomplete-card__retry:hover {
+  background: color-mix(in srgb, var(--mc-warning, #d97706) 18%, var(--mc-bg-elevated));
+  border-color: color-mix(in srgb, var(--mc-warning, #d97706) 55%, transparent);
+}
+
+/* ==================== EVIDENCE_INSUFFICIENT 提示卡（info 调，非警告） ==================== */
+.evidence-card {
+  margin-top: 8px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--mc-info, #0891b2) 6%, var(--mc-bg-elevated));
+  border: 1px solid color-mix(in srgb, var(--mc-info, #0891b2) 25%, transparent);
+  font-size: 12.5px;
+  max-width: 480px;
+  line-height: 1.5;
+}
+
+.evidence-card__header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.evidence-card__icon {
+  flex-shrink: 0;
+  color: var(--mc-info, #0891b2);
+}
+
+.evidence-card__title {
+  font-weight: 600;
+  color: var(--mc-info, #0891b2);
+  font-size: 13.5px;
+}
+
+.evidence-card__description {
+  margin: 4px 0 0;
+  color: var(--mc-text-primary);
+  font-size: 12.5px;
+  opacity: 0.85;
+}
+
+/* ==================== feedback_event recovery card (ERROR_FALLBACK) ==================== */
+.feedback-card {
+  margin-top: 8px;
+  padding: 12px 16px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--mc-danger, #dc2626) 8%, var(--mc-bg-elevated));
+  border: 1px solid color-mix(in srgb, var(--mc-danger, #dc2626) 30%, transparent);
+  font-size: 13px;
+  max-width: 480px;
+  line-height: 1.5;
+}
+
+.feedback-card__header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.feedback-card__icon {
+  flex-shrink: 0;
+  color: var(--mc-danger, #dc2626);
+}
+
+.feedback-card__title {
+  font-weight: 600;
+  color: var(--mc-danger, #dc2626);
+  font-size: 14px;
+}
+
+.feedback-card__description {
+  margin: 4px 0 8px;
+  color: var(--mc-text-primary);
+  font-size: 13px;
+  opacity: 0.85;
+}
+
+.feedback-card__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.feedback-card__btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 12px;
+  border-radius: 6px;
+  border: 1px solid color-mix(in srgb, var(--mc-danger, #dc2626) 35%, transparent);
+  background: color-mix(in srgb, var(--mc-danger, #dc2626) 10%, var(--mc-bg-elevated));
+  color: var(--mc-danger, #dc2626);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+
+.feedback-card__btn:hover {
+  background: color-mix(in srgb, var(--mc-danger, #dc2626) 18%, var(--mc-bg-elevated));
+  border-color: color-mix(in srgb, var(--mc-danger, #dc2626) 55%, transparent);
+}
+
+/* Report button is secondary action — muted neutral palette so the
+   primary "retry" stays visually emphasized. */
+.feedback-card__btn--report {
+  border-color: var(--mc-border);
+  background: var(--mc-bg-elevated);
+  color: var(--mc-text-secondary);
+}
+
+.feedback-card__btn--report:hover {
+  background: var(--mc-bg-sunken);
+  border-color: var(--mc-border-strong, var(--mc-border));
+  color: var(--mc-text-primary);
+}
+
 /* ==================== 附件 ==================== */
 .message-attachments {
   display: flex;
@@ -1365,6 +2101,54 @@ watch(isGenerating, (generating) => {
 }
 
 .message-attachment-video__name {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+  opacity: 0.76;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.message-attachment-audio {
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.message-attachment-audio audio {
+  width: 100%;
+  max-width: 400px;
+  display: block;
+}
+
+.message-attachment-audio__name {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+  opacity: 0.76;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.message-attachment-model3d {
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--bg-soft, #f5f5f5);
+}
+
+.message-attachment-model3d__viewer {
+  width: 100%;
+  max-width: 480px;
+  height: 360px;
+  display: block;
+  border-radius: 12px;
+  /* model-viewer renders nothing until the .glb finishes loading;
+     keep the box sized so layout doesn't jump. */
+  background: linear-gradient(135deg, #fafafa, #ececec);
+}
+
+.message-attachment-model3d__name {
   display: block;
   margin-top: 4px;
   font-size: 12px;
@@ -1562,25 +2346,125 @@ watch(isGenerating, (generating) => {
 /* ===== Mermaid block ===== */
 .markdown-body :deep(.mermaid-block) {
   margin: 14px 0;
-  padding: 16px;
   border-radius: 12px;
   background: var(--mc-mermaid-bg, #f8fafc);
   border: 1px solid var(--mc-mermaid-border, #e2e8f0);
+  overflow: hidden;
+}
+.markdown-body :deep(.mermaid-block__header) {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 38px;
+  padding: 0 14px;
+  background: var(--mc-code-header-bg);
+  border-bottom: 1px solid var(--mc-mermaid-border, #e2e8f0);
+  font-size: 12px;
+  line-height: 1;
+  color: var(--mc-code-lang-color);
+  /* Prevent the header label/buttons from being swept into a text selection
+     that starts in the surrounding markdown — the highlighted-grey selection
+     band would otherwise extend across the whole header row. */
+  user-select: none;
+  -webkit-user-select: none;
+}
+.markdown-body :deep(.mermaid-block__lang) {
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}
+.markdown-body :deep(.mermaid-block__actions) {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.markdown-body :deep(.mermaid-block__download) {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: var(--mc-code-copy-color);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.markdown-body :deep(.mermaid-block__download:hover) {
+  background: var(--mc-code-copy-hover-bg);
+  color: var(--mc-code-copy-hover-color);
+}
+/* Pin EVERY icon inside the header to 14×14. Without this, DOMPurify can
+   normalise away the `width="14" height="14"` attrs from the markdown HTML,
+   leaving the SVG to fall back to the UA default 300×150. The button is
+   inline-flex so it grows to fit the icon, and `:hover` then paints a
+   gigantic grey rectangle (which is what user issue #67's follow-up screen-
+   shot showed). Same defence-in-depth as `.code-block__header svg`. */
+.markdown-body :deep(.mermaid-block__header svg) {
+  width: 14px !important;
+  height: 14px !important;
+  flex-shrink: 0;
+  display: inline-block;
+  vertical-align: middle;
+}
+.markdown-body :deep(.mermaid-block__header > *) {
+  flex-shrink: 0;
+  min-width: 0;
+}
+.markdown-body :deep(.mermaid-block__body) {
+  padding: 16px;
   text-align: center;
   overflow-x: auto;
+  /* Reserve a stable height so the box doesn't collapse to 0px before the
+     SVG paints — keeps layout stable across the streaming cache-miss →
+     render cycle. */
+  min-height: 96px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
-.markdown-body :deep(.mermaid-block svg) {
+.markdown-body :deep(.mermaid-block__body svg) {
   max-width: 100%;
   height: auto;
 }
-.markdown-body :deep(.mermaid-block.mermaid-error) {
+.markdown-body :deep(.mermaid-block.mermaid-error .mermaid-block__body) {
   background: #fef2f2;
-  border-color: #fecaca;
   color: #b91c1c;
   text-align: left;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 12px;
   white-space: pre-wrap;
+  display: block;
+}
+/* Streaming placeholder: three pulsing dots inside the empty body. The dots
+   render the same DOM string on every v-html update (stable innerHTML) so
+   the box stops "shaking" during streaming. Once the async render fires
+   after stream end, this gets replaced with the actual SVG. */
+.markdown-body :deep(.mermaid-block__loader) {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+}
+.markdown-body :deep(.mermaid-block__loader-dot) {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--mc-mermaid-border, #cbd5e1);
+  animation: mc-mermaid-pulse 1.4s ease-in-out infinite;
+}
+.markdown-body :deep(.mermaid-block__loader-dot:nth-child(2)) {
+  animation-delay: 0.2s;
+}
+.markdown-body :deep(.mermaid-block__loader-dot:nth-child(3)) {
+  animation-delay: 0.4s;
+}
+@keyframes mc-mermaid-pulse {
+  0%, 80%, 100% { opacity: 0.3; transform: scale(0.85); }
+  40% { opacity: 1; transform: scale(1); }
+}
+.markdown-body :deep(.mermaid-block__download.is-flash) {
+  background: var(--mc-warning-bg, rgba(255, 159, 67, 0.15));
+  color: var(--mc-warning, #f59e0b);
 }
 
 /* ===== KaTeX inline / block ===== */

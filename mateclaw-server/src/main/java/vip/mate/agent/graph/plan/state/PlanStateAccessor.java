@@ -73,6 +73,11 @@ public final class PlanStateAccessor {
         return state.<List<String>>value(COMPLETED_RESULTS).orElse(List.of());
     }
 
+    /** Re-plans already performed this run (0 at run start). */
+    public int replanCount() {
+        return state.value(PLAN_REPLAN_COUNT, 0);
+    }
+
     // ===== 终止 =====
 
     public String finalSummary() {
@@ -105,6 +110,17 @@ public final class PlanStateAccessor {
 
     public String traceId() {
         return state.value(MateClawStateKeys.TRACE_ID, "");
+    }
+
+    /**
+     * The {@link vip.mate.agent.context.ChatOrigin} forwarded into graph
+     * state by {@code MateClawStateAccessor.OutputBuilder.chatOrigin}.
+     * Returns {@link vip.mate.agent.context.ChatOrigin#EMPTY} when nothing
+     * was injected (legacy callers / non-channel entry points).
+     */
+    public vip.mate.agent.context.ChatOrigin chatOrigin() {
+        return state.<vip.mate.agent.context.ChatOrigin>value(MateClawStateKeys.CHAT_ORIGIN)
+                .orElse(vip.mate.agent.context.ChatOrigin.EMPTY);
     }
 
     // ===== 会话消息（复用 MateClawStateKeys.MESSAGES）=====
@@ -176,6 +192,10 @@ public final class PlanStateAccessor {
             return put(CURRENT_STEP_INDEX, index);
         }
 
+        public OutputBuilder replanCount(int count) {
+            return put(PLAN_REPLAN_COUNT, count);
+        }
+
         public OutputBuilder currentStepTitle(String title) {
             return put(CURRENT_STEP_TITLE, title);
         }
@@ -235,8 +255,10 @@ public final class PlanStateAccessor {
                                         NodeStreamingChatHelper.StreamResult result) {
             int existingPrompt = currentState.value(MateClawStateKeys.PROMPT_TOKENS, 0);
             int existingCompletion = currentState.value(MateClawStateKeys.COMPLETION_TOKENS, 0);
+            int existingLlmCalls = currentState.value(MateClawStateKeys.LLM_CALL_COUNT, 0);
             map.put(MateClawStateKeys.PROMPT_TOKENS, existingPrompt + result.promptTokens());
             map.put(MateClawStateKeys.COMPLETION_TOKENS, existingCompletion + result.completionTokens());
+            map.put(MateClawStateKeys.LLM_CALL_COUNT, existingLlmCalls + 1);
             return this;
         }
 

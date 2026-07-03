@@ -4,6 +4,7 @@ import com.alibaba.cloud.ai.graph.OverAllState;
 import com.alibaba.cloud.ai.graph.action.NodeAction;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
+import vip.mate.agent.GraphEventPublisher;
 import vip.mate.agent.graph.observation.ObservationProcessor;
 import vip.mate.agent.graph.state.MateClawStateAccessor;
 
@@ -31,6 +32,18 @@ public class ObservationNode implements NodeAction {
     private final ObservationProcessor observationProcessor;
     private final vip.mate.channel.web.ChatStreamTracker streamTracker;
 
+    /**
+     * Progressive-disclosure meta-tools that perform setup, not real work. A
+     * round whose entire batch is one of these is refunded its iteration (see
+     * {@link MateClawStateKeys#ITERATION_REFUND_COUNT}). Mirrors the authoritative
+     * set in {@code DefaultToolDisclosureService.ALWAYS_CORE}.
+     */
+    private static final java.util.Set<String> DISCLOSURE_TOOLS =
+            java.util.Set.of("load_skill", "enable_tool");
+
+    /** Per-run cap on iteration refunds — keeps a load-skill-only model from looping forever. */
+    private static final int MAX_ITERATION_REFUNDS_PER_RUN = 3;
+
     public ObservationNode(ObservationProcessor observationProcessor) {
         this(observationProcessor, null);
     }
@@ -55,13 +68,28 @@ public class ObservationNode implements NodeAction {
 
         int currentIteration = accessor.iterationCount();
         int maxIterations = accessor.maxIterations();
-        int nextIteration = currentIteration + 1;
-
-        log.info("[ObservationNode] Iteration {}/{}", nextIteration, maxIterations);
 
         // 提取最新的工具结果并处理
         List<ToolResponseMessage.ToolResponse> toolResults =
                 state.<List<ToolResponseMessage.ToolResponse>>value(TOOL_RESULTS).orElse(List.of());
+
+        // Iteration refund: a round whose entire batch was progressive-disclosure
+        // setup (load_skill / enable_tool) did no real work, so don't charge it an
+        // iteration — otherwise a tight budget loses a step to the load-then-use
+        // two-step. Bounded by MAX_ITERATION_REFUNDS_PER_RUN so a model that only
+        // ever loads skills can't dodge the budget forever.
+        int refundCount = accessor.iterationRefundCount();
+        boolean setupOnlyRound = !toolResults.isEmpty()
+                && toolResults.stream().allMatch(tr -> DISCLOSURE_TOOLS.contains(tr.name()));
+        boolean refundIteration = setupOnlyRound && refundCount < MAX_ITERATION_REFUNDS_PER_RUN;
+        int nextIteration = refundIteration ? currentIteration : currentIteration + 1;
+
+        if (refundIteration) {
+            log.info("[ObservationNode] Iteration refunded (setup-only round, refunds {}/{}); staying at {}/{}",
+                    refundCount + 1, MAX_ITERATION_REFUNDS_PER_RUN, nextIteration, maxIterations);
+        } else {
+            log.info("[ObservationNode] Iteration {}/{}", nextIteration, maxIterations);
+        }
 
         // 将每个工具结果通过 ObservationProcessor 标准化和截断
         List<String> processedObservations = toolResults.stream()
@@ -71,7 +99,7 @@ public class ObservationNode implements NodeAction {
         // 合并为单条观察记录
         String combinedObservation = String.join("\n---\n", processedObservations);
 
-        // Budget Pressure Warning（Hermes 风格）：接近上限时注入警告到工具结果中
+        // Budget Pressure Warning：接近上限时注入警告到工具结果中
         // LLM 下一轮 reasoning 时能看到，从而主动收束，而非被硬性截断
         if (maxIterations > 0) {
             int progress = (int) ((double) nextIteration / maxIterations * 100);
@@ -119,6 +147,21 @@ public class ObservationNode implements NodeAction {
                 .put(OBSERVATION_HISTORY, updatedHistory)
                 .shouldSummarize(shouldSummarize)
                 .toolCallCount(newToolCallCount);
+
+        if (refundIteration) {
+            builder.iterationRefundCount(refundCount + 1);
+        }
+
+        // Close out the iteration we just observed. We use currentIteration
+        // (not nextIteration) so the index pairs with whatever
+        // iteration_start the ReasoningNode emitted at the top of this turn.
+        // Char totals are best-effort: ObservationNode doesn't see the LLM
+        // delta stream directly, so 0/0 is acceptable for now — consumers
+        // that care fall back to summing the deltas themselves.
+        if (streamTracker == null || streamTracker.isIterationEventsEnabled()) {
+            builder.events(List.of(
+                    GraphEventPublisher.iterationEnd(currentIteration, "parent", null, 0, 0)));
+        }
 
         // 重复观察时标记错误，让 ObservationDispatcher 路由到 limitExceededNode
         if (duplicateObservation) {

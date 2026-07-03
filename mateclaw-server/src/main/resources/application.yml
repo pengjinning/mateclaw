@@ -19,12 +19,25 @@ spring:
   profiles:
     active: dev
 
-  # 数据源（默认 H2，生产切换为 mysql profile）
+  # 数据源（默认 H2，生产切换为 mysql 或 kingbase profile）
   datasource:
     url: jdbc:h2:file:./data/mateclaw;MODE=MySQL;DATABASE_TO_LOWER=TRUE;CASE_INSENSITIVE_IDENTIFIERS=TRUE
     driver-class-name: org.h2.Driver
     username: sa
     password:
+    # Issue #50: explicit Hikari sizing. Default of 10 was being exhausted
+    # by O(100) cron jobs firing on minute boundaries (each run holds 3-4
+    # connections sequentially) plus ChannelHealthMonitor's per-minute scan.
+    # 30 leaves headroom for HTTP / SSE / channel adapters even with the
+    # cron concurrency limiter (CronJobService.MAX_CONCURRENT_CRON_RUNS=8)
+    # at full saturation.
+    hikari:
+      maximum-pool-size: 30
+      minimum-idle: 5
+      connection-timeout: 30000
+      idle-timeout: 600000
+      max-lifetime: 1800000
+      leak-detection-threshold: 60000
 
   # SQL 初始化由 DatabaseBootstrapRunner 接管，关闭 Spring 自动执行
   sql:
@@ -40,16 +53,33 @@ spring:
       - classpath:db/migration/h2
     validate-on-migrate: true
     clean-disabled: true
+    # Disable Flyway's built-in ${...} placeholder substitution. Some migrations
+    # (e.g. V85 ckjia MCP seed) intentionally store ${ENV_VAR} literals so that
+    # mateclaw's runtime header parser (McpClientManager.parseHeaders) can
+    # expand them at request time. Flyway would otherwise try to resolve those
+    # tokens at migration time and fail with "No value provided for placeholder".
+    # Safe to disable globally because no migration in this project relies on
+    # Flyway-side ${...} substitution.
+    placeholder-replacement: false
 
   h2:
     console:
       enabled: ${H2_CONSOLE_ENABLED:false}
       path: /h2-console
 
-  # Spring AI Alibaba (DashScope) - Spring AI Alibaba 1.1.x 配置路径
+  # Spring AI Alibaba (DashScope) — Spring AI Alibaba 1.1.x configuration path.
+  #
+  # The api-key here is only consumed by Spring AI Alibaba's auto-configured beans
+  # as a *fallback*. The real source of truth for every provider/key/model is the
+  # admin UI ("Settings → Models", persisted in mate_model_provider /
+  # mate_model_config); AgentDashScopeChatModelBuilder resolves the key per-request
+  # from the provider row first, only falling back to this property when the row
+  # is incomplete. The placeholder default keeps DashScopeChatAutoConfiguration
+  # happy at startup when no env var is set (Docker / fresh install) — leave it
+  # alone unless you know what you're doing.
   ai:
     dashscope:
-      api-key: ${DASHSCOPE_API_KEY:your-dashscope-api-key-here}
+      api-key: ${DASHSCOPE_API_KEY:configure-in-admin-ui}
       chat:
         options:
           model: qwen-max
@@ -94,6 +124,13 @@ springdoc:
 
 # MateClaw 自定义配置
 mateclaw:
+  server:
+    # Public base URL used to build absolute download links for tool-generated
+    # files (e.g. https://mateclaw.example.com). Leave empty to fall back to the
+    # current request's host, and to a relative path when no request is bound.
+    # Set this when agents deliver download links to channels/clients that cannot
+    # resolve a relative URL (IM messages, copied links, external downloads).
+    public-base-url: ${MATECLAW_PUBLIC_BASE_URL:}
   jwt:
     secret: ${JWT_SECRET:MateClaw-JWT-Secret-Key-2024-Please-Change-In-Production}
     expiration: 86400000
@@ -101,14 +138,52 @@ mateclaw:
   # MCP server 配置已迁移至数据库（mate_mcp_server 表），通过 UI 管理
   mcp:
     enabled: true
+  tools:
+    disclosure:
+      # progressive: extension-tier tools are hidden behind the extension-tools
+      #   catalog until the model calls enable_tool. By default that's the heavy
+      #   generative / browser tools; MCP servers default to core (visible) and
+      #   an admin can move a noisy one to extension per server.
+      # legacy: advertise every bound tool up front (pre-disclosure behavior).
+      mode: ${MATECLAW_TOOLS_DISCLOSURE_MODE:progressive}
+  workspace:
+    sandbox:
+      # Global fallback filesystem boundary for file/shell tools. When a
+      # conversation has no per-workspace base path configured, operations are
+      # confined to this root instead of running unconstrained against the whole
+      # filesystem (fail-closed default). Set enabled=false to restore the legacy
+      # unconstrained behaviour for unconfigured conversations.
+      enabled: ${MATECLAW_WORKSPACE_SANDBOX_ENABLED:true}
+      root: ${MATECLAW_WORKSPACE_SANDBOX_ROOT:${user.dir}/data/workspace}
   skill:
     workspace:
-      root: ${user.home}/.mateclaw/skills
+      # Skill workspace root. Override with MATECLAW_SKILL_WORKSPACE_ROOT to
+      # relocate it onto a persistent volume — in Docker this is pointed at
+      # /app/data/skills so the existing server_data volume persists installed
+      # skills, accumulated LESSONS.md, and skill runtime files across restarts.
+      root: ${MATECLAW_SKILL_WORKSPACE_ROOT:${user.home}/.mateclaw/skills}
       auto-init: true
       delete-policy: archive
+    disclosure:
+      load-skill-tool:
+        # When false, the load_skill meta tool is not advertised to agents and
+        # the skill catalog guidance falls back to readSkillFile. Escape hatch
+        # for operators who don't want the explicit skill-load entry point.
+        enabled: ${MATECLAW_SKILL_LOAD_SKILL_TOOL_ENABLED:true}
+    curator:
+      enabled: true
+      cron: "0 0 2 * * *"         # daily 02:00 — staggered away from wiki / backup jobs
+      stale-after-days: 30
+      archive-after-days: 90
+      scope: AGENT_CREATED         # AGENT_CREATED | ALL_DYNAMIC | OFF
+      protect-prefixes:
+        - "sys-"
+        - "ops-"
     hub:
       base-url: https://clawhub.ai
       search-path: /api/v1/search
+      skills-path: /api/v1/skills
+      download-path: /api/v1/download
       http-timeout: 15
       http-retries: 3
   plugin:
@@ -148,10 +223,22 @@ mateclaw:
         enabled: true
         failure-threshold: 3
         cooldown-ms: 300000
+  # Multi-agent delegation (DelegateAgentTool).
+  delegation:
+    # Wall-clock budget for one delegateParallel batch (shared across all
+    # children — they run concurrently on virtual threads, so this is total
+    # latency, not per-child). 300 s headroom is needed because thinking
+    # models (Kimi / GLM / MiniMax) routinely take 90–290 s per LLM turn
+    # when the child must produce multi-section structured output.
+    parallel-timeout-seconds: 300
 
 # MateClaw Agent 配置
 mate:
   agent:
+    # Deterministic Markdown cleanup of the final answer (heading spaces, glued
+    # ---, table pipe alignment) before persistence / channel delivery. Set to
+    # false to pass model output through verbatim.
+    markdown-normalize-enabled: true
     graph:
       observation:
         # 与 GraphObservationProperties.java 默认值对齐，参考 openclaw token-budget 设计
@@ -160,23 +247,26 @@ mate:
         large-result-threshold: 32000
         min-rounds-for-summarize: 25
         head-ratio: 0.4
-        truncation-marker: "\n\n... [内容已截断，共 %d 字符，保留前后关键片段] ...\n\n"
+        truncation-marker: "\n\n...[TRUNCATED: %d chars total, middle omitted. Do NOT infer or fabricate omitted content; retrieve the full data (e.g. read_file) or tell the user the result is incomplete.]...\n\n"
     tool:
       timeout:
         default-timeout-seconds: 300
         per-category:
           shell: 120
           web: 30
-    # RFC-008 Phase 3: tool-result three-layer budget (per-result spill + per-turn aggregate budget).
-    # Layer 1 (per-tool cap) lives inside individual tools; Layer 2 spills oversized
-    # single results to disk; Layer 3 enforces an aggregate cap on the combined
-    # response size of one tool turn. The full output is preserved on disk and
-    # the in-context preview points the agent at the spill file (read_file tool).
+    # Tool-result budget (per-result spill + per-turn aggregate budget).
+    # The executor tries to spill the RAW result first so the full output is
+    # preserved on disk; the in-context preview points the agent at the spill
+    # file via read_file. When spill is disabled, the tool is on the exclusion
+    # list, the body is at or below the threshold, or the disk write fails,
+    # the executor falls back to inline hard-truncation to the same character
+    # cap. Per-turn aggregate caps the combined size across one tool turn.
     tool-result:
       enabled: true
-      per-result-threshold-chars: 16000   # was 4000 — prevents WebSearch spill-to-disk
-      per-turn-budget-chars: 32000        # was 16000 — headroom for multi-tool turns
+      per-result-threshold-chars: 8000    # aligned with executor hard cap; > this size → spill, ≤ → inline verbatim
+      per-turn-budget-chars: 32000        # headroom for multi-tool turns
       preview-head-chars: 800
+      excluded-tool-inline-chars: 2500
       storage-base-dir: ""
       # Retrieval-style tools that must NEVER be spilled. Spilling read_file's
       # output causes a recursion: the agent reads the spill path, that read also
@@ -186,6 +276,14 @@ mate:
       excluded-tools:
         - read_file
         - read_workspace_memory_file
+      # Spill files are deleted after this many days. Default 0 disables the
+      # scheduled sweep entirely so a summary/preview that points at a spill
+      # path stays valid for the whole life of the conversation. Files are
+      # still purged when the conversation is deleted explicitly via
+      # ConversationService.deleteConversation. Raise to a positive value if
+      # disk pressure outweighs recoverability for your deployment.
+      retention-days: 0
+      cleanup-cron: "0 0 3 * * ?"
     conversation:
       window:
         # 测试时临时调低：2000 token ≈ 2000 中文字，3 轮对话即可触发压缩
@@ -226,3 +324,14 @@ mate:
       contradiction-check-enabled: false       # experimental simple detection, enable after LLM batch impl
       trust-half-life-days: 60
       forget-enabled: true
+    # Always-on injection budget — bounds the per-turn size of the user/feedback structured block
+    system-block-max-chars: 4000               # char cap on the always-on block; over budget drops oldest by Updated date (LRU); 0 = unlimited
+    system-block-max-entries-per-type: 40       # max entries injected per type (user/feedback); 0 = unlimited
+    # Structured-memory consolidation — separate maintenance task; LLM merges duplicate/stale user/feedback entries (shared + per-owner) to curb storage growth
+    structured-consolidation-enabled: true            # off = injection cap only, no storage-side merge
+    structured-consolidation-min-entries: 8            # buckets with fewer entries skip the LLM call to save cost
+    structured-consolidation-cron: "0 30 3 * * ?"     # own schedule, decoupled from dreaming-enabled / dreaming-cron
+    structured-consolidation-max-owners-per-run: 50    # cap LLM cost per agent per run; remaining owners picked up next run; 0 = unlimited
+    # Always-on file ceilings — deterministic backstop so PROFILE.md / MEMORY.md (LLM-rewritten) cannot grow per-turn context without bound
+    profile-max-chars: 4000                            # PROFILE.md hard cap; truncates at a section boundary if the rewrite overruns; 0 = unlimited
+    memory-md-max-chars: 8000                          # MEMORY.md hard cap; 0 = unlimited

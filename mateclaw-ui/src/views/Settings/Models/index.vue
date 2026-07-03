@@ -116,6 +116,10 @@
     <!-- Embedding 模型（RFC Embedding UI） -->
     <EmbeddingModelsSection />
 
+    <!-- Multimodal sidecar routing: text-only primary models can delegate
+         image/video understanding to a vision/video model configured here. -->
+    <MultimodalSidecarSection />
+
     <div v-if="savedTip" class="save-tip">{{ savedTip }}</div>
 
     <!-- Provider Config Modal -->
@@ -172,18 +176,29 @@
       :enable-provider="enableProvider"
       @close="closeDrawer"
     />
+
+    <DeviceCodeDialog
+      :visible="deviceCodeDialog.visible"
+      :user-code="deviceCodeDialog.userCode"
+      :verification-url="deviceCodeDialog.verificationUrl"
+      :verification-url-complete="deviceCodeDialog.verificationUrlComplete"
+      :expires-at="deviceCodeDialog.expiresAt"
+      @close="closeDeviceCodeDialog"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, defineAsyncComponent, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { mcToast } from '@/composables/useMcToast'
+import { mcConfirm } from '@/components/common/useConfirm'
 import { useRoute, useRouter } from 'vue-router'
 import type { ProviderInfo, ProviderModelInfo } from '@/types'
 import { useProviders } from './useProviders'
 import ProviderCard from './ProviderCard.vue'
 import EmbeddingModelsSection from './EmbeddingModelsSection.vue'
+import MultimodalSidecarSection from './MultimodalSidecarSection.vue'
 // RFC-074 PR-1: defer modal JS until the user actually opens one — same
 // pattern as ChannelEditModal in commit 9300559b. Drops ~30KB from the
 // initial Settings/Models route chunk.
@@ -191,6 +206,7 @@ const ProviderConfigModal = defineAsyncComponent(() => import('./modals/Provider
 const ManageModelsModal = defineAsyncComponent(() => import('./modals/ManageModelsModal.vue'))
 // RFC-074 PR-2: drawer for browsing the catalog and opting into hidden built-ins.
 const AddProviderDrawer = defineAsyncComponent(() => import('./AddProviderDrawer.vue'))
+const DeviceCodeDialog = defineAsyncComponent(() => import('./modals/DeviceCodeDialog.vue'))
 
 const { t } = useI18n()
 const savedTip = ref('')
@@ -250,6 +266,8 @@ const {
   onIconError,
   handleOAuthLogin,
   handleOAuthRevoke,
+  deviceCodeDialog,
+  closeDeviceCodeDialog,
   // RFC-074 PR-2 — enablement / drawer
   catalog,
   drawerOpen,
@@ -299,20 +317,13 @@ onMounted(async () => {
 })
 
 async function onDisableProvider(provider: ProviderInfo) {
-  // ElMessageBox throws on cancel — that's our cancel branch.
-  try {
-    await ElMessageBox.confirm(
-      t('settings.model.disableConfirm', { name: provider.name }),
-      t('common.confirm'),
-      {
-        type: 'warning',
-        confirmButtonText: t('settings.model.disable'),
-        cancelButtonText: t('common.cancel'),
-      },
-    )
-  } catch {
-    return
-  }
+  const ok = await mcConfirm({
+    title: t('common.confirm'),
+    message: t('settings.model.disableConfirm', { name: provider.name }),
+    confirmText: t('settings.model.disable'),
+    tone: 'danger',
+  })
+  if (!ok) return
   await disableProvider(provider.id)
 }
 
@@ -322,7 +333,7 @@ async function onSaveApiKey({ provider, apiKey }: { provider: ProviderInfo; apiK
     await saveProviderApiKey(provider, apiKey)
     showSavedTip(t('settings.model.inlineApiKeySaved'))
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : t('settings.model.inlineApiKeySaveFailed'))
+    mcToast.error(error instanceof Error ? error.message : t('settings.model.inlineApiKeySaveFailed'))
   } finally {
     savingApiKeyId.value = null
   }
@@ -336,10 +347,13 @@ function onCardOAuthLogin(provider: ProviderInfo) {
 
 async function onSaveProvider() {
   try {
-    await saveProvider()
-    showSavedTip(t('settings.model.providerSaved'))
+    const saved = await saveProvider()
+    // Issue #39: saveProvider() returns false when client-side validation
+    // (e.g. provider id format) blocks the request — it has already shown
+    // its own mcToast.error, so don't follow up with a "saved" toast.
+    if (saved) showSavedTip(t('settings.model.providerSaved'))
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : t('settings.messages.saveFailed'))
+    mcToast.error(error instanceof Error ? error.message : t('settings.messages.saveFailed'))
   }
 }
 
@@ -353,7 +367,7 @@ async function onAddProviderModel() {
     await addProviderModel()
     showSavedTip(t('settings.model.modelAdded'))
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : t('settings.model.modelAddFailed'))
+    mcToast.error(error instanceof Error ? error.message : t('settings.model.modelAddFailed'))
   }
 }
 
@@ -362,7 +376,7 @@ async function onRemoveProviderModel(model: ProviderModelInfo) {
     await removeProviderModel(model)
     showSavedTip(t('settings.model.modelRemoved'))
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : t('settings.model.modelRemoveFailed'))
+    mcToast.error(error instanceof Error ? error.message : t('settings.model.modelRemoveFailed'))
   }
 }
 
@@ -371,7 +385,7 @@ async function onSetActiveModel(model: ProviderModelInfo) {
     await setActiveModel(model)
     showSavedTip(t('settings.model.activeChanged'))
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : t('settings.model.activeChangeFailed'))
+    mcToast.error(error instanceof Error ? error.message : t('settings.model.activeChangeFailed'))
   }
 }
 

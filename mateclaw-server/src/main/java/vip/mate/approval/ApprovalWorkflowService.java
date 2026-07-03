@@ -8,8 +8,11 @@ import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
+import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.context.event.EventListener;
 import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -17,11 +20,14 @@ import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 import vip.mate.agent.context.ChatOrigin;
 import vip.mate.agent.context.ChatOriginHolder;
+import vip.mate.approval.event.ApprovalResolutionEvent;
+import vip.mate.approval.event.WorkflowApprovalResolvedEvent;
 import vip.mate.approval.model.ToolApprovalEntity;
 import vip.mate.approval.repository.ToolApprovalMapper;
 import vip.mate.tool.guard.model.GuardEvaluation;
 import vip.mate.tool.guard.model.GuardFinding;
 import vip.mate.workspace.conversation.ConversationService;
+import vip.mate.workspace.conversation.event.ConversationDeletedEvent;
 
 import java.time.Instant;
 import java.time.LocalDateTime;
@@ -50,6 +56,12 @@ public class ApprovalWorkflowService implements ApplicationRunner {
     private final ToolApprovalMapper approvalMapper;
     private final ObjectMapper objectMapper;
     private final ConversationService conversationService;
+    /** Optional — injected only in full Spring context. The workflow
+     *  module listens for {@link WorkflowApprovalResolvedEvent}; in tests
+     *  that don't wire the workflow runtime this stays null and the
+     *  publish is a no-op. */
+    @Autowired(required = false)
+    private ApplicationEventPublisher events;
 
     /**
      * GC scheduler — owns the 5-minute clock for the entire approval state machine
@@ -79,6 +91,26 @@ public class ApprovalWorkflowService implements ApplicationRunner {
     void shutdownGc() {
         if (gcScheduler != null) {
             gcScheduler.shutdownNow();
+        }
+    }
+
+    /**
+     * Drop in-memory approval state for a deleted conversation. The cascade in
+     * {@link ConversationService#deleteConversation} already removed the
+     * {@code mate_tool_approval} rows; this listener clears the parallel
+     * {@code pendingMap} entries so {@code findPendingByConversation} cannot
+     * keep returning a ghost approval that points at a non-existent
+     * conversation row.
+     * <p>
+     * Runs after the DB cascade commits — see
+     * {@link ConversationDeletedEvent}.
+     */
+    @EventListener
+    public void onConversationDeleted(ConversationDeletedEvent event) {
+        int removed = approvalService.removeAllByConversation(event.conversationId());
+        if (removed > 0) {
+            log.info("[ApprovalWorkflow] Dropped {} in-memory pending entries for deleted conversation {}",
+                    removed, event.conversationId());
         }
     }
 
@@ -236,6 +268,78 @@ public class ApprovalWorkflowService implements ApplicationRunner {
                                 String toolCallPayload, String siblingToolCalls, String agentId) {
         return createPending(conversationId, userId, toolName, toolArguments, reason,
                 toolCallPayload, siblingToolCalls, agentId, null);
+    }
+
+    /**
+     * Workflow-scoped approval request — creates a {@code mate_tool_approval}
+     * row keyed to a workflow run + step instead of a conversation, so an
+     * {@code await_approval} step is visible in the same approval inbox the
+     * tool-approval flow uses. Returns the row's auto-generated long id; the
+     * caller (typically {@code AwaitApprovalStepAdapter}) writes that id back
+     * onto {@code mate_workflow_run_pause.external_approval_id} so a future
+     * approval-resolve callback can map "approval X resolved → resume run Y".
+     *
+     * <p>The approval row's {@code conversationId} is set to
+     * {@code "workflow:run:{runId}"} as a synthetic key — that lets the
+     * existing {@link ApprovalService#findPendingByConversation} surface the
+     * workflow approval to operator UIs without needing a parallel query
+     * surface. {@code toolName} is set to {@code "workflow:{kind}"} so the
+     * inbox can group / filter workflow approvals from tool approvals.
+     *
+     * <p>v0 keeps the resume path through {@code WorkflowResumeController}
+     * with the pauseToken; this method does not yet wire a resolve→resume
+     * callback. The approval row's purpose for v0 is operator visibility
+     * and a stable foreign key for the pause record.
+     */
+    public Long requestWorkflowApproval(long workspaceId,
+                                        long runId,
+                                        Long stepId,
+                                        String approvalKind,
+                                        String approvalMessage,
+                                        java.util.List<String> approverChannels,
+                                        Integer timeoutSecs) {
+        try {
+            ToolApprovalEntity entity = new ToolApprovalEntity();
+            // pendingId is the string handle the existing approval pipeline
+            // uses for resolve / get; "wf-" prefix lets future code branch
+            // on workflow-scoped vs tool-scoped approvals at a glance. The
+            // pending_id column is VARCHAR(32) so we trim a no-dashes UUID
+            // down to fit ("wf-" + 24 hex chars = 27 chars; collisions of
+            // 24 hex chars per workflow are astronomically rare and we
+            // also fall back to UNIQUE-key violation handling).
+            String shortId = java.util.UUID.randomUUID().toString()
+                    .replace("-", "").substring(0, 24);
+            entity.setPendingId("wf-" + shortId);
+            entity.setConversationId("workflow:run:" + runId);
+            String kind = approvalKind == null || approvalKind.isBlank() ? "manual" : approvalKind.trim();
+            entity.setToolName("workflow:" + kind);
+            entity.setSummary(approvalMessage == null ? "" : approvalMessage);
+            // Encode approver channels in tool_arguments so the inbox UI can
+            // render which channels were asked. Plain JSON to keep parsing
+            // trivial on the read path.
+            try {
+                if (approverChannels != null && !approverChannels.isEmpty()) {
+                    entity.setToolArguments(objectMapper.writeValueAsString(
+                            java.util.Map.of(
+                                    "runId", runId,
+                                    "stepId", stepId,
+                                    "approverChannels", approverChannels)));
+                }
+            } catch (Exception e) {
+                log.warn("[ApprovalWorkflow] failed to encode approverChannels: {}", e.getMessage());
+            }
+            entity.setStatus("PENDING");
+            entity.setCreatedAt(LocalDateTime.now());
+            entity.setExpireAt(LocalDateTime.now().plusSeconds(
+                    timeoutSecs != null && timeoutSecs > 0 ? timeoutSecs : 30 * 60));
+            approvalMapper.insert(entity);
+            log.info("[ApprovalWorkflow] requested workflow approval row id={}, runId={}, workspace={}, kind={}",
+                    entity.getId(), runId, workspaceId, kind);
+            return entity.getId();
+        } catch (Exception e) {
+            log.warn("[ApprovalWorkflow] requestWorkflowApproval failed: {}", e.getMessage());
+            return null;
+        }
     }
 
     /**
@@ -422,6 +526,90 @@ public class ApprovalWorkflowService implements ApplicationRunner {
         }
     }
 
+    // ==================== Global pending query (admin/notification surface) ====================
+
+    /**
+     * Default cap for {@link #listPendingFromDb(int)} when callers don't specify
+     * one, so a runaway pending table cannot drown the notification panel.
+     */
+    public static final int DEFAULT_PENDING_LIST_LIMIT = 200;
+
+    /**
+     * Hard ceiling regardless of caller-requested limit.
+     */
+    public static final int MAX_PENDING_LIST_LIMIT = 500;
+
+    /**
+     * Return every {@code PENDING} approval row, newest first, capped at {@code limit}.
+     * Reads from {@code mate_tool_approval} directly so restart / recovery edge
+     * cases cannot leave the in-memory map and the DB out of sync from a caller's
+     * perspective.
+     *
+     * <p>Payload shape matches {@link ApprovalService#getPendingByConversation},
+     * so the same frontend renderer can consume both surfaces.
+     */
+    public List<Map<String, Object>> listPendingFromDb(int limit) {
+        int effectiveLimit = limit <= 0 ? DEFAULT_PENDING_LIST_LIMIT
+                : Math.min(limit, MAX_PENDING_LIST_LIMIT);
+        List<ToolApprovalEntity> rows;
+        try {
+            rows = approvalMapper.selectList(
+                    new LambdaQueryWrapper<ToolApprovalEntity>()
+                            .eq(ToolApprovalEntity::getStatus, "PENDING")
+                            .orderByDesc(ToolApprovalEntity::getCreatedAt)
+                            .last("LIMIT " + effectiveLimit)
+            );
+        } catch (Exception e) {
+            log.warn("[ApprovalWorkflow] listPendingFromDb failed: {}", e.getMessage());
+            return List.of();
+        }
+        return rows.stream().map(this::toPendingPayload).toList();
+    }
+
+    /**
+     * Count of pending approvals in {@code mate_tool_approval}. Used by the
+     * notification summary endpoint; cheap enough to call on every poll.
+     */
+    public long countPendingFromDb() {
+        try {
+            Long n = approvalMapper.selectCount(
+                    new LambdaQueryWrapper<ToolApprovalEntity>()
+                            .eq(ToolApprovalEntity::getStatus, "PENDING")
+            );
+            return n == null ? 0L : n;
+        } catch (Exception e) {
+            log.warn("[ApprovalWorkflow] countPendingFromDb failed: {}", e.getMessage());
+            return 0L;
+        }
+    }
+
+    private Map<String, Object> toPendingPayload(ToolApprovalEntity entity) {
+        java.util.LinkedHashMap<String, Object> entry = new java.util.LinkedHashMap<>();
+        entry.put("pendingId", entity.getPendingId());
+        entry.put("conversationId", entity.getConversationId());
+        entry.put("agentId", entity.getAgentId());
+        entry.put("toolName", entity.getToolName());
+        entry.put("toolArguments", entity.getToolArguments() != null ? entity.getToolArguments() : "");
+        entry.put("status", "pending");
+        entry.put("createdAt", entity.getCreatedAt() != null ? entity.getCreatedAt().toString() : null);
+        if (entity.getFindingsJson() != null) {
+            entry.put("findingsJson", entity.getFindingsJson());
+        }
+        if (entity.getMaxSeverity() != null) {
+            entry.put("maxSeverity", entity.getMaxSeverity());
+        }
+        if (entity.getSummary() != null) {
+            entry.put("summary", entity.getSummary());
+        }
+        if (entity.getChannelType() != null) {
+            entry.put("channelType", entity.getChannelType());
+        }
+        if (entity.getRequesterName() != null) {
+            entry.put("requesterName", entity.getRequesterName());
+        }
+        return entry;
+    }
+
     // ---------- shared two-phase machinery ----------
 
     private ResolveOutcome performResolve(String pendingId, String userId,
@@ -483,6 +671,77 @@ public class ApprovalWorkflowService implements ApplicationRunner {
             if (userId != null) snapshot.setResolvedBy(userId);
             if (removeFromMap) approvalService.removeFromMap(snapshot.getPendingId());
         });
+
+        // Phase 4 — workflow bridge. Workflow-scoped approval rows
+        // (pendingId starting with "wf-") are linked to a paused workflow
+        // run via {@code mate_workflow_run_pause.external_approval_id}.
+        // Publishing the resolve here lets the workflow module's listener
+        // call WorkflowResumer with the matching outcome, so an operator
+        // approving in the inbox actually advances the workflow instead
+        // of leaving it paused forever. We publish AFTER commit so a tx
+        // rollback can't fire a stale resume; the row id is stable
+        // because the row already lived in DB.
+        if (events != null && snapshot.getPendingId() != null
+                && snapshot.getPendingId().startsWith("wf-")) {
+            // Look up the row id since the snapshot only carries the string
+            // pendingId, not the long primary key. One quick equality query.
+            try {
+                ToolApprovalEntity row = approvalMapper.selectOne(
+                        new LambdaQueryWrapper<ToolApprovalEntity>()
+                                .eq(ToolApprovalEntity::getPendingId, snapshot.getPendingId()));
+                if (row != null && row.getId() != null) {
+                    final long rowId = row.getId();
+                    final String pendingId = snapshot.getPendingId();
+                    afterCommit(() -> {
+                        try {
+                            events.publishEvent(new WorkflowApprovalResolvedEvent(
+                                    rowId, pendingId, snapshotStatus, /* workspaceId */ null));
+                        } catch (Exception e) {
+                            log.warn("[ApprovalWorkflow] failed to publish workflow-resolved event for {}: {}",
+                                    pendingId, e.getMessage());
+                        }
+                    });
+                }
+            } catch (Exception e) {
+                log.warn("[ApprovalWorkflow] approval row lookup for resolve event failed for {}: {}",
+                        snapshot.getPendingId(), e.getMessage());
+            }
+        }
+
+        // Phase 5 — generic resolution event so the auto-grant resolution log
+        // can record this final decision. Distinct from the workflow-bridge
+        // event above: this fires for EVERY resolved approval (not just wf-*),
+        // and its consumer writes one mate_approval_resolution_log row.
+        // SUPERSEDED is not a user decision — the replacement pending will fire
+        // its own event when it resolves, so we skip the event here.
+        if (events != null && !"SUPERSEDED".equals(dbStatus)) {
+            String decisionSource = "TIMEOUT".equals(dbStatus)
+                    ? "TIMEOUT"
+                    : "USER_MANUAL";
+            String note = "USER_MANUAL".equals(decisionSource) && "DENIED".equals(dbStatus)
+                    ? "denied"
+                    : null;
+            ApprovalResolutionEvent resolutionEvent = new ApprovalResolutionEvent(
+                    snapshot.getPendingId(),
+                    snapshot.getConversationId(),
+                    snapshot.getAgentId(),
+                    /* userId resolves to actor or original requester */
+                    userId != null ? userId : snapshot.getUserId(),
+                    snapshot.getToolName(),
+                    snapshot.getToolArguments(),
+                    snapshot.getMaxSeverity(),
+                    snapshot.getFindingsJson(),
+                    decisionSource,
+                    note);
+            afterCommit(() -> {
+                try {
+                    events.publishEvent(resolutionEvent);
+                } catch (Exception e) {
+                    log.warn("[ApprovalWorkflow] failed to publish ApprovalResolutionEvent for {}: {}",
+                            snapshot.getPendingId(), e.getMessage());
+                }
+            });
+        }
 
         boolean consumed = "consumed".equals(snapshotStatus);
         ResolveOutcome outcome = consumed

@@ -18,13 +18,17 @@ import org.springframework.ai.tool.ToolCallback;
 import org.springframework.util.StringUtils;
 import vip.mate.agent.AgentToolSet;
 import vip.mate.agent.GraphEventPublisher;
-import vip.mate.agent.ThinkingLevelHolder;
+import vip.mate.llm.chatmodel.ThinkingLevelHolder;
 import vip.mate.agent.graph.NodeStreamingChatHelper;
 import vip.mate.agent.context.ConversationWindowManager;
+import vip.mate.agent.context.LoopBudgetConfig;
+import vip.mate.agent.context.LoopMessageBudgeter;
 import vip.mate.agent.context.RuntimeContextInjector;
+import vip.mate.agent.context.TokenEstimator;
 import vip.mate.agent.graph.state.FinishReason;
 import vip.mate.agent.graph.state.MateClawStateAccessor;
 import vip.mate.agent.graph.state.MateClawStateKeys;
+import vip.mate.agent.graph.state.SourceEvidenceLedger;
 
 import vip.mate.channel.web.ChatStreamTracker;
 
@@ -52,6 +56,10 @@ public class ReasoningNode implements NodeAction {
 
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
+    private static MateClawStateAccessor.OutputBuilder reasonOutput() {
+        return MateClawStateAccessor.output();
+    }
+
     /**
      * 单次 LLM 调用的默认最大输出 token 数，防止退化输出无限生成。
      * <p>
@@ -67,7 +75,166 @@ public class ReasoningNode implements NodeAction {
     private static final int DEFAULT_MAX_OUTPUT_TOKENS = 16384;
 
     /**
-     * Hermes-agent style enforcement clause appended to every ReasoningNode
+     * Stateless singleton used to budget the per-iteration working message
+     * list. Static-final because the budgeter holds no mutable state — the
+     * choice keeps the existing ReasoningNode constructor surface unchanged
+     * (it already carries 13 parameters across 5 overloads) and makes the
+     * dependency obvious to anyone reading the class.
+     */
+    private static final LoopMessageBudgeter LOOP_BUDGETER = new LoopMessageBudgeter();
+
+    /**
+     * Fallback context window used when no provider-level value is wired in.
+     * Calibrated to the same default {@code ConversationWindowProperties}
+     * uses for its multi-turn budget so the two layers stay in sync. Models
+     * with smaller windows still benefit — the budgeter triggers earlier on
+     * raw message volume via {@code absoluteMaxMessages}.
+     */
+    private static final int DEFAULT_LOOP_CONTEXT_WINDOW_TOKENS = 128_000;
+
+    /**
+     * Conservative buffer added to the per-loop budget's reservedPrefixTokens
+     * to cover non-history prompt segments that are appended <em>after</em>
+     * the budget runs: the runtime-rendered skill catalog, runtime-context
+     * snapshot, wiki injection, progress ledger snapshot, and assorted
+     * marker SystemMessages. Underestimating here only delays the trigger
+     * slightly; loop invariants (anchor preservation, tool-pair integrity)
+     * are unaffected. Sized for a typical agent with 20–30 skills and
+     * moderate wiki content.
+     */
+    private static final int LOOP_PREFIX_AUXILIARY_RESERVE_TOKENS = 4_000;
+
+    /**
+     * DashScope's native chat API caps {@code max_tokens} at 8192 and returns a
+     * 400 {@code InvalidParameter} ("Range of max_tokens should be [1, 8192]")
+     * for anything larger. The failover layer misclassifies that 400 as
+     * "model not found" and silently switches to a different provider, so the
+     * per-call ceiling must be clamped to this value for DashScope-backed
+     * models — keeping {@link #DEFAULT_MAX_OUTPUT_TOKENS} for every other
+     * provider that does accept the larger budget.
+     */
+    private static final int DASHSCOPE_MAX_OUTPUT_TOKENS = 8192;
+
+    /**
+     * Max times to re-prompt the model when it returns a completely empty turn
+     * (no tool call, no content, no thinking) before accepting termination.
+     * A blank turn is otherwise treated as a final answer and ends the run; on
+     * long multi-step tasks that surfaces as the agent quitting mid-way.
+     */
+    private static final int MAX_EMPTY_COMPLETION_RETRIES = 2;
+
+    /**
+     * Number of newest tool-response messages kept verbatim in the model
+     * input; older ones have their bodies collapsed to a one-line "old
+     * output cleared" placeholder while keeping the toolCallId / tool name
+     * so the assistant/tool pairing remains valid. The latest few results
+     * are what the model is reasoning over right now — beyond that, the
+     * content is history and re-call (or read_file on the spill path) is
+     * cheaper than carrying every previous body forward across iterations.
+     */
+    private static final int KEEP_RECENT_TOOL_RESPONSES = 3;
+
+    /** Continuation nudge appended to the prompt when the model returns an empty turn. */
+    private static final String EMPTY_COMPLETION_NUDGE =
+            "Your previous turn was empty. If the task is not yet complete, continue now "
+            + "with the next concrete step — call a tool or write the next part. If every "
+            + "required step is already done, output the final answer to the user now.";
+
+    /**
+     * Continuation nudge for the most common premature-stop pattern: an empty
+     * turn immediately after a successful tool call. The tool result is already
+     * in context but the model stopped before writing the user-facing answer
+     * (e.g. a download URL produced by a send-file tool). Anchoring the nudge to
+     * the tool result recovers the answer in the same run instead of leaving the
+     * user to send another message to resume.
+     */
+    private static final String POST_TOOL_EMPTY_NUDGE =
+            "上一步工具已成功返回(结果在上文)。请基于工具结果直接给出面向用户的最终答复"
+            + "(例如下载地址 / 执行结论),不要停在思考阶段,也不要只描述\"接下来要做什么\"。";
+
+    /**
+     * Continuation nudge for a turn that carries reasoning/thinking but no
+     * visible content and no tool call. Interleaved-thinking models sometimes
+     * "decide" the task is done in their reasoning yet never emit the answer
+     * text; this re-prompts them to write it (or call the next tool).
+     */
+    private static final String THINKING_ONLY_NUDGE =
+            "你已完成思考但还没有输出正文。请现在把面向用户的最终答案写出来;"
+            + "如果还有未完成的步骤,则立即调用对应工具。";
+
+    /**
+     * Why a no-tool-call reasoning turn cannot yet be accepted as a final answer.
+     * Both non-FINAL states route a turn into the bounded continuation-nudge loop
+     * instead of letting the final-answer branch emit an empty string and end the
+     * run prematurely.
+     */
+    enum ContinuationIntent {
+        /**
+         * Real user-facing content present, or a tool call, or a failure owned by
+         * another branch (fatal / prompt-too-long / partial) — finalize normally.
+         */
+        FINAL,
+        /**
+         * Reasoning/thinking present but no visible content and no tool call. The
+         * model "thought it was done" without writing the answer — common on
+         * interleaved-thinking models after a tool result. Nudge it to emit it.
+         */
+        THINKING_ONLY,
+        /** No content, no thinking, no tool call — a fully blank turn. Nudge to continue. */
+        BLANK,
+    }
+
+    /**
+     * Classify a no-tool-call turn's continuation intent. Fatal / prompt-too-long
+     * / partial results are handled by their own branches and must not be misread
+     * as needing a nudge.
+     */
+    static ContinuationIntent classifyContinuation(NodeStreamingChatHelper.StreamResult result) {
+        if (result == null || result.hasToolCalls() || result.hasFatalError()
+                || result.isPromptTooLong() || result.partial()) {
+            return ContinuationIntent.FINAL;
+        }
+        boolean noContent = result.text() == null || result.text().isBlank();
+        if (!noContent) {
+            return ContinuationIntent.FINAL;
+        }
+        boolean noThinking = result.thinking() == null || result.thinking().isBlank();
+        return noThinking ? ContinuationIntent.BLANK : ContinuationIntent.THINKING_ONLY;
+    }
+
+    /**
+     * A fully blank turn (no tool call, no content, no thinking) is not a usable
+     * answer — it would route to the final-answer branch as an empty string and
+     * terminate the run. Retained as a thin predicate over {@link #classifyContinuation}.
+     */
+    static boolean isEmptyCompletion(NodeStreamingChatHelper.StreamResult result) {
+        return classifyContinuation(result) == ContinuationIntent.BLANK;
+    }
+
+    /**
+     * True when the newest conversational turn in the model input is a tool
+     * response — i.e. the model is about to reason over a fresh tool result. Used
+     * to pick the result-anchored continuation nudge for the common "empty turn
+     * right after a tool call" stop pattern.
+     */
+    static boolean lastTurnIsToolResponse(List<Message> messages) {
+        if (messages == null) {
+            return false;
+        }
+        for (int i = messages.size() - 1; i >= 0; i--) {
+            Message m = messages.get(i);
+            if (m instanceof ToolResponseMessage) {
+                return true;
+            }
+            if (m instanceof UserMessage || m instanceof AssistantMessage) {
+                return false;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Tool-use enforcement clause appended to every ReasoningNode
      * system prompt. Treats narration ("I will now …") as a protocol violation
      * to prevent the recurring failure mode where a model says it will call a
      * tool but emits the description as final_answer text instead.
@@ -82,10 +249,76 @@ public class ReasoningNode implements NodeAction {
             + "- 如果上一次工具调用因 args JSON 截断（max_tokens 超限）失败，\n"
             + "  请重新调用同一工具但**缩小内容**，或拆成多次顺序调用，**不要改成纯文字回答**。\n"
             + "- 只在确实没有合适工具，或所有工具步骤都已完成、可以最终回答用户时，\n"
-            + "  才输出无 tool_call 的纯文字回答。\n";
+            + "  才输出无 tool_call 的纯文字回答。\n\n"
+            + "## 进度跟踪（多步任务强制规则，不可绕过）\n\n"
+            + "**触发条件**：用户的任务包含 ≥3 个可枚举子目标 — 比如\n"
+            + "\"调研 10 个模型\"、\"逐节起草报告\"、\"批量生成 N 份文档\"、\n"
+            + "\"依次调用 N 个 API\"、\"对每个文件执行同一操作\"等。\n\n"
+            + "**必须做的事**：\n"
+            + "1. **第一轮回复就用并行 tool_calls 批量注册全部子目标为 `pending`**\n"
+            + "   一条回复里 N 个 `progress_update` 同时发出（不要串行）。\n"
+            + "   例：要调研 10 个模型，第一轮就发 10 个 `progress_update(stepKey=\"model_xxx\", status=\"pending\")`。\n"
+            + "2. **每开始一个子目标**前发 `progress_update(同 stepKey, status=\"in_progress\")`。\n"
+            + "3. **每完成一个子目标**后立即发 `progress_update(同 stepKey, status=\"done\")`。\n"
+            + "4. **无法继续**时发 `progress_update(同 stepKey, status=\"blocked\", note=\"具体原因\")`。\n\n"
+            + "**为什么必须**：\n"
+            + "- 系统在你**每一次推理前**注入一份 \"## 当前任务进度\" 快照。\n"
+            + "  这是你**唯一可信**的\"已完成清单\"——比你记忆里的步骤更权威，因为上下文窗口\n"
+            + "  会被裁剪，老的工具调用记录会消失，但 ledger 不会。\n"
+            + "- 不维护 ledger 的后果（实测）：\n"
+            + "  · 上下文裁剪后忘记自己做过的步骤，重复执行已完成项 → 浪费迭代预算\n"
+            + "  · 漏做项目 → 任务不完整 → 撞 max_iterations 还没干完\n"
+            + "  · ledger snapshot 永远显示初始状态，对你毫无帮助\n\n"
+            + "**例外**：单一问题、简单问答、不可拆解的请求 — 不需要用。\n";
+
+    private static final String GROUNDED_CONTRACT = "\n\n"
+            + "## 回答来源约束（强制规则）\n\n"
+            + "**核心原则**：你的回答必须完全基于工具返回的信息（证据），不得使用内部知识编造内容。\n\n"
+            + "**必须遵守**：\n"
+            + "1. **仅据证据作答**：如果工具返回的信息不足以回答问题，必须明确说明\"根据现有信息无法回答此问题\"。\n"
+            + "2. **标记引用来源**：回答中引用的每个事实性陈述都必须用方括号数字标记来源，例如 [1]、[2]。\n"
+            + "3. **文末列出来源**：在回答末尾列出所有引用的来源列表，格式为：\n"
+            + "   [1] 页面标题 - 章节（如有）\n"
+            + "   [2] 页面标题 - 章节（如有）\n"
+            + "4. **禁止捏造来源**：不得引用未在本次对话中通过工具获取的页面或文件。\n"
+            + "5. **内容忠实**：必须准确反映证据内容，不得歪曲、编造或过度推断。\n\n"
+            + "**违规后果**：未按规则引用来源或使用未验证的信息将导致回答被拒绝。\n";
+
+    private static String buildGroundedSystemPrompt(String basePrompt, boolean groundingEnforced) {
+        String prompt = basePrompt + TOOL_USE_ENFORCEMENT;
+        return groundingEnforced ? prompt + GROUNDED_CONTRACT : prompt;
+    }
+
+    /**
+     * The grounded-answer contract (cite-or-refuse) only fits agents that retrieve
+     * from a knowledge base. Detecting a bound {@code wiki_*} tool scopes the strict
+     * regime to those scenarios instead of degrading every agent — a casual agent
+     * with no KB should not be forced to refuse or emit [n] citations.
+     */
+    private boolean hasWikiTool() {
+        if (toolCallbacks == null) {
+            return false;
+        }
+        return toolCallbacks.stream().anyMatch(cb -> {
+            String name = cb.getToolDefinition().name();
+            return name != null && name.toLowerCase(Locale.ROOT).replace("-", "_").startsWith("wiki_");
+        });
+    }
 
     private final ChatModel chatModel;
     private final List<ToolCallback> toolCallbacks;
+    /**
+     * Full agent tool set, used for the per-turn disclosure split. Null in the
+     * legacy {@code (ChatModel, List)} path — that path falls back to
+     * {@link #toolCallbacks} verbatim with no split.
+     */
+    private final AgentToolSet toolSet;
+    /**
+     * Splits tools into core + already-enabled extensions per
+     * {@code ENABLED_EXTENSION_TOOLS}. Null disables the split (advertise the
+     * full {@link #toolCallbacks}).
+     */
+    private final vip.mate.tool.disclosure.ToolDisclosureService toolDisclosureService;
     private final String reasoningEffort;
     /**
      * PR-1.2 (RFC-049 L1-B): Whether the bound model's {@code ModelFamily} accepts
@@ -100,6 +333,22 @@ public class ReasoningNode implements NodeAction {
     private final int maxOutputTokens;
     /** Wiki 相关性注入（可选，null 时跳过） */
     private final vip.mate.wiki.service.WikiContextService wikiContextService;
+    /**
+     * Renders the {@code ## Skills} catalog each turn so its ordering reacts to
+     * skills loaded this run (load_skill pins). Null in legacy / test
+     * constructors — when null, no catalog segment is appended.
+     */
+    private final vip.mate.skill.runtime.SkillCatalogRenderer skillCatalogRenderer;
+
+    /**
+     * Loads the per-conversation progress ledger each reasoning step so a
+     * compact snapshot can be injected into {@code nonHistoryPrefix} —
+     * surviving message-window trims so the agent never loses track of
+     * "what is already done" on long multi-step tasks. Null in legacy /
+     * test constructors; when null the snapshot block is suppressed and
+     * the prompt is identical to pre-feature behavior.
+     */
+    private final vip.mate.agent.progress.ProgressLedgerService progressLedgerService;
 
     public ReasoningNode(ChatModel chatModel, AgentToolSet toolSet, String reasoningEffort,
                          NodeStreamingChatHelper streamingHelper,
@@ -143,8 +392,66 @@ public class ReasoningNode implements NodeAction {
                          ConversationWindowManager conversationWindowManager,
                          ChatStreamTracker streamTracker, int maxOutputTokens,
                          vip.mate.wiki.service.WikiContextService wikiContextService) {
+        this(chatModel, toolSet, reasoningEffort, supportsReasoningEffort, streamingHelper,
+                conversationWindowManager, streamTracker, maxOutputTokens, wikiContextService, null);
+    }
+
+    /**
+     * Primary constructor with the runtime {@link vip.mate.skill.runtime.SkillCatalogRenderer}.
+     * The catalog is rendered each turn (ordered by skills loaded this run)
+     * instead of being baked into the system prompt, so the prompt-cache prefix
+     * stays stable and load_skill pins float to the top.
+     */
+    public ReasoningNode(ChatModel chatModel, AgentToolSet toolSet, String reasoningEffort,
+                         boolean supportsReasoningEffort,
+                         NodeStreamingChatHelper streamingHelper,
+                         ConversationWindowManager conversationWindowManager,
+                         ChatStreamTracker streamTracker, int maxOutputTokens,
+                         vip.mate.wiki.service.WikiContextService wikiContextService,
+                         vip.mate.skill.runtime.SkillCatalogRenderer skillCatalogRenderer) {
+        this(chatModel, toolSet, reasoningEffort, supportsReasoningEffort, streamingHelper,
+                conversationWindowManager, streamTracker, maxOutputTokens, wikiContextService,
+                skillCatalogRenderer, null);
+    }
+
+    /**
+     * Backward-compatible delegate for callers built before the
+     * {@link vip.mate.agent.progress.ProgressLedgerService} was wired in —
+     * passes {@code null} so the progress snapshot block is suppressed.
+     * New call sites should use the 13-arg primary constructor below.
+     */
+    public ReasoningNode(ChatModel chatModel, AgentToolSet toolSet, String reasoningEffort,
+                         boolean supportsReasoningEffort,
+                         NodeStreamingChatHelper streamingHelper,
+                         ConversationWindowManager conversationWindowManager,
+                         ChatStreamTracker streamTracker, int maxOutputTokens,
+                         vip.mate.wiki.service.WikiContextService wikiContextService,
+                         vip.mate.skill.runtime.SkillCatalogRenderer skillCatalogRenderer,
+                         vip.mate.tool.disclosure.ToolDisclosureService toolDisclosureService) {
+        this(chatModel, toolSet, reasoningEffort, supportsReasoningEffort, streamingHelper,
+                conversationWindowManager, streamTracker, maxOutputTokens, wikiContextService,
+                skillCatalogRenderer, toolDisclosureService, null);
+    }
+
+    /**
+     * Primary constructor with the {@link vip.mate.agent.progress.ProgressLedgerService}.
+     * When non-null, a compact snapshot of the conversation's progress ledger
+     * is appended to {@code nonHistoryPrefix} each turn so the agent retains
+     * its "what is already done" view across message-window trims.
+     */
+    public ReasoningNode(ChatModel chatModel, AgentToolSet toolSet, String reasoningEffort,
+                         boolean supportsReasoningEffort,
+                         NodeStreamingChatHelper streamingHelper,
+                         ConversationWindowManager conversationWindowManager,
+                         ChatStreamTracker streamTracker, int maxOutputTokens,
+                         vip.mate.wiki.service.WikiContextService wikiContextService,
+                         vip.mate.skill.runtime.SkillCatalogRenderer skillCatalogRenderer,
+                         vip.mate.tool.disclosure.ToolDisclosureService toolDisclosureService,
+                         vip.mate.agent.progress.ProgressLedgerService progressLedgerService) {
         this.chatModel = chatModel;
+        this.toolSet = toolSet;
         this.toolCallbacks = toolSet.callbacks();
+        this.toolDisclosureService = toolDisclosureService;
         this.reasoningEffort = reasoningEffort;
         this.supportsReasoningEffort = supportsReasoningEffort;
         this.streamingHelper = streamingHelper;
@@ -152,6 +459,22 @@ public class ReasoningNode implements NodeAction {
         this.streamTracker = streamTracker;
         this.maxOutputTokens = maxOutputTokens > 0 ? maxOutputTokens : DEFAULT_MAX_OUTPUT_TOKENS;
         this.wikiContextService = wikiContextService;
+        this.skillCatalogRenderer = skillCatalogRenderer;
+        this.progressLedgerService = progressLedgerService;
+    }
+
+    /**
+     * Context window used by the per-loop budgeter. Returns the
+     * conversation-window manager's effective max input tokens when one is
+     * wired in (so L1 and L2 stay calibrated to the same model window),
+     * otherwise the documented fallback.
+     */
+    private int loopContextWindowTokens() {
+        if (conversationWindowManager != null) {
+            int v = conversationWindowManager.getDefaultMaxInputTokens();
+            if (v > 0) return v;
+        }
+        return DEFAULT_LOOP_CONTEXT_WINDOW_TOKENS;
     }
 
     public ReasoningNode(ChatModel chatModel, AgentToolSet toolSet, String reasoningEffort,
@@ -176,7 +499,9 @@ public class ReasoningNode implements NodeAction {
     @Deprecated
     public ReasoningNode(ChatModel chatModel, List<ToolCallback> toolCallbacks) {
         this.chatModel = chatModel;
+        this.toolSet = null;
         this.toolCallbacks = toolCallbacks;
+        this.toolDisclosureService = null;
         this.reasoningEffort = null;
         this.supportsReasoningEffort = false;
         this.streamingHelper = null;
@@ -184,6 +509,8 @@ public class ReasoningNode implements NodeAction {
         this.streamTracker = null;
         this.maxOutputTokens = DEFAULT_MAX_OUTPUT_TOKENS;
         this.wikiContextService = null;
+        this.skillCatalogRenderer = null;
+        this.progressLedgerService = null;
     }
 
     @Override
@@ -211,7 +538,7 @@ public class ReasoningNode implements NodeAction {
                         .toolCalls(List.of(toolCall))
                         .build();
 
-                return MateClawStateAccessor.output()
+                return reasonOutput()
                         .needsToolCall(true)
                         .toolCalls(List.of(toolCall))
                         .messages(List.of((Message) syntheticMsg))
@@ -232,116 +559,144 @@ public class ReasoningNode implements NodeAction {
 
         // ======= 构建 Prompt =======
         String systemPrompt = accessor.systemPrompt();
-        // RFC-049 follow-up: append a tool-use enforcement clause to every
-        // ReasoningNode call. Without this, models (especially DeepSeek thinking
-        // and Claude Opus) tend to "narrate" — emit a final_answer like "现在
-        // 直接生成立项材料 docx" instead of actually calling renderDocx, which
-        // makes the graph silently terminate at final_answer_node with the
-        // narration as the user-facing reply.
+        // Tool-use enforcement is always appended: without it some models tend to
+        // "narrate" instead of calling tools. The grounded contract (cite-or-refuse)
+        // is appended only when the agent has a knowledge-base (wiki_*) tool bound,
+        // so KB-grounded scenarios get strict source attribution while general
+        // agents keep their normal answering behaviour.
         //
-        // Pattern adopted from hermes-agent's TOOL_USE_ENFORCEMENT_GUIDANCE
-        // (`/agent/prompt_builder.py:179-191`). Appended to systemPrompt rather
-        // than woven into the AgentEntity-stored prompt so it stays out of the
-        // user-editable agent UI but is still always-on at runtime.
-        systemPrompt = systemPrompt + TOOL_USE_ENFORCEMENT;
+        // Appended at runtime rather than woven into the AgentEntity-stored
+        // prompt so it stays out of the user-editable agent UI but is still
+        // always-on for the runtime LLM.
+        systemPrompt = buildGroundedSystemPrompt(systemPrompt, hasWikiTool());
         List<Message> messages = accessor.messages();
 
-        // Guard against runaway message list growth.
+        // Per-loop budget: bound the working message list a single Reasoning
+        // iteration hands to the LLM. The previous fixed head=4 + tail=36 cut
+        // could lose the latest UserMessage once the ReAct loop accumulated
+        // tool calls/observations past ~70 messages — the user's question
+        // fell into the dropped middle, the LLM lost it, and the agent
+        // answered off-topic. LoopMessageBudgeter anchors the latest
+        // UserMessage as undroppable, sizes the tail by token budget instead
+        // of message count, and keeps the same bidirectional tool-pair
+        // integrity guard the old block already had. The L2 trim here is
+        // distinct from ConversationWindowManager (L1): L1 runs once per
+        // user turn and produces an LLM summary for multi-turn history; L2
+        // runs per reasoning iteration on what L1 already produced plus
+        // intra-turn tool-call growth.
         //
-        // CRITICAL: a naive head+tail cut can break the OpenAI-compatible protocol invariant
-        // that requires tool_call / tool_response pairs to be complete:
-        //
-        //   P0 (originally observed): AssistantMessage(tool_calls) falls into the dropped gap,
-        //      its ToolResponseMessage lands in the kept tail → provider sees an orphaned
-        //      ToolResponseMessage → kimi-code 400 "tool_call_id is not found".
-        //
-        //   P1 (symmetric): AssistantMessage(tool_calls) is kept in the head at the boundary,
-        //      its ToolResponseMessage falls into the dropped gap → provider sees an assistant
-        //      tool_call with no matching response → also a 400 on strict providers.
-        //
-        // Fix: perform the normal cut, then run an iterative bidirectional integrity pass until
-        // the list is stable:
-        //   • Remove any ToolResponseMessage whose parent AssistantMessage.tool_calls id was
-        //     dropped (P0).
-        //   • Remove any AssistantMessage whose tool_calls have no matching ToolResponseMessage
-        //     (P1).
-        // Iterate because a P1 removal could expose a new P0 orphan (and vice versa, though that
-        // is pathological in practice).  With ≤40 messages convergence is always fast.
-        // Dropping incomplete pairs is safe — prior iterations already processed those
-        // observations; the LLM needs the summary context, not the raw tool I/O.
-        final int MAX_LOOP_MESSAGES = 40;
-        if (messages.size() > MAX_LOOP_MESSAGES) {
-            log.warn("[ReasoningNode] Messages list too large ({} messages), trimming to {} for conversation {}",
-                    messages.size(), MAX_LOOP_MESSAGES, conversationId);
-            int headKeep = Math.min(4, messages.size());
-            int tailKeep = MAX_LOOP_MESSAGES - headKeep;
-            int tailStart = messages.size() - tailKeep;
-
-            List<Message> trimmed = new ArrayList<>(MAX_LOOP_MESSAGES);
-            trimmed.addAll(messages.subList(0, headKeep));
-            trimmed.addAll(messages.subList(tailStart, messages.size()));
-
-            // Iterative bidirectional integrity pass.
-            int totalRemoved = 0;
-            boolean changed;
-            do {
-                // Snapshot current tool_call ids and response ids.
-                Set<String> callIds = new java.util.HashSet<>();
-                Set<String> respIds = new java.util.HashSet<>();
-                for (Message m : trimmed) {
-                    if (m instanceof AssistantMessage am && am.getToolCalls() != null) {
-                        for (AssistantMessage.ToolCall tc : am.getToolCalls()) callIds.add(tc.id());
-                    }
-                    if (m instanceof ToolResponseMessage trm) {
-                        for (ToolResponseMessage.ToolResponse r : trm.getResponses()) respIds.add(r.id());
-                    }
-                }
-                int before = trimmed.size();
-                trimmed.removeIf(m -> {
-                    // P0: ToolResponseMessage whose parent tool_call was dropped
-                    if (m instanceof ToolResponseMessage trm) {
-                        return trm.getResponses().stream().anyMatch(r -> !callIds.contains(r.id()));
-                    }
-                    // P1: AssistantMessage whose tool_call has no ToolResponseMessage
-                    if (m instanceof AssistantMessage am && am.getToolCalls() != null
-                            && !am.getToolCalls().isEmpty()) {
-                        return am.getToolCalls().stream().anyMatch(tc -> !respIds.contains(tc.id()));
-                    }
-                    return false;
-                });
-                int removed = before - trimmed.size();
-                totalRemoved += removed;
-                changed = removed > 0;
-            } while (changed);
-
-            if (totalRemoved > 0) {
-                log.warn("[ReasoningNode] Removed {} message(s) with broken tool_call/response pairs "
-                        + "after trim (bidirectional integrity guard), conv={}", totalRemoved, conversationId);
-            }
-
-            messages = trimmed;
+        // Reserved prefix tokens cover the non-history portion of the
+        // prompt the LLM will receive: system prompt (with tool-use
+        // enforcement already appended), tool schemas, output reserve,
+        // and a buffer for skill catalog + runtime context + wiki
+        // injections that are added downstream. Underestimating here only
+        // delays the trigger slightly — invariants (anchor, pair integrity)
+        // still hold once budget fires.
+        int systemTokens = TokenEstimator.estimateTokens(systemPrompt);
+        int toolsTokens = TokenEstimator.estimateToolsTokens(toolCallbacks);
+        int loopReservedPrefixTokens = systemTokens + toolsTokens
+                + maxOutputTokens + LOOP_PREFIX_AUXILIARY_RESERVE_TOKENS;
+        LoopBudgetConfig loopCfg = LoopBudgetConfig.forContext(loopContextWindowTokens())
+                .withReservedPrefixTokens(loopReservedPrefixTokens);
+        LoopMessageBudgeter.Result budgeted = LOOP_BUDGETER.budget(messages, loopCfg);
+        // Only log when the budget actually modified the list — a triggered-
+        // but-no-op pass is normal (history fits comfortably under the tail
+        // budget) and would otherwise spam logs every iteration.
+        if (budgeted.trace().modified()) {
+            LoopMessageBudgeter.BudgetTrace t = budgeted.trace();
+            log.warn("[ReasoningNode] Loop budget trim: {} -> {} msgs (history {} -> {} tokens, "
+                    + "prefix~{}), head={}, tail={}, droppedMiddle={}, orphans={}, "
+                    + "anchorEnforced={}, anchorStitched={}, targetMaxTripped={}, "
+                    + "capExceededForPairIntegrity={}, minTailFloorApplied={}, conv={}",
+                    t.originalCount(), t.finalCount(), t.originalTokens(), t.finalTokens(),
+                    t.reservedPrefixTokens(),
+                    t.headKept(), t.tailKept(), t.droppedMiddle(), t.orphansRemoved(),
+                    t.anchorEnforced(), t.anchorStitched(), t.targetMaxTripped(),
+                    t.capExceededForPairIntegrity(), t.minTailFloorApplied(), conversationId);
         }
+        messages = budgeted.messages();
 
         String workspaceBasePath = state.value(vip.mate.agent.graph.state.MateClawStateKeys.WORKSPACE_BASE_PATH, "");
-        List<Message> promptMessages = new ArrayList<>();
-        promptMessages.add(new SystemMessage(systemPrompt));
-        promptMessages.add(new UserMessage(RuntimeContextInjector.buildContextMessage(workspaceBasePath)));
+        String agentIdStr = state.value(MateClawStateKeys.AGENT_ID, "");
+        String userMsg = state.value(MateClawStateKeys.USER_MESSAGE, "");
+        String runtimeModelName = state.value(MateClawStateKeys.RUNTIME_MODEL_NAME, "");
+        String runtimeProviderId = state.value(MateClawStateKeys.RUNTIME_PROVIDER_ID, "");
 
-        // Wiki 相关性注入：根据用户消息提取相关页面摘要
-        if (wikiContextService != null) {
-            String agentIdStr = state.value(MateClawStateKeys.AGENT_ID, "");
-            String userMsg = state.value(MateClawStateKeys.USER_MESSAGE, "");
-            try {
-                Long parsedAgentId = Long.parseLong(agentIdStr);
-                String wikiRelevant = wikiContextService.buildRelevantContext(parsedAgentId, userMsg);
-                if (wikiRelevant != null && !wikiRelevant.isBlank()) {
-                    promptMessages.add(new UserMessage(wikiRelevant));
-                }
-            } catch (NumberFormatException ignored) {
-                // agentId 无法解析时跳过 wiki 注入
+        // Build the non-history prefix ONCE. The PTL retry branch below
+        // reuses this list verbatim so the retried prompt has exactly the
+        // same system / runtime context / wiki injection as the original —
+        // the previous tail-only retry path silently dropped the wiki
+        // segment which led to "answer regressed after compaction"
+        // complaints on long sessions.
+        List<Message> nonHistoryPrefix = buildNonHistoryPrefix(systemPrompt, workspaceBasePath, agentIdStr, userMsg,
+                accessor.chatOrigin(), runtimeModelName, runtimeProviderId);
+
+        // Append the runtime-rendered skill catalog as a SEPARATE SystemMessage
+        // right after the skeleton system prompt. Keeping it out of the baked
+        // prompt keeps the stable prefix's prompt-cache hash intact, while
+        // re-rendering each turn lets skills loaded this run (load_skill) pin
+        // to the top of the catalog. Reused verbatim by the PTL retry branch.
+        if (skillCatalogRenderer != null) {
+            String skillCatalog = skillCatalogRenderer.render(accessor.loadedSkills());
+            if (skillCatalog != null && !skillCatalog.isBlank()) {
+                nonHistoryPrefix.add(1, new SystemMessage(skillCatalog));
             }
         }
 
+        // Inject the conversation's progress-ledger snapshot as a separate
+        // SystemMessage. Sits in nonHistoryPrefix (never trimmed) so the
+        // agent always sees its own "what's done / what's pending" record
+        // even after the message-window trim above drops the tool-call
+        // history that produced those done entries. Suppressed when the
+        // ledger column is empty so short single-turn questions stay
+        // prompt-cache-friendly.
+        //
+        // Past iteration ~10, also emit a stale-reminder SystemMessage when
+        // the ledger looks abandoned (empty after many turns, or no
+        // progress_update in >90s). This pushes the model back to the
+        // ledger discipline before it drifts into the "I'm doing the work
+        // but never marking it" failure mode observed in round-4 of the
+        // LLM-review smoke test.
+        if (progressLedgerService != null && conversationId != null && !conversationId.isBlank()) {
+            try {
+                vip.mate.agent.progress.ProgressLedger ledger =
+                        progressLedgerService.load(conversationId);
+                String snapshot = ledger.renderSnapshot();
+                if (snapshot != null) {
+                    nonHistoryPrefix.add(new SystemMessage(snapshot));
+                }
+                String staleReminder = ledger.renderStaleReminder(
+                        accessor.iterationCount(), java.time.Instant.now());
+                if (staleReminder != null) {
+                    nonHistoryPrefix.add(new SystemMessage(staleReminder));
+                    log.info("[ReasoningNode] Injected stale-ledger reminder at iter {} for conv {}",
+                            accessor.iterationCount(), conversationId);
+                }
+            } catch (Exception e) {
+                // Never let a ledger-side failure break the reasoning step.
+                log.warn("[ReasoningNode] Failed to load progress ledger for {}: {}",
+                        conversationId, e.getMessage());
+            }
+        }
+
+        if (conversationWindowManager != null) {
+            // Age-based compaction first: drop the body of tool responses
+            // older than the K most recent into a one-line placeholder that
+            // keeps the toolCallId / tool name (so the assistant/tool pair
+            // stays valid) and, for spilled bodies, preserves the on-disk
+            // path so read_file can still recover the original. Without
+            // this, even spilled previews (~1-2 KB each) accumulate across
+            // 30+ tool calls and bloat the prompt the model sees every turn.
+            messages = conversationWindowManager.compactAgedToolResponses(
+                    messages, KEEP_RECENT_TOOL_RESPONSES);
+            // Pass conversationId + workspaceBasePath so oversized older
+            // tool results can be spilled to the workspace spill directory
+            // (preserving the full body for read_file recovery) instead of
+            // being rewritten into a lossy single-line summary.
+            messages = conversationWindowManager.pruneOldToolResultsForModelInput(
+                    messages, conversationId, workspaceBasePath);
+        }
+        List<Message> promptMessages = new ArrayList<>(nonHistoryPrefix);
         promptMessages.addAll(messages);
 
         // 请求级思考深度覆盖（ThinkingLevelHolder 由 AgentService 设置）
@@ -349,7 +704,15 @@ public class ReasoningNode implements NodeAction {
         log.info("[ReasoningNode] thinkingLevel={}, effectiveReasoningEffort={}, nodeDefault={}",
                 ThinkingLevelHolder.get(), effectiveReasoning, this.reasoningEffort);
 
-        ChatOptions options = buildChatOptions(effectiveReasoning);
+        // Progressive disclosure: advertise only core tools plus the extensions
+        // enabled this run, computed fresh each turn from ENABLED_EXTENSION_TOOLS
+        // so an enable_tool call earlier in this loop takes effect immediately.
+        // Falls back to the full tool set when no disclosure service is wired.
+        List<ToolCallback> activeCallbacks = (toolDisclosureService != null && toolSet != null)
+                ? toolDisclosureService.split(toolSet, accessor.enabledExtensionTools()).activeCallbacks()
+                : toolCallbacks;
+
+        ChatOptions options = buildChatOptions(effectiveReasoning, activeCallbacks);
 
         Prompt prompt = new Prompt(promptMessages, options);
 
@@ -359,11 +722,22 @@ public class ReasoningNode implements NodeAction {
         // PTL compact retry 会再 +1。
         int nextLlmCallCount = accessor.llmCallCount() + 1;
         log.debug("[ReasoningNode] Calling LLM with {} messages, {} tool definitions, iteration {}/{}, llmCallCount={}",
-                promptMessages.size(), toolCallbacks.size(),
+                promptMessages.size(), activeCallbacks.size(),
                 accessor.iterationCount(), accessor.maxIterations(), nextLlmCallCount);
 
         GraphEventPublisher.GraphEvent phaseEvent = GraphEventPublisher.phase("reasoning",
                 Map.of("iteration", accessor.iterationCount()));
+        // Iteration boundary marker for the parent ReAct loop. Reason
+        // distinguishes the very first turn of the conversation from a
+        // mid-loop repeat for consumers grouping events into per-turn cards.
+        boolean iterationEventsOn = streamTracker == null || streamTracker.isIterationEventsEnabled();
+        GraphEventPublisher.GraphEvent iterStartEvent = iterationEventsOn
+                ? GraphEventPublisher.iterationStart(
+                        accessor.iterationCount(),
+                        accessor.iterationCount() == 0 ? "first_turn" : "react_step",
+                        "parent",
+                        null)
+                : null;
         pushPhase(conversationId, "reasoning", Map.of(
                 "iteration", accessor.iterationCount(),
                 "llmCallCount", nextLlmCallCount
@@ -373,19 +747,34 @@ public class ReasoningNode implements NodeAction {
         try {
             result = streamingHelper.streamCall(chatModel, prompt, conversationId, "reasoning");
 
-            // PTL 处理：压缩后重试
+            // PTL 处理：结构化压缩后重试。复用 nonHistoryPrefix 保证重试
+            // Prompt 仍带 wiki / runtime context；早期的 tail-only 路径会把
+            // wiki 段一起丢掉，重试后的 prompt 比原始更短少一层信息。
             if (result.isPromptTooLong() && conversationWindowManager != null) {
-                log.warn("[ReasoningNode] Prompt too long, attempting compaction and retry");
-                List<Message> compactedMessages = conversationWindowManager.compactForRetry(messages);
+                log.warn("[ReasoningNode] Prompt too long, attempting STRUCTURED compaction and retry");
+
+                // MateClawStateAccessor.agentId() returns String per state
+                // schema; the ConversationWindowManager hook expects Long
+                // (nullable — onPreCompress is a no-op when null).
+                Long agentIdLong = null;
+                if (!agentIdStr.isEmpty()) {
+                    try {
+                        agentIdLong = Long.parseLong(agentIdStr);
+                    } catch (NumberFormatException ignored) {
+                        // Same fallback as the non-history prefix builder above.
+                    }
+                }
+
+                List<Message> compactedMessages = conversationWindowManager.compactForRetry(
+                        messages, chatModel, conversationId, agentIdLong);
+
                 if (compactedMessages != null && compactedMessages.size() < messages.size()) {
-                    List<Message> retryPromptMessages = new ArrayList<>();
-                    retryPromptMessages.add(new SystemMessage(systemPrompt));
-                    retryPromptMessages.add(new UserMessage(RuntimeContextInjector.buildContextMessage(workspaceBasePath)));
+                    // Reuse the SAME non-history prefix — wiki/runtime context preserved.
+                    List<Message> retryPromptMessages = new ArrayList<>(nonHistoryPrefix);
                     retryPromptMessages.addAll(compactedMessages);
                     Prompt retryPrompt = new Prompt(retryPromptMessages, options);
                     log.info("[ReasoningNode] Retrying with compacted messages: {} -> {} messages",
                             messages.size(), compactedMessages.size());
-                    // compact retry 是第 2 次 LLM 调用，先递增再调用
                     nextLlmCallCount++;
                     pushPhase(conversationId, "reasoning", Map.of(
                             "iteration", accessor.iterationCount(),
@@ -397,13 +786,53 @@ public class ReasoningNode implements NodeAction {
                     log.warn("[ReasoningNode] Compaction did not reduce messages, cannot retry");
                 }
             }
+
+            // Continuation guard: a no-tool-call turn with no visible content is
+            // not a real answer, whether it is fully blank or carries only
+            // reasoning. The final-answer branch would otherwise treat it as
+            // "done" (finalAnswer="") and end the run prematurely. Two shapes:
+            //   BLANK         — no content, no thinking, no tool call. Seen under
+            //                   heavy message-window trimming on long multi-step
+            //                   tasks (a 10-item research task stopping at item 2).
+            //   THINKING_ONLY — reasoning present but no content and no tool call.
+            //                   Interleaved-thinking models "decide" they are done
+            //                   in their reasoning yet never emit the answer text;
+            //                   most often right after a tool result (e.g. a
+            //                   send-file tool succeeds but the download URL is
+            //                   never written, so the user has to send another
+            //                   message to resume).
+            // Re-prompt to continue — bounded, so a model that genuinely has
+            // nothing left still terminates cleanly through the normal
+            // empty-answer path below. When the newest turn is a tool result, an
+            // answer-anchored nudge recovers the user-facing reply in the same run.
+            int emptyRetries = 0;
+            for (ContinuationIntent intent = classifyContinuation(result);
+                    emptyRetries < MAX_EMPTY_COMPLETION_RETRIES && intent != ContinuationIntent.FINAL;
+                    intent = classifyContinuation(result)) {
+                emptyRetries++;
+                boolean afterTool = lastTurnIsToolResponse(promptMessages);
+                String nudge = afterTool
+                        ? POST_TOOL_EMPTY_NUDGE
+                        : (intent == ContinuationIntent.THINKING_ONLY
+                                ? THINKING_ONLY_NUDGE
+                                : EMPTY_COMPLETION_NUDGE);
+                log.warn("[ReasoningNode] {} completion (afterTool={}); nudging to continue "
+                                + "(retry {}/{}), conv={}",
+                        intent, afterTool, emptyRetries, MAX_EMPTY_COMPLETION_RETRIES, conversationId);
+                List<Message> nudgedMessages = new ArrayList<>(promptMessages);
+                nudgedMessages.add(new UserMessage(nudge));
+                Prompt nudgePrompt = new Prompt(nudgedMessages, options);
+                nextLlmCallCount++;
+                result = streamingHelper.streamCall(
+                        chatModel, nudgePrompt, conversationId, "reasoning_empty_retry");
+            }
         } catch (CancellationException ce) {
             // "调用已发出但尚未产出内容时用户停止" — streamHelper 抛 CancellationException。
             // 返回空 finalAnswer + STOPPED，让 FinalAnswerNode 按 STOPPED 语义处理。
             // 必须显式清零 needsToolCall/shouldSummarize，防止前一轮残留标志导致误路由。
             log.info("[ReasoningNode] CancellationException during LLM call (user stopped before first token), " +
                     "returning empty answer with STOPPED, llmCallCount={}", nextLlmCallCount);
-            return MateClawStateAccessor.output()
+            return reasonOutput()
                     .finalAnswer("")
                     .needsToolCall(false)
                     .shouldSummarize(false)
@@ -422,7 +851,7 @@ public class ReasoningNode implements NodeAction {
             String partialThinking = result.thinking() != null ? result.thinking() : "";
             log.info("[ReasoningNode] Stop with partial content ({} chars, thinking {} chars), flushing as final answer",
                     partialText.length(), partialThinking.length());
-            var builder = MateClawStateAccessor.output()
+            var builder = reasonOutput()
                     .finalAnswer(partialText)
                     .needsToolCall(false)
                     .shouldSummarize(false)
@@ -437,13 +866,86 @@ public class ReasoningNode implements NodeAction {
             return builder.build();
         }
 
+        // Order matters: the partial-truncation branch MUST sit before
+        // hasFatalError(). hasFatalError() is "no text + no tool calls + non-
+        // null errorMessage", which is also the shape of a thinking-only cap
+        // result (text is empty by definition). Without this ordering the
+        // soft cap would be re-promoted to ERROR_FALLBACK and we'd lose the
+        // INCOMPLETE semantics.
+
+        if (result.partial() && "thinking_only_no_content".equals(result.errorMessage())) {
+            // Soft thinking-only loop: the helper disposed the upstream stream
+            // because the model accumulated >= THINKING_ONLY_HARD_CAP_CHARS of
+            // reasoning_content without emitting any visible content or tool
+            // calls. Treat as INCOMPLETE rather than fatal — the thinking text
+            // has already been streamed and is preserved for the UI's collapse
+            // panel; the user gets a short fallback line they can retry from.
+            String partialThinking = result.thinking() != null ? result.thinking() : "";
+            log.warn("[ReasoningNode] Thinking-only soft cap hit ({} thinking chars, no content/tools); " +
+                            "INCOMPLETE",
+                    partialThinking.length());
+            var builder = reasonOutput()
+                    .needsToolCall(false)
+                    .shouldSummarize(false)
+                    .finalAnswer("（模型在思考阶段停留过久且未给出最终答案，请重试或拆分问题。）")
+                    .llmCallCount(nextLlmCallCount)
+                    .finishReason(FinishReason.INCOMPLETE)
+                    .contentStreamed(false)
+                    .thinkingStreamed(true)
+                    .mergeUsage(state, result);
+            if (!partialThinking.isEmpty()) {
+                builder.finalThinking(partialThinking);
+            }
+            return builder.build();
+        }
+
+        if (result.partial() && "content_repetition".equals(result.errorMessage())) {
+            // Reasoning loop: the helper disposed the stream because the
+            // model emitted the same paragraph 4+ times in a row (qwen3.6
+            // / deepseek-r1 self-arguing pattern). The streamed text
+            // already showed the duplicates to the user — we can't unsend
+            // SSE chunks — but the persisted finalAnswer should be ONE
+            // clean copy so the IM channel reply and any page-reload
+            // history don't show the wall of repetition. Skip
+            // FinalAnswerNode's evidence validation: the answer is
+            // already truncated, applying validateAnswer on top would
+            // double-stamp warnings on something the user already knows
+            // is incomplete.
+            String rawContent = result.text() != null ? result.text() : "";
+            String dedupedAnswer = NodeStreamingChatHelper.dedupTrailingRepeats(
+                    rawContent,
+                    NodeStreamingChatHelper.CONTENT_REPEAT_MIN_PERIOD,
+                    NodeStreamingChatHelper.CONTENT_REPEAT_MAX_PERIOD);
+            log.warn("[ReasoningNode] Content-repetition cap hit (raw={} chars → deduped={} chars); " +
+                            "INCOMPLETE",
+                    rawContent.length(), dedupedAnswer.length());
+            var builder = reasonOutput()
+                    .needsToolCall(false)
+                    .shouldSummarize(false)
+                    .finalAnswer(dedupedAnswer.isEmpty()
+                            ? "（模型反复输出同一段内容，已自动截断。请尝试重新生成或换个问法。）"
+                            : dedupedAnswer)
+                    .llmCallCount(nextLlmCallCount)
+                    .finishReason(FinishReason.INCOMPLETE)
+                    // contentStreamed=true because the user already saw
+                    // the looping text in their bubble; persisting again
+                    // via streamedContent would replay it.
+                    .contentStreamed(true)
+                    .thinkingStreamed(result.thinking() != null && !result.thinking().isEmpty())
+                    .mergeUsage(state, result);
+            if (result.thinking() != null && !result.thinking().isEmpty()) {
+                builder.finalThinking(result.thinking());
+            }
+            return builder.build();
+        }
+
         // Fatal error：直接设置 finalAnswer 为错误文案 + ERROR_FALLBACK，
         // 不走 LimitExceededNode（后者会再发一次 LLM 调用，语义不对且对认证/配额错误会再失败）。
         // ReasoningDispatcher 看到 !needsToolCall && !shouldSummarize → finalAnswerNode，
         // FinalAnswerNode 检测到 existingAnswer 非空时直接使用，finishReason 保持 ERROR_FALLBACK。
         if (result.hasFatalError()) {
             log.error("[ReasoningNode] Fatal LLM error: {}", result.errorMessage());
-            return MateClawStateAccessor.output()
+            return reasonOutput()
                     .needsToolCall(false)
                     .shouldSummarize(false)
                     .finalAnswer("[错误] " + result.errorMessage())
@@ -456,7 +958,8 @@ public class ReasoningNode implements NodeAction {
         }
 
         if (result.partial()) {
-            log.warn("[ReasoningNode] Partial LLM result ({} chars), treating as final answer", result.text().length());
+            int partialChars = result.text() != null ? result.text().length() : 0;
+            log.warn("[ReasoningNode] Partial LLM result ({} chars), treating as final answer", partialChars);
         }
 
         if (result.hasToolCalls()) {
@@ -468,7 +971,7 @@ public class ReasoningNode implements NodeAction {
                     "toolCount", result.toolCalls().size()
             ));
 
-            return MateClawStateAccessor.output()
+            return reasonOutput()
                     .needsToolCall(true)
                     .shouldSummarize(false)
                     .toolCalls(result.toolCalls())
@@ -481,7 +984,7 @@ public class ReasoningNode implements NodeAction {
                     .thinkingStreamed(!result.thinking().isEmpty())
                     .llmCallCount(nextLlmCallCount)
                     .mergeUsage(state, result)
-                    .events(List.of(phaseEvent))
+                    .events(buildEvents(phaseEvent, iterStartEvent))
                     .build();
         } else {
             String content = result.text();
@@ -490,21 +993,49 @@ public class ReasoningNode implements NodeAction {
                     "iteration", accessor.iterationCount(),
                     "answerChars", content != null ? content.length() : 0
             ));
+            String answerWithSources = accessor.sourceEvidenceLedger()
+                    .appendWikiSourceTable(content != null ? content : "");
+            SourceEvidenceLedger.Validation validation =
+                    accessor.sourceEvidenceLedger().validateAnswer(answerWithSources);
+            boolean evidenceInsufficient = !validation.valid();
+            String finalAnswer = evidenceInsufficient
+                    ? evidenceWarning(validation.unsupportedReferences())
+                    : answerWithSources;
+            if (evidenceInsufficient) {
+                log.warn("[ReasoningNode] Evidence insufficient for final answer, unsupportedReferences={}",
+                        validation.unsupportedReferences());
+            }
 
-            return MateClawStateAccessor.output()
+            // Final-answer path: iteration ends in this same node because
+            // ReAct never re-enters the loop afterwards.
+            GraphEventPublisher.GraphEvent iterEndEvent = iterationEventsOn
+                    ? GraphEventPublisher.iterationEnd(accessor.iterationCount(),
+                            "parent", null,
+                            content != null ? content.length() : 0,
+                            result.thinking() != null ? result.thinking().length() : 0)
+                    : null;
+            return reasonOutput()
                     .needsToolCall(false)
                     .shouldSummarize(false)
-                    .finalAnswer(content != null ? content : "")
+                    .finalAnswer(finalAnswer)
                     .finalThinking(result.thinking())
                     .messages(List.of((Message) result.assistantMessage()))
                     .currentPhase("reasoning")
-                    .contentStreamed(true)
+                    .streamedContent(evidenceInsufficient ? (content != null ? content : "") : "")
+                    .finishReason(evidenceInsufficient ? FinishReason.EVIDENCE_INSUFFICIENT : FinishReason.NORMAL)
+                    .contentStreamed(!evidenceInsufficient && Objects.equals(answerWithSources, content != null ? content : ""))
                     .thinkingStreamed(!result.thinking().isEmpty())
                     .llmCallCount(nextLlmCallCount)
                     .mergeUsage(state, result)
-                    .events(List.of(phaseEvent))
+                    .events(buildEvents(phaseEvent, iterStartEvent, iterEndEvent))
                     .build();
         }
+    }
+
+    private static String evidenceWarning(List<String> unsupportedReferences) {
+        return "\n\n[证据不足] 以下引用未出现在本轮已读取/搜索到的工具证据中，或缺少有效来源标注："
+                + String.join(", ", unsupportedReferences)
+                + "。请继续检索/读取相关证据后再下结论。";
     }
 
     private AssistantMessage.ToolCall deserializeToolCall(String json) {
@@ -523,6 +1054,82 @@ public class ReasoningNode implements NodeAction {
         }
     }
 
+    /**
+     * Compose the per-call event list, dropping any null entries so the
+     * iteration-boundary toggle ({@code mateclaw.stream.iteration-events})
+     * works without forcing every caller into branching code.
+     */
+    private static List<GraphEventPublisher.GraphEvent> buildEvents(GraphEventPublisher.GraphEvent... events) {
+        List<GraphEventPublisher.GraphEvent> out = new ArrayList<>(events.length);
+        for (GraphEventPublisher.GraphEvent ev : events) {
+            if (ev != null) out.add(ev);
+        }
+        return out;
+    }
+
+    /**
+     * Build the part of the Prompt that does not depend on history messages:
+     * system prompt, workspace runtime context, and (when wiring permits) the
+     * wiki relevant-pages snippet. Extracted so the initial Prompt assembly
+     * and the PTL retry path can share one source of truth — historically
+     * these were two parallel code paths and the retry one silently dropped
+     * the wiki injection.
+     * <p>
+     * {@code systemPrompt} is consumed as-is; the upstream callsite has
+     * already appended the tool-use enforcement clause, so this helper must
+     * NOT re-append it (doing so would duplicate the clause on every retry).
+     *
+     * @param systemPrompt      Fully-built system prompt (with tool-use
+     *                          enforcement already appended upstream).
+     * @param workspaceBasePath Active workspace directory; passed to
+     *                          {@link RuntimeContextInjector}.
+     * @param agentIdStr        Agent ID as carried in graph state — parsed
+     *                          to {@code Long} only when non-empty and
+     *                          numeric; otherwise the wiki segment is
+     *                          skipped (matches the pre-refactor behavior).
+     * @param userMsg           Current user message used by
+     *                          {@code WikiContextService} to score
+     *                          relevance.
+     */
+    // Package-private so ReasoningNodePtlPromptTest can directly assert on
+    // the wiki / runtime-context layout; the production callsites inside
+    // this class call it via {@code this.buildNonHistoryPrefix(...)} so
+    // narrowing the visibility doesn't change behavior.
+    List<Message> buildNonHistoryPrefix(String systemPrompt,
+                                        String workspaceBasePath,
+                                        String agentIdStr,
+                                        String userMsg,
+                                        vip.mate.agent.context.ChatOrigin chatOrigin,
+                                        String runtimeModelName,
+                                        String runtimeProviderId) {
+        List<Message> prefix = new ArrayList<>();
+        prefix.add(new SystemMessage(systemPrompt));
+        prefix.add(new UserMessage(RuntimeContextInjector.buildContextMessage(
+                workspaceBasePath, null, chatOrigin, runtimeModelName, runtimeProviderId)));
+        // When this turn already recalled the user's own current project from
+        // structured memory, skip auto-injecting knowledge-base reference context.
+        // Otherwise the KB pages (reference material, possibly about unrelated
+        // projects) compete with — and tend to override — the user's actual
+        // project identity. The agent can still query the wiki on demand.
+        boolean projectRecalled = userMsg != null
+                && userMsg.contains(vip.mate.memory.service.StructuredMemoryService.PROJECT_RECALLED_MARKER);
+        if (projectRecalled) {
+            log.debug("[ReasoningNode] Skipping wiki-relevant injection: user's project was recalled from memory this turn");
+        }
+        if (!projectRecalled && wikiContextService != null && agentIdStr != null && !agentIdStr.isEmpty()) {
+            try {
+                Long parsedAgentId = Long.parseLong(agentIdStr);
+                String wikiRelevant = wikiContextService.buildRelevantContext(parsedAgentId, userMsg);
+                if (wikiRelevant != null && !wikiRelevant.isBlank()) {
+                    prefix.add(new UserMessage(wikiRelevant));
+                }
+            } catch (NumberFormatException ignored) {
+                // agentId not numeric — skip wiki injection (matches prior behavior).
+            }
+        }
+        return prefix;
+    }
+
     private void pushPhase(String conversationId, String phase, Map<String, Object> extra) {
         if (streamTracker == null || !StringUtils.hasText(conversationId)) {
             return;
@@ -536,12 +1143,12 @@ public class ReasoningNode implements NodeAction {
      * - AnthropicChatModel → AnthropicChatOptions（支持 extended thinking）
      * - 其他（OpenAI/DashScope）→ OpenAiChatOptions（支持 reasoningEffort）
      */
-    private ChatOptions buildChatOptions(String effectiveReasoning) {
+    private ChatOptions buildChatOptions(String effectiveReasoning, List<ToolCallback> activeCallbacks) {
         // Anthropic 协议模型（AnthropicChatModel）：MiniMax 也用此协议但不支持 thinking
         if (chatModel instanceof org.springframework.ai.anthropic.AnthropicChatModel anthropicModel) {
             org.springframework.ai.anthropic.AnthropicChatOptions.Builder builder =
                     org.springframework.ai.anthropic.AnthropicChatOptions.builder()
-                    .toolCallbacks(toolCallbacks)
+                    .toolCallbacks(activeCallbacks)
                     .internalToolExecutionEnabled(false);
 
             // 仅对真正的 Claude 模型启用 extended thinking（MiniMax 等走 Anthropic 协议但不支持）
@@ -575,9 +1182,19 @@ public class ReasoningNode implements NodeAction {
         // 始终使用 OpenAiChatOptions（而非 ToolCallingChatOptions），
         // 因为 ToolCallingChatOptions 会丢失 OpenAI 特有参数（streamUsage 等），
         // 导致 Kimi 等 OpenAI 兼容 API 响应异常或提前截断。
+        // DashScope rejects max_tokens above its 8192 ceiling with a 400 that
+        // the failover layer misreads as "model not found"; clamp so a
+        // DashScope-backed model never overflows the provider limit.
+        int effectiveMaxTokens = maxOutputTokens;
+        if (chatModel instanceof com.alibaba.cloud.ai.dashscope.chat.DashScopeChatModel
+                && effectiveMaxTokens > DASHSCOPE_MAX_OUTPUT_TOKENS) {
+            log.debug("[ReasoningNode] Clamping max_tokens {} -> {} for DashScope-backed model",
+                    effectiveMaxTokens, DASHSCOPE_MAX_OUTPUT_TOKENS);
+            effectiveMaxTokens = DASHSCOPE_MAX_OUTPUT_TOKENS;
+        }
         OpenAiChatOptions.Builder oaiBuilder = OpenAiChatOptions.builder()
-                .toolCallbacks(toolCallbacks)
-                .maxTokens(maxOutputTokens);
+                .toolCallbacks(activeCallbacks)
+                .maxTokens(effectiveMaxTokens);
         if (StringUtils.hasText(effectiveReasoning)) {
             oaiBuilder.reasoningEffort(effectiveReasoning);
         }

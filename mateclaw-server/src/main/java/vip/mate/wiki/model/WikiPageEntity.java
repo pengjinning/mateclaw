@@ -38,6 +38,16 @@ public class WikiPageEntity {
     @TableField(updateStrategy = FieldStrategy.ALWAYS)
     private String outgoingLinks;
 
+    /**
+     * Alternate concept names this page also covers (JSON array, e.g.
+     * ["叶绿体","线粒体"]). Set for discrimination / composite pages that absorb
+     * several fine-grained concepts which never became standalone pages. The
+     * post-ingestion link reconciler uses these so a [[叶绿体]] reference from
+     * another page resolves to this page instead of dangling.
+     */
+    @TableField(updateStrategy = FieldStrategy.ALWAYS)
+    private String aliases;
+
     /** 来源原始材料 ID（JSON 数组） */
     @TableField(updateStrategy = FieldStrategy.ALWAYS)
     private String sourceRawIds;
@@ -48,6 +58,42 @@ public class WikiPageEntity {
 
     /** Page type: entity / concept / source / synthesis */
     private String pageType;
+
+    /**
+     * Structured pageType metadata (schema-validated fields) as a JSON object.
+     * Stored as a blob rather than exploded into per-field columns so each KB
+     * can define its own schema without altering the table. Written with the
+     * full page save path; partial column updates must avoid touching it.
+     */
+    @TableField(updateStrategy = FieldStrategy.ALWAYS)
+    private String metadataJson;
+
+    /** Last metadata validation outcome: {@code ok} / {@code warning} / {@code invalid}. */
+    private String metadataValidationStatus;
+
+    /** Metadata validation warnings/errors as a JSON array (field, reason, source, rawValuePreview). */
+    @TableField(updateStrategy = FieldStrategy.ALWAYS)
+    private String metadataValidationJson;
+
+    /** Template key used when generating this page, when applicable. */
+    private String templateKey;
+
+    /** Profile version in effect when the page was generated or last validated. */
+    private Integer profileVersion;
+
+    /** Knowledge layer derived from the pageType profile: {@code fact} / {@code experience}. */
+    private String knowledgeLayer;
+
+    /** Fact page ids this (experience) page depends on, as a JSON array. Source of truth is the dependency table. */
+    @TableField(updateStrategy = FieldStrategy.ALWAYS)
+    private String dependsOnJson;
+
+    /** {@code 1} when an upstream fact page changed and this page may be out of date. */
+    private Integer stale;
+
+    /** Why the page is stale (fact page id, time, reason) as JSON. */
+    @TableField(updateStrategy = FieldStrategy.ALWAYS)
+    private String staleReasonJson;
 
     /** Purpose hint for LLM ingest routing */
     private String purposeHint;
@@ -72,6 +118,35 @@ public class WikiPageEntity {
      * source-raw lineage) should stay queryable.
      */
     private Integer archived;
+
+    /**
+     * Page-level embedding (float32 little-endian) used by the semantic
+     * retriever to surface pages whose generated content does not appear
+     * in any source raw's chunks — typically synthesis pages produced by
+     * a transformation. {@code null} = not yet embedded.
+     */
+    private byte[] embedding;
+
+    /** Model name that produced {@link #embedding}; used for re-embed detection. */
+    private String embeddingModel;
+
+    /** Input-format version for {@link #embedding}; bumped when the embedding builder changes. */
+    private String embeddingTextVersion;
+
+    /**
+     * JSON array of outlink targets present in {@link #content} but missing
+     * from the active KB slug set. Empty array = scanned, all targets resolve;
+     * {@code null} = never scanned. Recomputed in the same transaction as any
+     * content save/update, and by the on-demand KB-wide lint scan job.
+     */
+    @TableField(updateStrategy = FieldStrategy.ALWAYS)
+    private String brokenLinks;
+
+    /**
+     * Timestamp of the most recent {@link #brokenLinks} recompute. The lint UI
+     * banner uses this to mark stale data ("scanned 3 days ago — rescan?").
+     */
+    private LocalDateTime brokenLinksScannedAt;
 
     @TableField(fill = FieldFill.INSERT)
     private LocalDateTime createTime;

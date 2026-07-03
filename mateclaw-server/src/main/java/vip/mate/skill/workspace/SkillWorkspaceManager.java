@@ -3,13 +3,9 @@ package vip.mate.skill.workspace;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.ApplicationEventPublisher;
-import org.springframework.core.io.Resource;
-import org.springframework.core.io.support.PathMatchingResourcePatternResolver;
-import org.springframework.core.io.support.ResourcePatternResolver;
 import org.springframework.stereotype.Service;
 
 import java.io.IOException;
-import java.io.InputStream;
 import java.nio.file.*;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.time.LocalDateTime;
@@ -51,10 +47,36 @@ public class SkillWorkspaceManager {
     }
 
     /**
-     * 按约定解析 skill 工作区路径：{root}/{skillName}/
+     * Resolve the conventional skill workspace path: {@code {root}/{sanitizedName}}.
+     * <p>
+     * Deterministic in {@code skillName} alone (no filesystem-state dependency). The
+     * non-ASCII collision fixed in #254 comes from {@link #sanitizeNameForFs} preserving
+     * Unicode letters/digits, so distinct names already map to distinct directories. No
+     * {@code -hash} suffix is appended: skill names are charset-constrained, so two names
+     * sanitizing to the same string is not a real case, and keeping the bare name avoids
+     * changing the path scheme for every existing skill (which would orphan already-created
+     * workspaces with no migration).
      */
     public Path resolveConventionPath(String skillName) {
-        return getWorkspaceRoot().resolve(sanitizeName(skillName));
+        return getWorkspaceRoot().resolve(sanitizeNameForFs(skillName));
+    }
+
+    /**
+     * Sanitize a skill name into a filesystem-safe directory segment.
+     * <p>
+     * Keeps the same charset as the legacy {@code [a-zA-Z0-9_.-]} rule but additionally
+     * preserves Unicode letters/digits ({@code \p{L}\p{N}}), so non-ASCII names no longer
+     * collapse to underscores and collide (#254). Everything else — path separators,
+     * control characters, whitespace — becomes {@code _}. Hyphens are kept (not folded to
+     * {@code _}) so existing kebab-case skill paths (e.g. {@code browser-cdp}) are unchanged
+     * across upgrades; only the Unicode handling differs from the legacy behavior.
+     */
+    private String sanitizeNameForFs(String name) {
+        if (name == null || name.isBlank()) {
+            return "unnamed";
+        }
+        String cleaned = name.strip().replaceAll("[^\\p{L}\\p{N}_.\\-]", "_");
+        return cleaned.isEmpty() ? "unnamed" : cleaned;
     }
 
     /**
@@ -120,11 +142,18 @@ public class SkillWorkspaceManager {
             Files.createDirectories(workspaceDir.resolve("scripts"));
 
             Path skillMd = workspaceDir.resolve("SKILL.md");
-            if (overwrite || !Files.exists(skillMd)) {
-                String content = (initialContent != null && !initialContent.isBlank())
-                        ? initialContent
-                        : buildDefaultSkillMd(skillName);
+            String content = (initialContent != null && !initialContent.isBlank())
+                    ? initialContent
+                    : buildDefaultSkillMd(skillName);
+            if (overwrite) {
                 Files.writeString(skillMd, content);
+            } else {
+                // 原子创建，避免并发上传时的 TOCTOU 竞态
+                try {
+                    Files.writeString(skillMd, content, StandardOpenOption.CREATE_NEW);
+                } catch (FileAlreadyExistsException e) {
+                    // 另一线程已创建，跳过写入
+                }
             }
 
             log.info("Initialized skill workspace: {} (overwrite={})", workspaceDir, overwrite);
@@ -137,12 +166,72 @@ public class SkillWorkspaceManager {
     }
 
     /**
-     * 归档 workspace 到 {root}/.archived/{name}-{timestamp}/
+     * RFC-090 §14.5 — physically remove the workspace directory. Used
+     * by hard-delete only; uninstall still calls
+     * {@link #archiveWorkspace} so users can recover by re-installing.
      */
-    public void archiveWorkspace(String skillName) {
+    public void purgeWorkspace(String skillName) {
+        Path workspaceDir = resolveConventionPath(skillName);
+        if (!Files.exists(workspaceDir)) return;
+        try {
+            // Walk and delete bottom-up so non-empty dirs go away too.
+            try (var stream = Files.walk(workspaceDir)) {
+                stream.sorted(java.util.Comparator.reverseOrder()).forEach(p -> {
+                    try {
+                        Files.deleteIfExists(p);
+                    } catch (IOException ignored) {
+                        /* leave partial cleanup; best effort */
+                    }
+                });
+            }
+            log.info("Purged skill workspace: {}", workspaceDir);
+            eventPublisher.publishEvent(new SkillWorkspaceEvent(skillName,
+                    SkillWorkspaceEvent.Type.ARCHIVED, workspaceDir));
+        } catch (IOException e) {
+            log.warn("Failed to purge workspace for skill '{}': {}", skillName, e.getMessage());
+        }
+    }
+
+    /**
+     * Tri-state outcome of {@link #archiveWorkspace}. {@code MISSING} is a
+     * commit-safe no-op — the runtime accepts skills that live only in
+     * {@code mate_skill.skill_content} with no convention workspace — while
+     * {@code FAILED} is a real error callers requiring atomicity must honor.
+     */
+    public enum ArchiveResult {
+        /** Workspace directory existed and was moved to {@code .archived/}. */
+        MOVED,
+        /** No convention workspace directory — commit-safe no-op. */
+        MISSING,
+        /** Workspace existed but the move failed (IOException). */
+        FAILED
+    }
+
+    /** Symmetric tri-state outcome of {@link #restoreWorkspace}. */
+    public enum RestoreResult {
+        /** Archive directory existed and was moved back into place. */
+        MOVED,
+        /** No archive directory found — DB-only skill or nothing to restore. */
+        MISSING,
+        /** Archive directory existed but the move-back failed (IOException). */
+        FAILED
+    }
+
+    /**
+     * Move {@code {root}/{name}/} to {@code {root}/.archived/{name}-{ts}/}.
+     *
+     * <p>Returns {@link ArchiveResult#MISSING} when the workspace doesn't
+     * exist — callers may treat this as a successful no-op since the runtime
+     * accepts skills that live only in {@code mate_skill.skill_content}.
+     * Returns {@link ArchiveResult#FAILED} on IOException; callers requiring
+     * atomicity must refuse to commit derived state. Returns
+     * {@link ArchiveResult#MOVED} on success, having already published
+     * {@link SkillWorkspaceEvent.Type#ARCHIVED}.
+     */
+    public ArchiveResult archiveWorkspace(String skillName) {
         Path workspaceDir = resolveConventionPath(skillName);
         if (!Files.exists(workspaceDir)) {
-            return;
+            return ArchiveResult.MISSING;
         }
 
         try {
@@ -155,8 +244,69 @@ public class SkillWorkspaceManager {
             Files.move(workspaceDir, archiveDir, StandardCopyOption.ATOMIC_MOVE);
             log.info("Archived skill workspace: {} → {}", workspaceDir, archiveDir);
             eventPublisher.publishEvent(new SkillWorkspaceEvent(skillName, SkillWorkspaceEvent.Type.ARCHIVED, archiveDir));
+            return ArchiveResult.MOVED;
         } catch (IOException e) {
             log.warn("Failed to archive workspace for skill '{}': {}", skillName, e.getMessage());
+            return ArchiveResult.FAILED;
+        }
+    }
+
+    /**
+     * Move the most recent {@code .archived/{name}-{ts}/} directory back to
+     * the convention path. Symmetric to {@link #archiveWorkspace}.
+     *
+     * <p>Returns {@link RestoreResult#MISSING} when there is no archive
+     * directory to restore (a DB-only skill, or the convention path is
+     * already populated) — callers treat this as a no-op. Returns
+     * {@link RestoreResult#FAILED} when an archive directory exists but the
+     * move-back fails.
+     */
+    public RestoreResult restoreWorkspace(String skillName) {
+        Path target = resolveConventionPath(skillName);
+        if (Files.exists(target)) {
+            log.warn("restoreWorkspace skipped: target {} already exists", target);
+            return RestoreResult.MISSING;
+        }
+        Path archiveRoot = getWorkspaceRoot().resolve(".archived");
+        if (!Files.exists(archiveRoot)) {
+            return RestoreResult.MISSING;
+        }
+
+        Optional<Path> newest = listArchivedFor(archiveRoot, sanitizeName(skillName));
+        if (newest.isEmpty()) {
+            return RestoreResult.MISSING;
+        }
+
+        try {
+            Files.move(newest.get(), target, StandardCopyOption.ATOMIC_MOVE);
+            log.info("Restored skill workspace: {} → {}", newest.get(), target);
+            eventPublisher.publishEvent(new SkillWorkspaceEvent(
+                    skillName, SkillWorkspaceEvent.Type.CREATED, target));
+            return RestoreResult.MOVED;
+        } catch (IOException e) {
+            log.warn("Failed to restore workspace for skill '{}': {}", skillName, e.getMessage());
+            return RestoreResult.FAILED;
+        }
+    }
+
+    /**
+     * Most recent archive directory for {@code sanitizedName}. Archive names
+     * are {@code {sanitizedName}-{yyyyMMdd-HHmmss}}; the timestamp suffix is
+     * matched exactly so a name like {@code foo} never picks up an archive of
+     * {@code foo-bar}. Lexical order on the fixed-width timestamp equals
+     * chronological order.
+     */
+    private Optional<Path> listArchivedFor(Path archiveRoot, String sanitizedName) {
+        java.util.regex.Pattern suffix =
+                java.util.regex.Pattern.compile(java.util.regex.Pattern.quote(sanitizedName) + "-\\d{8}-\\d{6}");
+        try (var stream = Files.list(archiveRoot)) {
+            return stream
+                    .filter(Files::isDirectory)
+                    .filter(p -> suffix.matcher(p.getFileName().toString()).matches())
+                    .max(Comparator.comparing(p -> p.getFileName().toString()));
+        } catch (IOException e) {
+            log.warn("Failed to list archive directory {}: {}", archiveRoot, e.getMessage());
+            return Optional.empty();
         }
     }
 
@@ -214,6 +364,158 @@ public class SkillWorkspaceManager {
         Path workspaceDir = resolveConventionPath(skillName);
         cleanDirectoryContents(workspaceDir.resolve("references"));
         cleanDirectoryContents(workspaceDir.resolve("scripts"));
+    }
+
+    /**
+     * Outcome of {@link #applyBundleFiles}, exposing per-bucket counters so
+     * the installer can log a meaningful summary and the admin UI can show
+     * what actually changed.
+     */
+    public record ApplyBundleResult(
+            int referencesWritten,
+            int referencesPruned,
+            boolean referencesPreservedDueToEmptyBundle,
+            int scriptsWritten,
+            int scriptsPruned,
+            boolean scriptsPreservedDueToEmptyBundle
+    ) {}
+
+    /**
+     * Apply a bundle's references/ + scripts/ to the workspace using
+     * write-then-prune semantics:
+     * <ol>
+     *   <li>Write every entry from the bundle (overwrites same paths).</li>
+     *   <li>Delete any pre-existing file under references/ or scripts/ that
+     *       is NOT in the bundle.</li>
+     * </ol>
+     *
+     * <p>Empty-bundle safety: if the bundle has zero entries for a bucket
+     * AND the workspace already has files in that bucket, the bucket is
+     * left untouched (no pruning) unless {@code force=true}. This protects
+     * against malformed uploads, network truncation, and parser bugs that
+     * would otherwise wipe a user's scripts on reinstall — the same class
+     * of regression that an earlier patch fixed for SKILL.md.
+     *
+     * @param skillName  workspace owner
+     * @param references new bundle's references map (key = path under references/)
+     * @param scripts    new bundle's scripts map (key = path under scripts/)
+     * @param force      bypass the empty-bundle guard (admin-only switch)
+     * @return per-bucket apply summary (never null)
+     */
+    public ApplyBundleResult applyBundleFiles(String skillName,
+                                              Map<String, String> references,
+                                              Map<String, String> scripts,
+                                              boolean force) {
+        Path workspaceDir = resolveConventionPath(skillName);
+        try {
+            Files.createDirectories(workspaceDir.resolve("references"));
+            Files.createDirectories(workspaceDir.resolve("scripts"));
+        } catch (IOException e) {
+            log.warn("Failed to ensure data dirs for skill '{}': {}", skillName, e.getMessage());
+        }
+
+        int refsWritten = applyBucket(skillName, "references/", references);
+        int scriptsWritten = applyBucket(skillName, "scripts/", scripts);
+
+        var refsPrune = pruneBucket(workspaceDir.resolve("references"),
+                normalizeKeys(references), force, skillName, "references");
+        var scriptsPrune = pruneBucket(workspaceDir.resolve("scripts"),
+                normalizeKeys(scripts), force, skillName, "scripts");
+
+        return new ApplyBundleResult(
+                refsWritten, refsPrune.deleted(), refsPrune.preservedDueToEmpty(),
+                scriptsWritten, scriptsPrune.deleted(), scriptsPrune.preservedDueToEmpty()
+        );
+    }
+
+    private int applyBucket(String skillName, String bucketPrefix, Map<String, String> entries) {
+        if (entries == null || entries.isEmpty()) return 0;
+        int written = 0;
+        for (var e : entries.entrySet()) {
+            String key = e.getKey();
+            String relative = key.startsWith(bucketPrefix) ? key : (bucketPrefix + key);
+            try {
+                writeWorkspaceFile(skillName, relative, e.getValue());
+                written++;
+            } catch (RuntimeException ex) {
+                log.warn("Failed to write {} for skill '{}': {}", relative, skillName, ex.getMessage());
+            }
+        }
+        return written;
+    }
+
+    /** Strip a leading "<bucket>/" prefix so the key matches the path relative to the bucket dir. */
+    private Set<String> normalizeKeys(Map<String, String> entries) {
+        if (entries == null || entries.isEmpty()) return Collections.emptySet();
+        Set<String> out = new HashSet<>(entries.size() * 2);
+        for (String key : entries.keySet()) {
+            String k = key.replace('\\', '/');
+            int firstSlash = k.indexOf('/');
+            if (firstSlash > 0 && (k.startsWith("references/") || k.startsWith("scripts/"))) {
+                out.add(k.substring(firstSlash + 1));
+            } else {
+                out.add(k);
+            }
+        }
+        return out;
+    }
+
+    private record PruneOutcome(int deleted, boolean preservedDueToEmpty) {}
+
+    private PruneOutcome pruneBucket(Path bucketDir, Set<String> keep, boolean force,
+                                     String skillName, String bucketLabel) {
+        if (!Files.exists(bucketDir) || !Files.isDirectory(bucketDir)) {
+            return new PruneOutcome(0, false);
+        }
+
+        // Empty-bundle guard: if the new bundle has nothing for this bucket
+        // and there's at least one file on disk, refuse to prune unless the
+        // caller explicitly asked for it. Logged so the operator can see why
+        // their "clean install" didn't actually clean.
+        if (keep.isEmpty() && !force) {
+            try (var stream = Files.walk(bucketDir)) {
+                boolean hasAny = stream.filter(Files::isRegularFile).findFirst().isPresent();
+                if (hasAny) {
+                    log.warn("Refusing to prune {}/{}/ — new bundle is empty and would wipe existing files. " +
+                            "Pass force=true to override.", skillName, bucketLabel);
+                    return new PruneOutcome(0, true);
+                }
+            } catch (IOException e) {
+                log.warn("Failed to inspect {}/{}/: {}", skillName, bucketLabel, e.getMessage());
+                return new PruneOutcome(0, false);
+            }
+        }
+
+        int deleted = 0;
+        try (var stream = Files.walk(bucketDir)) {
+            List<Path> files = stream.filter(Files::isRegularFile).toList();
+            for (Path file : files) {
+                String relative = bucketDir.relativize(file).toString().replace('\\', '/');
+                if (!keep.contains(relative)) {
+                    try {
+                        Files.delete(file);
+                        deleted++;
+                    } catch (IOException e) {
+                        log.warn("Failed to prune {}/{}/{}: {}", skillName, bucketLabel, relative, e.getMessage());
+                    }
+                }
+            }
+            // Best-effort: tidy up emptied subdirs (leave the bucket root in place).
+            try (var dirs = Files.walk(bucketDir)) {
+                dirs.sorted(java.util.Comparator.reverseOrder())
+                        .filter(p -> Files.isDirectory(p) && !p.equals(bucketDir))
+                        .forEach(p -> {
+                            try (var children = Files.list(p)) {
+                                if (children.findAny().isEmpty()) Files.delete(p);
+                            } catch (IOException ignored) {
+                                /* leave non-empty / locked dirs in place */
+                            }
+                        });
+            }
+        } catch (IOException e) {
+            log.warn("Failed to prune {}/{}/: {}", skillName, bucketLabel, e.getMessage());
+        }
+        return new PruneOutcome(deleted, false);
     }
 
     /**
@@ -313,215 +615,6 @@ public class SkillWorkspaceManager {
         }
 
         return info;
-    }
-
-    // ==================== 预置技能同步 ====================
-
-    /**
-     * 将 classpath 下 bundledSkillsPath 目录中的预置技能同步到 workspace root。
-     * <p>
-     * 规则：
-     * <ul>
-     *   <li>仅当目标目录不存在时同步（不覆盖用户本地修改）</li>
-     *   <li>支持文本和二进制文件（.so、.dll 等按字节流复制）</li>
-     *   <li>JAR 和开发模式均可用（基于 Spring ResourcePatternResolver）</li>
-     * </ul>
-     *
-     * @return 同步的技能名称列表
-     */
-    public List<String> syncBundledSkills() {
-        String bundledPath = properties.getBundledSkillsPath();
-        if (bundledPath == null || bundledPath.isBlank()) {
-            return List.of();
-        }
-
-        List<String> synced = new ArrayList<>();
-        ResourcePatternResolver resolver = new PathMatchingResourcePatternResolver();
-
-        try {
-            // 扫描 classpath:skills/**/SKILL.md 来发现预置技能
-            String pattern = ResourcePatternResolver.CLASSPATH_ALL_URL_PREFIX
-                    + bundledPath + "/*/SKILL.md";
-            Resource[] skillMdResources = resolver.getResources(pattern);
-
-            for (Resource skillMdResource : skillMdResources) {
-                String skillName = extractSkillName(skillMdResource, bundledPath);
-                if (skillName == null || skillName.isBlank()) {
-                    continue;
-                }
-
-                Path targetDir = resolveConventionPath(skillName);
-                if (Files.exists(targetDir)) {
-                    // 版本比对：classpath version > workspace version 时覆盖升级
-                    String bundledVersion = parseFrontmatterVersion(skillMdResource);
-                    Path workspaceMd = targetDir.resolve("SKILL.md");
-                    String workspaceVersion = Files.exists(workspaceMd)
-                            ? parseFrontmatterVersionFromPath(workspaceMd) : null;
-
-                    if (bundledVersion != null && isNewerVersion(bundledVersion, workspaceVersion)) {
-                        log.info("Bundled skill '{}' version {} > workspace version {}, upgrading",
-                                skillName, bundledVersion, workspaceVersion);
-                        archiveWorkspace(skillName);
-                        syncSingleBundledSkill(resolver, bundledPath, skillName, targetDir);
-                        synced.add(skillName);
-                        eventPublisher.publishEvent(
-                                new SkillWorkspaceEvent(skillName, SkillWorkspaceEvent.Type.CREATED, targetDir));
-                    } else {
-                        log.debug("Bundled skill '{}' workspace version is current (bundled={}, workspace={}), skipping",
-                                skillName, bundledVersion, workspaceVersion);
-                    }
-                    continue;
-                }
-
-                // 目录不存在：首次同步
-                syncSingleBundledSkill(resolver, bundledPath, skillName, targetDir);
-                synced.add(skillName);
-                log.info("Synced bundled skill '{}' → {}", skillName, targetDir);
-                eventPublisher.publishEvent(
-                        new SkillWorkspaceEvent(skillName, SkillWorkspaceEvent.Type.CREATED, targetDir));
-            }
-        } catch (IOException e) {
-            log.warn("Failed to scan bundled skills from classpath:{}/: {}", bundledPath, e.getMessage());
-        }
-
-        return synced;
-    }
-
-    /**
-     * 从 SKILL.md resource 的 URI 中提取技能名称
-     * URI 格式如：classpath:skills/etf-analyzer/SKILL.md
-     */
-    private String extractSkillName(Resource resource, String bundledPath) {
-        try {
-            String uri = resource.getURI().toString();
-            // 找 bundledPath 后的部分：skills/etf-analyzer/SKILL.md → etf-analyzer
-            String marker = bundledPath + "/";
-            int start = uri.indexOf(marker);
-            if (start < 0) return null;
-            String remainder = uri.substring(start + marker.length()); // etf-analyzer/SKILL.md
-            int slash = remainder.indexOf('/');
-            return slash > 0 ? remainder.substring(0, slash) : null;
-        } catch (IOException e) {
-            log.debug("Failed to extract skill name from resource: {}", e.getMessage());
-            return null;
-        }
-    }
-
-    /**
-     * 同步单个预置技能的所有文件到目标目录
-     */
-    private void syncSingleBundledSkill(ResourcePatternResolver resolver, String bundledPath,
-                                        String skillName, Path targetDir) {
-        try {
-            Files.createDirectories(targetDir);
-
-            // 扫描该技能目录下的所有文件
-            String allFilesPattern = ResourcePatternResolver.CLASSPATH_ALL_URL_PREFIX
-                    + bundledPath + "/" + skillName + "/**";
-            Resource[] allResources = resolver.getResources(allFilesPattern);
-
-            String prefix = bundledPath + "/" + skillName + "/";
-            for (Resource res : allResources) {
-                if (!res.isReadable()) continue;
-
-                String relativePath = extractRelativePath(res, prefix);
-                if (relativePath == null || relativePath.isBlank()) continue;
-
-                // 跳过目录型 resource
-                if (relativePath.endsWith("/")) continue;
-
-                Path targetFile = targetDir.resolve(relativePath);
-                Files.createDirectories(targetFile.getParent());
-
-                try (InputStream is = res.getInputStream()) {
-                    Files.copy(is, targetFile, StandardCopyOption.REPLACE_EXISTING);
-                }
-            }
-        } catch (IOException e) {
-            log.warn("Failed to sync bundled skill '{}': {}", skillName, e.getMessage());
-        }
-    }
-
-    /**
-     * 从 resource URI 中提取相对于技能目录的路径
-     */
-    private String extractRelativePath(Resource resource, String prefix) {
-        try {
-            String uri = resource.getURI().toString();
-            int start = uri.indexOf(prefix);
-            if (start < 0) return null;
-            return uri.substring(start + prefix.length());
-        } catch (IOException e) {
-            return null;
-        }
-    }
-
-    // ==================== 版本比对 ====================
-
-    private static final java.util.regex.Pattern VERSION_PATTERN =
-            java.util.regex.Pattern.compile("^version:\\s*[\"']?([^\"'\\s]+)[\"']?", java.util.regex.Pattern.MULTILINE);
-
-    /**
-     * 从 classpath Resource (SKILL.md) 的 frontmatter 中提取 version 字段
-     */
-    private String parseFrontmatterVersion(Resource resource) {
-        try (InputStream is = resource.getInputStream()) {
-            String content = new String(is.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
-            return extractVersionFromContent(content);
-        } catch (IOException e) {
-            return null;
-        }
-    }
-
-    /**
-     * 从文件路径 (SKILL.md) 的 frontmatter 中提取 version 字段
-     */
-    private String parseFrontmatterVersionFromPath(Path path) {
-        try {
-            String content = Files.readString(path);
-            return extractVersionFromContent(content);
-        } catch (IOException e) {
-            return null;
-        }
-    }
-
-    private String extractVersionFromContent(String content) {
-        // 只读 frontmatter 部分（--- 之间）
-        if (!content.startsWith("---")) return null;
-        int endIdx = content.indexOf("---", 3);
-        if (endIdx < 0) return null;
-        String frontmatter = content.substring(0, endIdx);
-        var matcher = VERSION_PATTERN.matcher(frontmatter);
-        return matcher.find() ? matcher.group(1) : null;
-    }
-
-    /**
-     * 语义版本比较：newer > older 返回 true
-     * <p>
-     * 例：1.1.0 > 1.0.0, 2.0.0 > 1.9.9, older=null 视为 0.0.0
-     */
-    static boolean isNewerVersion(String newer, String older) {
-        if (newer == null) return false;
-        if (older == null) return true;
-
-        String[] nParts = newer.split("\\.");
-        String[] oParts = older.split("\\.");
-        int len = Math.max(nParts.length, oParts.length);
-        for (int i = 0; i < len; i++) {
-            int n = i < nParts.length ? parseSegment(nParts[i]) : 0;
-            int o = i < oParts.length ? parseSegment(oParts[i]) : 0;
-            if (n > o) return true;
-            if (n < o) return false;
-        }
-        return false; // equal
-    }
-
-    private static int parseSegment(String s) {
-        try {
-            return Integer.parseInt(s.trim());
-        } catch (NumberFormatException e) {
-            return 0;
-        }
     }
 
     // ==================== 工具方法 ====================

@@ -41,9 +41,10 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, onMounted, onBeforeUnmount } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
+import { useMediaQuery, BREAKPOINTS } from '@/composables/useBreakpoint'
 
 const route = useRoute()
 const { t } = useI18n()
@@ -51,7 +52,6 @@ const { t } = useI18n()
 // 折叠状态（与 Settings 共享 key）
 const navCollapsed = ref(localStorage.getItem('mc-settings-nav-collapsed') === 'true')
 const userExplicit = ref(localStorage.getItem('mc-settings-nav-collapsed') === 'true')
-let mediumQuery: MediaQueryList | null = null
 
 function toggleNav() {
   navCollapsed.value = !navCollapsed.value
@@ -59,23 +59,11 @@ function toggleNav() {
   localStorage.setItem('mc-settings-nav-collapsed', String(navCollapsed.value))
 }
 
-function handleMediumChange(e: MediaQueryListEvent | MediaQueryList) {
-  if (e.matches && !userExplicit.value) {
-    navCollapsed.value = true
-  } else if (!e.matches && !userExplicit.value) {
-    navCollapsed.value = false
-  }
-}
-
-onMounted(() => {
-  mediumQuery = window.matchMedia('(max-width: 1200px)')
-  handleMediumChange(mediumQuery)
-  mediumQuery.addEventListener('change', handleMediumChange)
-})
-
-onBeforeUnmount(() => {
-  mediumQuery?.removeEventListener('change', handleMediumChange)
-})
+// Auto-collapse the nav on narrow desktop unless the user collapsed it explicitly.
+const compactViewport = useMediaQuery(BREAKPOINTS.compact)
+watch(compactViewport, (compact) => {
+  if (!userExplicit.value) navCollapsed.value = compact
+}, { immediate: true })
 
 const sections = computed(() => [
   {
@@ -95,6 +83,12 @@ const sections = computed(() => [
     path: '/security/audit-logs',
     label: t('security.sections.auditLogs'),
     icon: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>',
+  },
+  {
+    id: 'autoApprove',
+    path: '/security/auto-approve',
+    label: t('approval.grant.menu'),
+    icon: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>',
   },
 ])
 

@@ -49,6 +49,15 @@ public class MessageContentPart {
      */
     private String mediaId;
 
+    /**
+     * Vision-model description of an image/video part, produced by the sidecar
+     * captioning path when the primary model is text-only. Persisted so the
+     * description survives into later turns: history replay sends user messages
+     * as text, and without a stored caption the image content would be lost on
+     * every follow-up question. Null for non-media parts or when no captioning ran.
+     */
+    private String caption;
+
     // ==================== 工厂方法 ====================
 
     public static MessageContentPart text(String text) {
@@ -91,6 +100,20 @@ public class MessageContentPart {
         part.setMediaId(mediaId);
         part.setFileName(fileName);
         part.setContentType("video/*");
+        return part;
+    }
+
+    /**
+     * 3D model asset (.glb / .obj / .fbx). The frontend renders this with a
+     * &lt;model-viewer&gt; Web Component when contentType starts with
+     * {@code model/} (e.g. {@code model/gltf-binary} for glb).
+     */
+    public static MessageContentPart model3d(String mediaId, String fileName) {
+        MessageContentPart part = new MessageContentPart();
+        part.setType("model3d");
+        part.setMediaId(mediaId);
+        part.setFileName(fileName);
+        part.setContentType("model/gltf-binary");
         return part;
     }
 

@@ -33,6 +33,13 @@ public class WikiKnowledgeBaseEntity {
     /** 关联的本地目录路径（可选，用于批量扫描导入） */
     private String sourceDirectory;
 
+    /**
+     * 是否对该知识库启用自动同步（周期扫描 sourceDirectory）。1=开，0=关。
+     * 自动扫描需"全局总闸 mate.wiki.watcher-enabled 开 且 本字段为 1"（AND 语义）；
+     * 手动扫描不受此字段影响。
+     */
+    private Integer watcherEnabled;
+
     /** 状态：active / processing / error */
     private String status;
 
@@ -51,6 +58,7 @@ public class WikiKnowledgeBaseEntity {
      * NULL = 使用系统默认（mate_system_setting 的 embedding.default.model.id），
      * 再无则取任意 enabled 的 embedding 模型，最终全无则语义搜索降级为不可用。
      */
+    @TableField(updateStrategy = FieldStrategy.ALWAYS)
     private Long embeddingModelId;
 
     @TableField(fill = FieldFill.INSERT)

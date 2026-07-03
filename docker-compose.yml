@@ -77,7 +77,10 @@ services:
       DB_NAME: ${DB_NAME:-mateclaw}
       DB_USERNAME: ${DB_USERNAME:-mateclaw}
       DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required in .env}
-      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+      # LLM provider keys (DashScope / OpenAI / Anthropic / DeepSeek / Kimi / …) are
+      # NOT configured via env vars. After startup, add providers in the admin UI:
+      #   Settings → Models → Add Provider
+      # Keys are stored in mate_model_provider and hot-reloaded.
       SERPER_API_KEY: ${SERPER_API_KEY:-}
       JWT_SECRET: ${JWT_SECRET:-}
       MATECLAW_CORS_ALLOWED_ORIGINS: ${MATECLAW_CORS_ALLOWED_ORIGINS:-}
@@ -89,13 +92,34 @@ services:
       MATECLAW_BROWSER_CDP_URL: ${MATECLAW_BROWSER_CDP_URL:-}
       MATECLAW_BROWSER_CHROME_PATH: ${MATECLAW_BROWSER_CHROME_PATH:-}
       MATECLAW_BROWSER_CHANNEL: ${MATECLAW_BROWSER_CHANNEL:-}
+      # OAuth 模式默认保持 auto：localhost 访问走 LOCAL，IP/域名访问走 DEVICE_CODE。
+      # 本机 Docker 若要强制使用 localhost:1455 回调，可在 .env 显式设为 local。
+      MATECLAW_OAUTH_OPENAI_DEPLOYMENT_MODE: ${MATECLAW_OAUTH_OPENAI_DEPLOYMENT_MODE:-}
+      MATECLAW_OAUTH_OPENAI_CALLBACK_BIND_HOST: ${MATECLAW_OAUTH_OPENAI_CALLBACK_BIND_HOST:-0.0.0.0}
+      # Wiki 知识库目录扫描白名单（逗号分隔，留空则禁止所有目录扫描）。
+      # 示例：MATE_WIKI_ALLOWED_SOURCE_ROOTS=/data/wiki,/opt/docs
+      # 记得同步在 volumes 里把宿主机路径挂进容器。
+      MATE_WIKI_ALLOWED_SOURCE_ROOTS: ${MATE_WIKI_ALLOWED_SOURCE_ROOTS:-}
+      # Wiki 知识源自动同步总开关（运维总闸，默认关）。AND 语义：全局开关与
+      # 每个知识库自己的「自动同步」开关都开，该库才会被定时扫描。
+      # 间隔单位毫秒，默认 5 分钟。
+      MATE_WIKI_WATCHER_ENABLED: ${MATE_WIKI_WATCHER_ENABLED:-false}
+      MATE_WIKI_WATCHER_INTERVAL_MS: ${MATE_WIKI_WATCHER_INTERVAL_MS:-300000}
+      # Skill 工作区根目录。放在 /app/data 下，让现有的 server_data 卷一并持久化
+      # 已安装的 skill、运行时积累的 LESSONS.md 以及 skill 运行产物，容器重启不丢。
+      # 内置 skill 仍由 JAR classpath 每次启动现场释放，空卷不会丢内置文件。
+      MATECLAW_SKILL_WORKSPACE_ROOT: ${MATECLAW_SKILL_WORKSPACE_ROOT:-/app/data/skills}
     # Chromium needs a real /dev/shm. Docker defaults to 64MB which causes
     # SIGBUS / "Target page closed" errors under load. 2GB is the usual
     # recommendation for Playwright / headless chrome.
     shm_size: 2gb
     ports:
       - "18080:18088"   # host:container — app listens on 18088 inside the container
+      - "1455:1455"
     volumes:
+      # server_data covers /app/data — H2 DB, wiki-uploads, AND the skill
+      # workspace (MATECLAW_SKILL_WORKSPACE_ROOT=/app/data/skills above), so a
+      # single volume persists everything. No separate skills volume needed.
       - server_data:/app/data
 
 volumes:

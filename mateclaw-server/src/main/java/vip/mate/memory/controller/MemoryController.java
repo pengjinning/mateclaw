@@ -37,6 +37,30 @@ public class MemoryController {
     private final MemoryProperties memoryProperties;
     private final DreamingScheduler dreamingScheduler;
     private final WorkspaceFileService workspaceFileService;
+    private final StructuredMemoryConsolidationService structuredConsolidationService;
+
+    @Operation(summary = "手动触发 always-on 结构化记忆整合（user/feedback，合并去重过时条目）")
+    @PostMapping("/{agentId}/structured-consolidation")
+    @RequireWorkspaceRole("member")
+    public R<Map<String, Object>> triggerStructuredConsolidation(@PathVariable Long agentId) {
+        try {
+            StructuredMemoryConsolidationService.ConsolidationStats s =
+                    structuredConsolidationService.consolidateAgent(agentId);
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("ownersConsolidated", s.ownersConsolidated);
+            out.put("updated", s.updated);
+            out.put("skippedSmall", s.skippedSmall);
+            out.put("skippedOverCap", s.skippedOverCap);
+            out.put("failed", s.failed);
+            out.put("entriesBefore", s.entriesBefore);
+            out.put("entriesAfter", s.entriesAfter);
+            return R.ok(out);
+        } catch (Exception e) {
+            log.error("[Memory] Manual structured consolidation failed for agent={}: {}",
+                    agentId, e.getMessage(), e);
+            return R.fail("结构化记忆整合失败: " + e.getMessage());
+        }
+    }
 
     @Operation(summary = "手动触发记忆整合（daily notes → MEMORY.md，NIGHTLY 模式）")
     @PostMapping("/{agentId}/emergence")
@@ -92,7 +116,7 @@ public class MemoryController {
 
     @Operation(summary = "查询 Dreaming 状态（配置、统计、上次运行时间）")
     @GetMapping("/{agentId}/dreaming/status")
-    @RequireWorkspaceRole("viewer")
+    @RequireWorkspaceRole("member")
     public R<Map<String, Object>> getDreamingStatus(@PathVariable Long agentId) {
         Map<String, Object> status = recallService.getDreamingStatus(agentId);
         status.put("lastRunTime", dreamingScheduler.getLastRunTime());
@@ -101,14 +125,14 @@ public class MemoryController {
 
     @Operation(summary = "查询召回候选列表（含评分详情）")
     @GetMapping("/{agentId}/dreaming/candidates")
-    @RequireWorkspaceRole("viewer")
+    @RequireWorkspaceRole("member")
     public R<List<Map<String, Object>>> getDreamingCandidates(@PathVariable Long agentId) {
         return R.ok(recallService.listCandidatesWithDetails(agentId));
     }
 
     @Operation(summary = "查询 DREAMS.md 整合日记")
     @GetMapping("/{agentId}/dreaming/dreams")
-    @RequireWorkspaceRole("viewer")
+    @RequireWorkspaceRole("member")
     public R<Map<String, Object>> getDreams(@PathVariable Long agentId) {
         WorkspaceFileEntity file = workspaceFileService.getFile(agentId, "DREAMS.md");
         Map<String, Object> result = new LinkedHashMap<>();

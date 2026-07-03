@@ -5,15 +5,23 @@ import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import vip.mate.exception.MateClawException;
+import vip.mate.skill.event.SkillRemovedEvent;
+import vip.mate.skill.lifecycle.SkillLifecycleService;
 import vip.mate.skill.model.SkillEntity;
+import vip.mate.skill.repository.SkillFileMapper;
 import vip.mate.skill.repository.SkillMapper;
+import vip.mate.skill.runtime.SkillCatalogSort;
+import vip.mate.skill.runtime.SkillCatalogSorter;
+import vip.mate.skill.secret.SkillSecretService;
 import vip.mate.skill.workspace.SkillWorkspaceManager;
 import vip.mate.skill.workspace.SkillWorkspaceProperties;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Set;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -38,8 +46,19 @@ import java.util.stream.Collectors;
 public class SkillService {
 
     private final SkillMapper skillMapper;
+    private final SkillFileMapper skillFileMapper;
     private final SkillWorkspaceManager workspaceManager;
     private final SkillWorkspaceProperties workspaceProperties;
+    private final SkillSecretService skillSecretService;
+    /**
+     * Fires {@link SkillRemovedEvent} on both uninstall and hard-delete so
+     * the agent-binding listener (and any future subscriber) can scrub
+     * dependent rows — without this, {@code mate_agent_skill} keeps orphan
+     * rows that the UI can no longer clear from the picker.
+     */
+    private final ApplicationEventPublisher eventPublisher;
+    /** Stamps the activity anchor on create / update / enable so the curator sees fresh skills as active. */
+    private final SkillLifecycleService lifecycleService;
     private vip.mate.skill.runtime.SkillRuntimeService runtimeService;
 
     /**
@@ -51,6 +70,25 @@ public class SkillService {
 
     // ==================== CRUD ====================
 
+    /** Default workspace id used when no {@code X-Workspace-Id} is supplied. */
+    public static final long DEFAULT_WORKSPACE_ID = 1L;
+
+    static long normalizeWorkspaceId(Long workspaceId) {
+        return workspaceId != null ? workspaceId : DEFAULT_WORKSPACE_ID;
+    }
+
+    /**
+     * Restrict a query to skills visible inside {@code workspaceId}: builtin
+     * skills are global (shared across every workspace), every other skill is
+     * owned by exactly one workspace. Applied as a nested {@code AND (builtin
+     * OR workspace_id = ?)} group so it composes with other filters.
+     */
+    private static void applyWorkspaceScope(LambdaQueryWrapper<SkillEntity> wrapper, Long workspaceId) {
+        long wsId = normalizeWorkspaceId(workspaceId);
+        wrapper.and(w -> w.eq(SkillEntity::getBuiltin, true)
+                .or().eq(SkillEntity::getWorkspaceId, wsId));
+    }
+
     /**
      * 获取所有技能列表（管理页面使用）
      * 排序：内置优先，然后按创建时间倒序
@@ -59,6 +97,18 @@ public class SkillService {
         return skillMapper.selectList(new LambdaQueryWrapper<SkillEntity>()
                 .orderByDesc(SkillEntity::getBuiltin)
                 .orderByDesc(SkillEntity::getCreateTime));
+    }
+
+    /**
+     * Workspace-scoped variant of {@link #listSkills()} — returns builtin
+     * skills plus the skills owned by {@code workspaceId}.
+     */
+    public List<SkillEntity> listSkills(Long workspaceId) {
+        LambdaQueryWrapper<SkillEntity> wrapper = new LambdaQueryWrapper<SkillEntity>()
+                .orderByDesc(SkillEntity::getBuiltin)
+                .orderByDesc(SkillEntity::getCreateTime);
+        applyWorkspaceScope(wrapper, workspaceId);
+        return skillMapper.selectList(wrapper);
     }
 
     /**
@@ -72,12 +122,24 @@ public class SkillService {
      * security_scan_status}: {@code "FAILED"} surfaces blocked skills so the
      * admin can inspect findings and rescan, {@code "PASSED"} shows scanned
      * clean rows, {@code null} / empty means no scan filter.
+     *
+     * <p>{@code workspaceId} scopes the result to one workspace's catalog:
+     * builtin skills are always included (they're global), every other skill
+     * only when it belongs to {@code workspaceId}. A {@code null} workspace
+     * falls back to the default workspace.
      */
     public IPage<SkillEntity> pageSkills(int page, int size, String keyword,
                                           String skillType, Boolean enabled,
-                                          String scanStatus) {
+                                          String scanStatus,
+                                          String sort,
+                                          String source,
+                                          String runtime,
+                                          Set<Long> pinnedSkillIds,
+                                          Long workspaceId,
+                                          String lifecycleState) {
         Page<SkillEntity> pageParam = new Page<>(Math.max(page, 1), Math.max(size, 1));
         LambdaQueryWrapper<SkillEntity> wrapper = new LambdaQueryWrapper<>();
+        applyWorkspaceScope(wrapper, workspaceId);
 
         if (keyword != null && !keyword.isBlank()) {
             String kw = keyword.trim();
@@ -86,8 +148,12 @@ public class SkillService {
                     .or().like(SkillEntity::getDescription, kw)
                     .or().like(SkillEntity::getTags, kw));
         }
-        if (skillType != null && !skillType.isBlank()) {
-            wrapper.eq(SkillEntity::getSkillType, skillType);
+        String effectiveSource = source != null && !source.isBlank() ? source : skillType;
+        if (effectiveSource != null && !effectiveSource.isBlank()
+                && !"all".equalsIgnoreCase(effectiveSource)) {
+            String normalizedSource = effectiveSource.trim().toLowerCase();
+            if ("custom".equals(normalizedSource)) normalizedSource = "dynamic";
+            wrapper.eq(SkillEntity::getSkillType, normalizedSource);
         }
         if (enabled != null) {
             wrapper.eq(SkillEntity::getEnabled, enabled);
@@ -95,9 +161,42 @@ public class SkillService {
         if (scanStatus != null && !scanStatus.isBlank()) {
             wrapper.eq(SkillEntity::getSecurityScanStatus, scanStatus.trim().toUpperCase());
         }
+        if (lifecycleState != null && !lifecycleState.isBlank()) {
+            wrapper.eq(SkillEntity::getLifecycleState, lifecycleState.trim().toLowerCase());
+        } else {
+            // Default catalog view hides archived skills — they have their own tab.
+            wrapper.and(w -> w.isNull(SkillEntity::getLifecycleState)
+                    .or().ne(SkillEntity::getLifecycleState, "archived"));
+        }
 
-        wrapper.orderByDesc(SkillEntity::getBuiltin)
-               .orderByDesc(SkillEntity::getCreateTime);
+        SkillCatalogSort catalogSort = SkillCatalogSort.parse(sort);
+        if (runtime != null && !runtime.isBlank() && !"all".equalsIgnoreCase(runtime)
+                || catalogSort == SkillCatalogSort.RECOMMENDED
+                || catalogSort == SkillCatalogSort.STATUS
+                || catalogSort == SkillCatalogSort.TYPE) {
+            List<SkillEntity> filtered = skillMapper.selectList(wrapper).stream()
+                    .filter(s -> SkillCatalogSorter.runtimeMatches(s, runtime))
+                    .toList();
+            List<SkillEntity> sorted = SkillCatalogSorter.sortEntities(filtered, catalogSort, pinnedSkillIds);
+            long total = sorted.size();
+            int safePage = Math.max(page, 1);
+            int safeSize = Math.max(size, 1);
+            int from = Math.min((safePage - 1) * safeSize, sorted.size());
+            int to = Math.min(from + safeSize, sorted.size());
+            pageParam.setRecords(sorted.subList(from, to));
+            pageParam.setTotal(total);
+            return pageParam;
+        }
+
+        if (catalogSort == SkillCatalogSort.NAME) {
+            wrapper.orderByAsc(SkillEntity::getName);
+        } else if (catalogSort == SkillCatalogSort.UPDATED) {
+            wrapper.orderByDesc(SkillEntity::getUpdateTime)
+                    .orderByAsc(SkillEntity::getName);
+        } else {
+            wrapper.orderByAsc(SkillEntity::getSkillType)
+                    .orderByAsc(SkillEntity::getName);
+        }
 
         return skillMapper.selectPage(pageParam, wrapper);
     }
@@ -124,14 +223,19 @@ public class SkillService {
     /**
      * Aggregate skill counts per {@code skill_type}, plus an {@code all}
      * rollup. Feeds the SkillMarket tab badges without pulling every row.
+     * Scoped to {@code workspaceId}: builtin skills count for every
+     * workspace, all other skills only for their owning workspace.
      */
-    public Map<String, Long> countByType() {
+    public Map<String, Long> countByType(Long workspaceId) {
         Map<String, Long> result = new LinkedHashMap<>();
-        result.put("all", skillMapper.selectCount(null));
+        LambdaQueryWrapper<SkillEntity> allWrapper = new LambdaQueryWrapper<>();
+        applyWorkspaceScope(allWrapper, workspaceId);
+        result.put("all", skillMapper.selectCount(allWrapper));
         for (String type : List.of("builtin", "mcp", "dynamic")) {
-            result.put(type, skillMapper.selectCount(
-                    new LambdaQueryWrapper<SkillEntity>()
-                            .eq(SkillEntity::getSkillType, type)));
+            LambdaQueryWrapper<SkillEntity> wrapper = new LambdaQueryWrapper<SkillEntity>()
+                    .eq(SkillEntity::getSkillType, type);
+            applyWorkspaceScope(wrapper, workspaceId);
+            result.put(type, skillMapper.selectCount(wrapper));
         }
         return result;
     }
@@ -151,6 +255,20 @@ public class SkillService {
     }
 
     /**
+     * Workspace-scoped variant of {@link #listEnabledSkills()} — builtin
+     * skills plus the enabled skills owned by {@code workspaceId}.
+     */
+    public List<SkillEntity> listEnabledSkills(Long workspaceId) {
+        LambdaQueryWrapper<SkillEntity> wrapper = new LambdaQueryWrapper<SkillEntity>()
+                .eq(SkillEntity::getEnabled, true)
+                .and(w -> w.isNull(SkillEntity::getSecurityScanStatus)
+                           .or().eq(SkillEntity::getSecurityScanStatus, "PASSED"))
+                .orderByAsc(SkillEntity::getName);
+        applyWorkspaceScope(wrapper, workspaceId);
+        return skillMapper.selectList(wrapper);
+    }
+
+    /**
      * 按名称查找技能（RFC-023：SkillManageTool 重名检查用）
      */
     public SkillEntity findByName(String name) {
@@ -166,6 +284,17 @@ public class SkillService {
         return skillMapper.selectList(new LambdaQueryWrapper<SkillEntity>()
                 .eq(SkillEntity::getSkillType, skillType)
                 .orderByDesc(SkillEntity::getCreateTime));
+    }
+
+    /**
+     * Workspace-scoped variant of {@link #listSkillsByType(String)}.
+     */
+    public List<SkillEntity> listSkillsByType(String skillType, Long workspaceId) {
+        LambdaQueryWrapper<SkillEntity> wrapper = new LambdaQueryWrapper<SkillEntity>()
+                .eq(SkillEntity::getSkillType, skillType)
+                .orderByDesc(SkillEntity::getCreateTime);
+        applyWorkspaceScope(wrapper, workspaceId);
+        return skillMapper.selectList(wrapper);
     }
 
     /**
@@ -201,6 +330,14 @@ public class SkillService {
         if (skill.getEnabled() == null) {
             skill.setEnabled(true);
         }
+        // Every skill belongs to a workspace. Callers that carry an
+        // X-Workspace-Id header set this explicitly; the no-arg create
+        // path falls back to the default workspace instead of relying on
+        // the column DEFAULT, so the value is always populated on the
+        // returned entity.
+        if (skill.getWorkspaceId() == null) {
+            skill.setWorkspaceId(DEFAULT_WORKSPACE_ID);
+        }
         // 前端只识别 builtin/mcp/dynamic，用户新建默认为 dynamic
         if (skill.getSkillType() == null || skill.getSkillType().isBlank()) {
             skill.setSkillType("dynamic");
@@ -212,6 +349,10 @@ public class SkillService {
 
         skillMapper.insert(skill);
         log.info("Created skill: {} (type={})", skill.getName(), skill.getSkillType());
+
+        // Stamp the activity anchor so a freshly-created skill is anchored to
+        // now rather than ageing from create_time alone.
+        lifecycleService.bumpActivity(skill.getId());
 
         // 自动初始化工作区目录
         if (workspaceProperties.isAutoInit() && !hasExplicitSkillDir(skill)) {
@@ -228,22 +369,68 @@ public class SkillService {
 
     /**
      * 更新技能
-     * 内置技能只允许修改 enabled、configJson、description
+     * <p>
+     * 内置技能允许修改的字段集合：
+     * <ul>
+     *   <li>{@code enabled} — 启用开关</li>
+     *   <li>{@code configJson} / {@code skillContent} — 运维 fallback 内容</li>
+     *   <li>{@code description} — 文案微调</li>
+     *   <li><b>展示覆盖</b>：{@code icon}、{@code nameZh}、{@code nameEn}、{@code tags}
+     *       — 这些纯前台显示字段，不影响 builtin 的运行时安全性，让用户能为内置 skill
+     *       挑像素图标 / 改本地化显示名而不必碰源码。
+     *       <br>注：{@code icon} 是 manifest 投影字段，会被 SkillPackageResolver
+     *       根据 SKILL.md frontmatter 同步。配套的解析器修改（仅在 row icon 为空时
+     *       才投影）确保用户覆盖能持久化。
+     *   </li>
+     * </ul>
+     * 仍不允许：name / version / author / skillType / builtin —— 这些是身份字段，
+     * 改动会破坏绑定与解析。
+     *
+     * <p>The UI sends a partial body that only contains the fields the
+     * user edited (Identity edit → {@code nameZh/nameEn/description/tags/icon};
+     * Body edit → {@code skillContent}, plus optional {@code sourceCode}).
+     * Every other field on the deserialized entity is {@code null}.
+     *
+     * <p>{@link SkillEntity} declares several
+     * {@code @TableField(updateStrategy = FieldStrategy.ALWAYS)} columns
+     * — {@code name_zh}, {@code name_en}, {@code config_json},
+     * {@code source_code}, {@code skill_content}, {@code manifest_json},
+     * {@code security_scan_result}. Calling
+     * {@code skillMapper.updateById(partial)} would tell MyBatis Plus to
+     * write {@code NULL} into every ALWAYS column missing from the
+     * partial, wiping perfectly valid content on every save. The earlier
+     * #45 fix only protected the resolver's scan write-back; this path
+     * was still exposed (and surfaced as issue #93 when a partial PUT
+     * also took the workspace-sync branch with a {@code null} name and
+     * NPE'd inside {@code sanitizeName}).
+     *
+     * <p>Fix: merge non-null fields from the partial onto a copy of the
+     * existing row, then persist the merged entity. Same shape as the
+     * builtin branch above, just with a wider whitelist for dynamic
+     * skills.
      */
     public SkillEntity updateSkill(SkillEntity skill) {
         SkillEntity existing = getSkill(skill.getId());
 
         if (Boolean.TRUE.equals(existing.getBuiltin())) {
-            // 内置技能：只允许修改有限字段
+            // Functional fields
             existing.setEnabled(skill.getEnabled() != null ? skill.getEnabled() : existing.getEnabled());
-            existing.setConfigJson(skill.getConfigJson());
+            if (skill.getConfigJson() != null) existing.setConfigJson(skill.getConfigJson());
             existing.setDescription(skill.getDescription() != null ? skill.getDescription() : existing.getDescription());
-            // builtin skill 也允许更新 skillContent（用于维护 fallback 内容）
             if (skill.getSkillContent() != null) {
                 existing.setSkillContent(skill.getSkillContent());
             }
+            // Display overrides — pure frontend-facing, no runtime impact.
+            // Treat blank-string as an explicit "clear" (so the picker's
+            // "no icon" path reverts the row icon back to the manifest
+            // projection on the next resolve).
+            if (skill.getIcon() != null) existing.setIcon(skill.getIcon());
+            if (skill.getNameZh() != null) existing.setNameZh(skill.getNameZh());
+            if (skill.getNameEn() != null) existing.setNameEn(skill.getNameEn());
+            if (skill.getTags() != null) existing.setTags(skill.getTags());
+
             skillMapper.updateById(existing);
-            log.info("Updated builtin skill (limited): {}", existing.getName());
+            log.info("Updated builtin skill (display overrides allowed): {}", existing.getName());
 
             // builtin skill 也同步 workspace SKILL.md
             syncSkillContentToWorkspace(existing);
@@ -256,43 +443,138 @@ public class SkillService {
             return existing;
         }
 
-        // 非内置技能：允许修改所有字段，但不允许改为 builtin
-        skill.setBuiltin(false);
-        skillMapper.updateById(skill);
-        log.info("Updated skill: {}", skill.getName());
+        // 非内置技能：merge non-null fields from the partial onto the
+        // existing row. name / skillType / builtin stay locked because
+        // they're identity fields whose change would orphan bindings
+        // and break the resolver.
+        if (skill.getDescription() != null) existing.setDescription(skill.getDescription());
+        if (skill.getIcon() != null) existing.setIcon(skill.getIcon());
+        if (skill.getVersion() != null && !skill.getVersion().isBlank()) existing.setVersion(skill.getVersion());
+        if (skill.getAuthor() != null) existing.setAuthor(skill.getAuthor());
+        if (skill.getEnabled() != null) existing.setEnabled(skill.getEnabled());
+        if (skill.getTags() != null) existing.setTags(skill.getTags());
+        if (skill.getNameZh() != null) existing.setNameZh(skill.getNameZh());
+        if (skill.getNameEn() != null) existing.setNameEn(skill.getNameEn());
+        if (skill.getConfigJson() != null) existing.setConfigJson(skill.getConfigJson());
+        if (skill.getSourceCode() != null) existing.setSourceCode(skill.getSourceCode());
+        if (skill.getSkillContent() != null) existing.setSkillContent(skill.getSkillContent());
+        if (skill.getManifestJson() != null) existing.setManifestJson(skill.getManifestJson());
+        existing.setBuiltin(false);
+
+        skillMapper.updateById(existing);
+        log.info("Updated skill: {}", existing.getName());
+
+        // A manual edit counts as activity — keep the skill anchored to now.
+        lifecycleService.bumpActivity(existing.getId());
 
         // 若 skillContent 变更且约定工作区存在，同步 SKILL.md
-        syncSkillContentToWorkspace(skill);
+        syncSkillContentToWorkspace(existing);
 
         // 刷新 runtime cache
         if (runtimeService != null) {
             runtimeService.refreshActiveSkills();
         }
 
-        return skill;
+        return existing;
     }
 
     /**
-     * 删除技能
-     * 内置技能不可删除
+     * RFC-090 §14.5 — uninstall path: logical delete (row stays in DB
+     * with {@code deleted=1}) + archive workspace to
+     * {@code .archived/}.
+     *
+     * <p>Recoverable: the user can re-install a skill of the same name
+     * later, since the archived workspace and soft-deleted row stay
+     * out of every standard query but on disk.
+     *
+     * <p>Builtin skills are protected: uninstalling a builtin would
+     * leave the seed re-creating it on next boot, so we surface a
+     * clear error instead of doing partial work.
      */
-    public void deleteSkill(Long id) {
+    public void uninstallSkill(Long id) {
         SkillEntity skill = getSkill(id);
         if (Boolean.TRUE.equals(skill.getBuiltin())) {
-            throw new MateClawException("err.skill.builtin_readonly", "内置技能不可删除: " + skill.getName());
+            throw new MateClawException("err.skill.builtin_readonly",
+                    "内置技能不可卸载: " + skill.getName());
         }
-        skillMapper.deleteById(id);
-        log.info("Deleted skill: {}", skill.getName());
+        skillMapper.deleteById(id); // logical delete (deleted=1)
+        log.info("Uninstalled skill (logical delete + archive): {}", skill.getName());
 
-        // 归档工作区目录
+        // Notify listeners (e.g. agent-binding cleanup) so dependent rows
+        // referencing this skill_id don't outlive the row itself.
+        eventPublisher.publishEvent(new SkillRemovedEvent(id, skill.getName()));
+
         if ("archive".equals(workspaceProperties.getDeletePolicy())) {
             workspaceManager.archiveWorkspace(skill.getName());
         }
-
-        // 刷新 runtime cache
+        // RFC-090 review #3 — refresh won't deregister wrappers for a
+        // soft-deleted row (it only resolves rows still in
+        // listEnabledSkills), so do it explicitly here.
         if (runtimeService != null) {
+            runtimeService.deregisterSkillWrappers(id);
             runtimeService.refreshActiveSkills();
         }
+    }
+
+    /**
+     * RFC-090 §14.5 — hard-delete path: physical SQL delete + workspace
+     * purge. Admin only. Not recoverable.
+     *
+     * <p>Use this when you need to free the slug for an unrelated skill
+     * or scrub a row that's been corrupted. UI buttons should call
+     * {@link #uninstallSkill} instead unless the user explicitly chose
+     * "permanently delete".
+     */
+    public void hardDeleteSkill(Long id) {
+        SkillEntity skill = getSkill(id);
+        if (Boolean.TRUE.equals(skill.getBuiltin())) {
+            throw new MateClawException("err.skill.builtin_readonly",
+                    "内置技能不可硬删除: " + skill.getName());
+        }
+        skillMapper.hardDeleteById(id); // bypass the logical-delete flag
+        int filesDropped = skillFileMapper.deleteBySkillId(id);
+        if (filesDropped > 0) {
+            log.info("Hard-deleted {} bundle file row(s) for skill {}", filesDropped, skill.getName());
+        }
+        log.info("Hard-deleted skill (physical delete + purge): {}", skill.getName());
+
+        // Same notification as the uninstall path — agent-binding cleanup
+        // applies regardless of which delete flavor the admin chose.
+        eventPublisher.publishEvent(new SkillRemovedEvent(id, skill.getName()));
+
+        // RFC-091 settings bridge — purge any per-skill secrets so a
+        // future skill reusing this id doesn't inherit stale credentials.
+        try {
+            int purged = skillSecretService.purgeForSkill(id);
+            if (purged > 0) {
+                log.info("Purged {} secret(s) for hard-deleted skill {}", purged, skill.getName());
+            }
+        } catch (Exception e) {
+            log.warn("Failed to purge secrets for skill {}: {}", skill.getName(), e.getMessage());
+        }
+
+        workspaceManager.purgeWorkspace(skill.getName());
+
+        // RFC-090 review #3 — same explicit deregister as uninstall.
+        if (runtimeService != null) {
+            runtimeService.deregisterSkillWrappers(id);
+            runtimeService.refreshActiveSkills();
+        }
+    }
+
+    /**
+     * Legacy alias maintained for callers that still use {@code
+     * deleteSkill}. Routes to the user-friendly uninstall semantics
+     * (logical delete + archive). New code should pick {@link
+     * #uninstallSkill} or {@link #hardDeleteSkill} explicitly.
+     *
+     * @deprecated Use {@link #uninstallSkill} for user-facing UI delete
+     *             (recoverable) or {@link #hardDeleteSkill} for admin
+     *             "permanent" delete.
+     */
+    @Deprecated
+    public void deleteSkill(Long id) {
+        uninstallSkill(id);
     }
 
     /**
@@ -303,6 +585,19 @@ public class SkillService {
         skill.setEnabled(enabled);
         skillMapper.updateById(skill);
         log.info("Skill {} {}", skill.getName(), enabled ? "enabled" : "disabled");
+
+        // Re-enabling a skill is an explicit "I use this again" signal.
+        if (enabled) {
+            lifecycleService.bumpActivity(id);
+        }
+
+        // RFC-090 review #3 — when disabling, explicitly tear down any
+        // registered wrapper tools (knowledge / acp). Without this the
+        // wrappers stay advertised because the availability supplier
+        // closes over the snapshot ResolvedSkill captured at registration.
+        if (!enabled && runtimeService != null) {
+            runtimeService.deregisterSkillWrappers(id);
+        }
 
         // 刷新 runtime cache
         if (runtimeService != null) {
@@ -348,7 +643,7 @@ public class SkillService {
             return "";
         }
 
-        // --- 第零层：Skill 自治引导（RFC-023，对标 hermes-agent prompt_builder.py:164-171） ---
+        // --- 第零层：Skill 自治引导 ---
         StringBuilder catalog = new StringBuilder();
         catalog.append("\n\n## Skill Management\n\n");
         catalog.append("After completing a complex task (5+ tool calls), fixing a tricky error, ");
@@ -451,6 +746,17 @@ public class SkillService {
      */
     public Map<String, List<String>> getEnabledSkillSummary() {
         return listEnabledSkills().stream()
+                .collect(Collectors.groupingBy(
+                        SkillEntity::getSkillType,
+                        Collectors.mapping(SkillEntity::getName, Collectors.toList())
+                ));
+    }
+
+    /**
+     * Workspace-scoped variant of {@link #getEnabledSkillSummary()}.
+     */
+    public Map<String, List<String>> getEnabledSkillSummary(Long workspaceId) {
+        return listEnabledSkills(workspaceId).stream()
                 .collect(Collectors.groupingBy(
                         SkillEntity::getSkillType,
                         Collectors.mapping(SkillEntity::getName, Collectors.toList())

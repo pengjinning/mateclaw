@@ -15,9 +15,15 @@
       </div>
     </div>
     <div class="stage-labels">
-      <span v-for="stage in stages" :key="stage.key" class="stage-label" :class="{ active: stage.key === currentStage && !isTerminal, done: stage.key === currentStage && isTerminal }">
-        {{ t(`wiki.jobStage.${stage.key}`) }}
-      </span>
+      <div
+        v-for="(stage, idx) in stages"
+        :key="stage.key"
+        class="stage-label-cell"
+      >
+        <span class="stage-label" :class="{ active: stage.key === currentStage && !isTerminal, done: stage.key === currentStage && isTerminal }">
+          {{ t(`wiki.jobStage.${stage.key}`) }}
+        </span>
+      </div>
     </div>
 
     <!-- Model & progress info -->
@@ -39,7 +45,7 @@
     <!-- Error state with actions -->
     <div v-if="status === 'failed'" class="stage-error">
       <span class="error-badge">❌ {{ t('wiki.jobStage.failed') }} — {{ errorCode }}</span>
-      <div class="error-actions">
+      <div v-if="canManageWiki" class="error-actions">
         <button class="btn-mini" @click="$emit('reprocess')">{{ t('wiki.reprocess') }}</button>
         <button class="btn-mini btn-mini-alt" @click="$emit('repair')">{{ t('wiki.page.repair') }}</button>
       </div>
@@ -50,8 +56,13 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { useWorkspaceStore } from '@/stores/useWorkspaceStore'
 
 const { t } = useI18n()
+const workspace = useWorkspaceStore()
+
+// Reprocess / repair are write actions — viewers see job status without them.
+const canManageWiki = computed(() => workspace.can('manage:wiki'))
 
 const props = defineProps<{
   stage: string
@@ -174,6 +185,16 @@ const elapsed = computed(() => {
   flex: 1;
 }
 
+/* The last cell only contains a dot (no trailing connector line). With
+ * flex:1 it would reserve a full segment of empty space after the dot,
+ * which makes the final stage look stranded — the connector going into
+ * it appears to stop short and there's a visible blank gap on the right.
+ * Pin the last cell to dot-width so the 6 connector lines distribute
+ * evenly between the 7 dots and the final dot anchors to the right edge. */
+.stage-dot-group:last-child {
+  flex: 0 0 auto;
+}
+
 .stage-dot {
   width: 10px;
   height: 10px;
@@ -201,15 +222,33 @@ const elapsed = computed(() => {
 }
 .stage-line.done { background: var(--mc-primary); }
 
+/* Labels mirror the dot-row's flex structure so each label cell is the
+ * same width as its matching dot cell. The last cell pins to dot-width
+ * (matching .stage-dot-group:last-child above), and inside every cell the
+ * label is centered horizontally over the dot at the cell's left edge by
+ * shifting it half the dot width and translating back by half its own
+ * width — keeping label text centered above each dot at any container
+ * width. */
 .stage-labels {
   display: flex;
-  justify-content: space-between;
+  align-items: flex-start;
+}
+.stage-label-cell {
+  flex: 1;
+  display: flex;
+  justify-content: flex-start;
+  overflow: visible;
+}
+.stage-label-cell:last-child {
+  flex: 0 0 auto;
 }
 .stage-label {
   font-size: 9px;
   color: var(--mc-text-tertiary);
   text-align: center;
-  flex: 1;
+  white-space: nowrap;
+  margin-left: 5px;
+  transform: translateX(-50%);
 }
 .stage-label.active { color: var(--mc-primary); font-weight: 600; }
 .stage-label.done { color: var(--mc-success, #5a8a5a); font-weight: 600; }

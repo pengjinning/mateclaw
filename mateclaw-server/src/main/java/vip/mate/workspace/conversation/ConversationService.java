@@ -1,16 +1,29 @@
 package vip.mate.workspace.conversation;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import vip.mate.agent.model.AgentEntity;
 import vip.mate.approval.ApprovalPlaceholderUtil;
 import vip.mate.approval.MetadataDecision;
 import vip.mate.agent.repository.AgentMapper;
+import vip.mate.approval.model.ToolApprovalEntity;
+import vip.mate.approval.repository.ToolApprovalMapper;
+import vip.mate.auth.model.UserEntity;
+import vip.mate.auth.service.AuthService;
+import vip.mate.channel.model.ChannelSessionEntity;
+import vip.mate.channel.repository.ChannelSessionMapper;
+import vip.mate.task.model.AsyncTaskEntity;
+import vip.mate.task.repository.AsyncTaskMapper;
+import vip.mate.workspace.conversation.event.ConversationDeletedEvent;
 import vip.mate.workspace.conversation.model.ConversationEntity;
 import vip.mate.workspace.conversation.model.MessageContentPart;
 import vip.mate.workspace.conversation.model.MessageEntity;
@@ -18,6 +31,7 @@ import vip.mate.workspace.conversation.repository.ConversationMapper;
 import vip.mate.workspace.conversation.repository.MessageMapper;
 import vip.mate.workspace.conversation.vo.ConversationVO;
 import vip.mate.workspace.conversation.vo.MessageVO;
+import vip.mate.workspace.core.service.WorkspaceService;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -34,7 +48,13 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 /**
- * 会话管理服务
+ * Conversation management service (会话管理服务).
+ *
+ * <p>Owns the full lifecycle of {@link ConversationEntity} and
+ * {@link MessageEntity} rows — list / get-or-create / save / rename /
+ * pin / delete / compress / approval-state reconciliation — and the
+ * cascade of side-tables that hang off a conversation (approvals,
+ * async tasks, channel sessions, attachment files, tool-result spill).
  *
  * @author MateClaw Team
  */
@@ -45,27 +65,94 @@ public class ConversationService {
 
     public static final String SYSTEM_USER = "system";
 
+    /**
+     * Owner prefix for webchat conversations, written as {@code webchat:<visitorId>}
+     * (see {@code WebChatController#webchatUsername}). These rows are owned by an
+     * external visitor principal rather than a MateClaw account, so the admin
+     * console treats them like {@link #SYSTEM_USER} rows — visible to / manageable
+     * by any authenticated user in the workspace. The visitor-facing self-service
+     * endpoints keep isolating by the exact owner plus a signed visitor token, so
+     * surfacing these rows to the console does not widen a visitor's own access.
+     */
+    static final String WEBCHAT_OWNER_PREFIX = "webchat:";
+
     private final ConversationMapper conversationMapper;
     private final MessageMapper messageMapper;
     private final AgentMapper agentMapper;
     private final ObjectMapper objectMapper;
+    private final ToolApprovalMapper toolApprovalMapper;
+    private final AsyncTaskMapper asyncTaskMapper;
+    private final ChannelSessionMapper channelSessionMapper;
+    private final ApplicationEventPublisher eventPublisher;
+    private final AuthService authService;
+    private final WorkspaceService workspaceService;
 
     /**
-     * 获取用户的会话列表（返回 VO，包含 agentName/agentIcon/status）
+     * Optional spill store. Injected via a setter so the existing @RequiredArgsConstructor
+     * stays stable and tests that build the service directly don't need to wire
+     * tool-result storage. When present, deleteConversation also purges any spill
+     * files this conversation produced so they don't outlive the row that owned them.
+     */
+    private vip.mate.agent.graph.executor.ToolResultStorage toolResultStorage;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void setToolResultStorage(vip.mate.agent.graph.executor.ToolResultStorage toolResultStorage) {
+        this.toolResultStorage = toolResultStorage;
+    }
+
+    /**
+     * List conversations for a user, returned as VOs that include
+     * {@code agentName} / {@code agentIcon} / {@code status}.
+     *
+     * <p>获取用户的会话列表（返回 VO，包含 agentName / agentIcon / status）。
      */
     public List<ConversationVO> listConversations(String username) {
         return listConversations(username, null);
     }
 
     /**
-     * 获取用户的会话列表（按工作区过滤）
+     * Workspace-scoped variant of {@link #listConversations(String)}.
+     *
+     * <p>Strict ownership: only the user's own + {@code system} rows. Used by
+     * callers that must not see other principals' conversations — notably the
+     * webchat visitor self-service path, which scopes to one visitor.
+     *
+     * <p>获取用户的会话列表（按工作区过滤）。
      */
     public List<ConversationVO> listConversations(String username, Long workspaceId) {
-        // 同时返回当前用户的会话 和 定时任务（system）产生的会话
-        // 排除子会话（委派产生的子会话不在侧边栏显示）
+        return listConversations(username, workspaceId, false);
+    }
+
+    /**
+     * Admin-console variant. When {@code includeChannelPrincipals} is true, also
+     * returns conversations owned by external channel principals
+     * ({@code webchat:<visitorId>}) so the console surfaces webchat threads
+     * alongside the user's own + {@code system} rows — the same way IM-channel
+     * ({@code system}-owned) conversations already appear. The visitor-facing
+     * webchat endpoints keep using the strict overload, so this does not widen a
+     * visitor's own access.
+     *
+     * <p>控制台变体：includeChannelPrincipals 为 true 时额外纳入 webchat 访客会话。
+     */
+    public List<ConversationVO> listConversations(String username, Long workspaceId,
+                                                  boolean includeChannelPrincipals) {
+        // Return both the current user's conversations AND those created by
+        // scheduled jobs (owner=system). Child conversations spawned by
+        // delegation are excluded — they don't belong in the sidebar.
+        //
+        // 同时返回当前用户的会话和定时任务（system）产生的会话；
+        // 排除子会话（委派产生的子会话不在侧边栏显示）。
+        //
+        // External channel principals (webchat) are only surfaced to global
+        // admins: per isConversationOwner they are the only ones who can open a
+        // webchat-owned conversation, so listing them to anyone else would show
+        // rows the caller would then 403 on (issue #344 alignment).
+        boolean includeWebchat = includeChannelPrincipals && isGlobalAdmin(username);
         LambdaQueryWrapper<ConversationEntity> wrapper = new LambdaQueryWrapper<ConversationEntity>()
-                .in(ConversationEntity::getUsername, username, SYSTEM_USER)
+                .and(w -> applyOwnerScope(w, username, includeWebchat))
+                .and(this::applyMalformedIdGuard)
                 .isNull(ConversationEntity::getParentConversationId)
+                .orderByDesc(ConversationEntity::getPinned)
                 .orderByDesc(ConversationEntity::getLastActiveTime);
         if (workspaceId != null) {
             wrapper.eq(ConversationEntity::getWorkspaceId, workspaceId);
@@ -76,7 +163,8 @@ public class ConversationService {
             return List.of();
         }
 
-        // 批量查询关联的 Agent 信息，避免 N+1 查询
+        // Batch-load associated Agent rows to avoid N+1 queries.
+        // 批量查询关联的 Agent 信息，避免 N+1 查询。
         List<Long> agentIds = entities.stream()
                 .filter(e -> e.getAgentId() != null)
                 .map(ConversationEntity::getAgentId)
@@ -88,7 +176,8 @@ public class ConversationService {
                 : agentMapper.selectBatchIds(agentIds).stream()
                         .collect(Collectors.toMap(AgentEntity::getId, a -> a));
 
-        // 转换为 VO，补充 agentName/agentIcon/status
+        // Map entities to VOs and enrich with agentName / agentIcon / status.
+        // 转换为 VO，补充 agentName / agentIcon / status。
         return entities.stream()
                 .map(entity -> {
                     AgentEntity agent = entity.getAgentId() != null
@@ -102,7 +191,129 @@ public class ConversationService {
     }
 
     /**
-     * 获取或创建会话（向后兼容，默认 workspace 1）
+     * Apply the owner-scope predicate onto a (nested) wrapper: always the user's
+     * own + {@link #SYSTEM_USER} rows; when {@code includeChannelPrincipals} is
+     * true, also external channel-principal rows ({@code webchat:%}). Kept as one
+     * helper so the list and page queries stay in lockstep.
+     */
+    private void applyOwnerScope(LambdaQueryWrapper<ConversationEntity> w,
+                                 String username, boolean includeChannelPrincipals) {
+        w.in(ConversationEntity::getUsername, username, SYSTEM_USER);
+        if (includeChannelPrincipals) {
+            w.or().likeRight(ConversationEntity::getUsername, WEBCHAT_OWNER_PREFIX);
+        }
+    }
+
+    /**
+     * Exclude rows whose conversationId ends in ":" — malformed (e.g.
+     * {@code webchat:<key8>:} with empty visitorId, from older versions).
+     * Showing them in the console surfaces threads that 500/403 on open
+     * because the trailing ":" makes some reverse proxies strip the path
+     * tail (issue #369).
+     *
+     * <p>Uses {@code notLikeLeft} rather than {@code notLike(...,"%:")}: the
+     * latter auto-wraps the value with extra {@code %} on both sides AND
+     * escapes the user-supplied {@code %}, producing a {@code %%:%} pattern
+     * that matches <em>any id containing a colon</em> — silently filtering
+     * out every {@code webchat:…}, {@code feishu:…}, {@code cron:…}
+     * conversation from the list. {@code notLikeLeft} only prepends the
+     * wildcard, giving the intended {@code NOT LIKE '%:'} ("does not end
+     * with a colon").
+     */
+    private void applyMalformedIdGuard(LambdaQueryWrapper<ConversationEntity> w) {
+        w.notLikeLeft(ConversationEntity::getConversationId, ":");
+    }
+
+    /**
+     * Whether the user is a global admin (role=admin), resolved from the DB —
+     * never from client-controlled data. Gates webchat row visibility in the
+     * admin-console list/page: {@link #isConversationOwner} only lets a global
+     * admin open a webchat-owned conversation, so only admins should see those
+     * rows — otherwise the console lists threads it would then 403 on.
+     */
+    private boolean isGlobalAdmin(String username) {
+        UserEntity u = authService.findByUsername(username);
+        return u != null && "admin".equalsIgnoreCase(u.getRole());
+    }
+
+    /**
+     * Paginated variant used by the Sessions admin page.
+     *
+     * <p>Mirrors {@link #listConversations(String, Long)}'s filtering (current
+     * user + system rows, top-level only, optional workspace) and adds a
+     * {@code keyword} match against title / conversationId. The keyword is
+     * case-insensitive and treated as a substring.
+     *
+     * <p>会话管理页使用的分页查询。在 {@link #listConversations(String, Long)}
+     * 的基础上增加 title / conversationId 模糊匹配。
+     */
+    public com.baomidou.mybatisplus.core.metadata.IPage<ConversationVO> pageConversations(
+            String username, Long workspaceId, int page, int size, String keyword) {
+        if (page < 1) page = 1;
+        if (size < 1 || size > 200) size = 20;
+
+        com.baomidou.mybatisplus.extension.plugins.pagination.Page<ConversationEntity> pager =
+                new com.baomidou.mybatisplus.extension.plugins.pagination.Page<>(page, size);
+
+        // Admin Sessions page surfaces channel conversations too, but only to
+        // global admins — they are the only ones who can open a webchat-owned
+        // conversation (issue #344), so non-admins must not see those rows.
+        LambdaQueryWrapper<ConversationEntity> wrapper = new LambdaQueryWrapper<ConversationEntity>()
+                .and(w -> applyOwnerScope(w, username, isGlobalAdmin(username)))
+                .and(this::applyMalformedIdGuard)
+                .isNull(ConversationEntity::getParentConversationId)
+                .orderByDesc(ConversationEntity::getPinned)
+                .orderByDesc(ConversationEntity::getLastActiveTime);
+        if (workspaceId != null) {
+            wrapper.eq(ConversationEntity::getWorkspaceId, workspaceId);
+        }
+        if (keyword != null && !keyword.isBlank()) {
+            String kw = keyword.trim();
+            wrapper.and(w -> w
+                    .like(ConversationEntity::getTitle, kw)
+                    .or()
+                    .like(ConversationEntity::getConversationId, kw));
+        }
+
+        com.baomidou.mybatisplus.core.metadata.IPage<ConversationEntity> entityPage =
+                conversationMapper.selectPage(pager, wrapper);
+
+        List<ConversationEntity> entities = entityPage.getRecords();
+        Map<Long, AgentEntity> agentMap;
+        if (entities.isEmpty()) {
+            agentMap = Map.of();
+        } else {
+            List<Long> agentIds = entities.stream()
+                    .filter(e -> e.getAgentId() != null)
+                    .map(ConversationEntity::getAgentId)
+                    .distinct()
+                    .collect(Collectors.toList());
+            agentMap = agentIds.isEmpty()
+                    ? Map.of()
+                    : agentMapper.selectBatchIds(agentIds).stream()
+                            .collect(Collectors.toMap(AgentEntity::getId, a -> a));
+        }
+
+        com.baomidou.mybatisplus.core.metadata.IPage<ConversationVO> voPage =
+                new com.baomidou.mybatisplus.extension.plugins.pagination.Page<ConversationVO>(
+                        entityPage.getCurrent(), entityPage.getSize(), entityPage.getTotal());
+        voPage.setRecords(entities.stream()
+                .map(entity -> {
+                    AgentEntity agent = entity.getAgentId() != null
+                            ? agentMap.get(entity.getAgentId())
+                            : null;
+                    String agentName = agent != null ? agent.getName() : null;
+                    String agentIcon = agent != null ? agent.getIcon() : null;
+                    return ConversationVO.from(entity, agentName, agentIcon);
+                })
+                .collect(Collectors.toList()));
+        return voPage;
+    }
+
+    /**
+     * Get-or-create conversation (backward-compat overload, defaults to workspace 1).
+     *
+     * <p>获取或创建会话（向后兼容，默认 workspace 1）。
      */
     @Transactional
     public ConversationEntity getOrCreateConversation(String conversationId, Long agentId, String username) {
@@ -110,7 +321,9 @@ public class ConversationService {
     }
 
     /**
-     * 获取或创建会话（workspace 感知）
+     * Workspace-aware get-or-create.
+     *
+     * <p>获取或创建会话（workspace 感知）。
      */
     @Transactional
     public ConversationEntity getOrCreateConversation(String conversationId, Long agentId,
@@ -134,7 +347,76 @@ public class ConversationService {
     }
 
     /**
-     * 创建子会话（委派场景），关联父会话 ID。
+     * WebChat get-or-create that also records the thread's {@code sessionId} on
+     * insert, so the visitor's /sessions listing can recover it even when the
+     * conversationId hashes (long visitorId + sessionId). The session id is
+     * written only when the row is first created; an existing row is left as-is.
+     */
+    @Transactional
+    public ConversationEntity getOrCreateWebchatConversation(String conversationId, Long agentId,
+                                                             String username, Long workspaceId,
+                                                             String sessionId) {
+        return getOrCreateWebchatConversation(conversationId, agentId, username, workspaceId, sessionId, null);
+    }
+
+    /**
+     * WebChat get-or-create with an optional caller-supplied title.
+     * <p>
+     * When the row is freshly inserted and {@code title} is non-blank, it
+     * overrides the default {@code "新对话"}; otherwise the default is kept and
+     * {@link #saveMessage} will still derive a title from the first user
+     * message. An existing row is never rewritten — neither {@code sessionId}
+     * nor {@code title} are clobbered, so a session created via
+     * {@code POST /sessions} with a caller-supplied title keeps that title
+     * when the first {@code /stream} message later lands.
+     */
+    @Transactional
+    public ConversationEntity getOrCreateWebchatConversation(String conversationId, Long agentId,
+                                                             String username, Long workspaceId,
+                                                             String sessionId, String title) {
+        boolean existed = conversationMapper.selectOne(new LambdaQueryWrapper<ConversationEntity>()
+                .eq(ConversationEntity::getConversationId, conversationId)) != null;
+        ConversationEntity conv = getOrCreateConversation(conversationId, agentId, username, workspaceId);
+        if (!existed) {
+            boolean dirty = false;
+            if (sessionId != null && !sessionId.isBlank() && conv.getWebchatSessionId() == null) {
+                conv.setWebchatSessionId(sessionId);
+                dirty = true;
+            }
+            if (title != null && !title.isBlank()) {
+                conv.setTitle(title.trim());
+                dirty = true;
+            }
+            if (dirty) {
+                conversationMapper.updateById(conv);
+            }
+        }
+        return conv;
+    }
+
+    /**
+     * List a webchat visitor's own conversations (top-level threads), ordered
+     * pinned-desc then last-active-desc.
+     * <p>
+     * Scoped to {@code username = owner} only — unlike {@link #listConversations}
+     * it does <b>not</b> pull in {@code system} rows, so a visitor's /sessions
+     * call doesn't load every IM/cron conversation in the database just to list
+     * its own handful of threads. The caller still applies the channel-prefix
+     * filter (literal {@code startsWith}, wildcard-safe) to isolate the channel.
+     */
+    public List<ConversationEntity> listWebchatConversations(String username) {
+        return conversationMapper.selectList(new LambdaQueryWrapper<ConversationEntity>()
+                .eq(ConversationEntity::getUsername, username)
+                .isNull(ConversationEntity::getParentConversationId)
+                .orderByDesc(ConversationEntity::getPinned)
+                .orderByDesc(ConversationEntity::getLastActiveTime));
+    }
+
+    /**
+     * Create a child conversation (delegation scenario), linking it back to
+     * its parent via {@code parentConversationId}.
+     *
+     * <p>创建子会话（委派场景），关联父会话 ID。
      */
     @Transactional
     public ConversationEntity createChildConversation(String childConversationId, Long agentId,
@@ -148,11 +430,19 @@ public class ConversationService {
     }
 
     /**
-     * 获取或创建共享渠道会话。
-     * <p>
-     * IM 渠道（飞书/钉钉/企微等）的会话需要在控制台中对登录用户可见，
-     * 因此统一使用 system 作为 owner。对于历史上已写成发送者昵称/open_id 的会话，
-     * 这里会自动修正为 system，避免控制台列表和消息接口因权限校验而不可见。
+     * Get-or-create a shared channel conversation.
+     *
+     * <p>IM-channel (Feishu / DingTalk / WeCom / …) conversations must be
+     * visible to every logged-in user in the admin console, so the owner is
+     * uniformly set to {@code system}. For legacy rows whose owner was
+     * historically written as a sender nickname / {@code open_id}, this
+     * method silently rewrites it to {@code system} on read — otherwise the
+     * console list and message endpoints would 403 those rows.
+     *
+     * <p>获取或创建共享渠道会话。IM 渠道（飞书 / 钉钉 / 企微等）的会话需要在控制台中
+     * 对登录用户可见，因此统一使用 {@code system} 作为 owner。对于历史上已写成发送者
+     * 昵称 / open_id 的会话，这里会自动修正为 {@code system}，避免控制台列表和
+     * 消息接口因权限校验而不可见。
      */
     @Transactional
     public ConversationEntity getOrCreateSharedConversation(String conversationId, Long agentId) {
@@ -160,12 +450,46 @@ public class ConversationService {
     }
 
     /**
-     * 获取或创建共享渠道会话（workspace 感知）
+     * Workspace-aware get-or-create for shared channel conversations.
+     *
+     * <p>Delegates to the 5-arg overload with {@code null} model defaults —
+     * preserves the legacy behavior for any caller that doesn't have an
+     * agent-level model to inherit from.
+     *
+     * <p>获取或创建共享渠道会话（workspace 感知）。委托到 5 参重载，model 默认值传
+     * {@code null}，保留对不需要继承 agent 模型的调用方的旧行为。
      */
     @Transactional
     public ConversationEntity getOrCreateSharedConversation(String conversationId, Long agentId, Long workspaceId) {
+        return getOrCreateSharedConversation(conversationId, agentId, workspaceId, null, null);
+    }
+
+    /**
+     * Get-or-create variant that seeds the conversation's pinned model from
+     * an agent-level default. Used by the IM channel path
+     * ({@code ChannelMessageRouter}) so that new IM conversations inherit
+     * the agent's currently-configured model as a baseline.
+     *
+     * <p><b>Idempotent on the model fields</b>: the {@code defaultModelProvider}
+     * / {@code defaultModelName} are written <i>only</i> when the conversation
+     * is freshly inserted. For an existing conversation — including one the
+     * user already pinned to a different model via the admin UI — the model
+     * fields are left untouched. This is the core fix for issue #183: the
+     * IM channel call site supplies the agent default, but a user-pinned
+     * model wins on every subsequent message.
+     *
+     * <p>Both defaults must be non-blank to take effect. A half-populated
+     * pair (provider without name, or vice versa) is treated as no seed —
+     * matches {@link #updateConversationModel} so a malformed agent row
+     * doesn't pin an unusable model.
+     */
+    @Transactional
+    public ConversationEntity getOrCreateSharedConversation(String conversationId, Long agentId, Long workspaceId,
+                                                            String defaultModelProvider, String defaultModelName) {
         ConversationEntity conv = conversationMapper.selectOne(new LambdaQueryWrapper<ConversationEntity>()
                 .eq(ConversationEntity::getConversationId, conversationId));
+        boolean seedModel = defaultModelProvider != null && !defaultModelProvider.isBlank()
+                && defaultModelName != null && !defaultModelName.isBlank();
         if (conv == null) {
             conv = new ConversationEntity();
             conv.setConversationId(conversationId);
@@ -175,16 +499,24 @@ public class ConversationService {
             conv.setTitle("新对话");
             conv.setMessageCount(0);
             conv.setLastActiveTime(LocalDateTime.now());
+            // Seed the agent-default model so the very first turn picks the
+            // right provider. Subsequent admin-UI switches go through
+            // updateConversationModel and override this baseline.
+            if (seedModel) {
+                conv.setModelProvider(defaultModelProvider);
+                conv.setModelName(defaultModelName);
+            }
             try {
                 conversationMapper.insert(conv);
             } catch (org.springframework.dao.DuplicateKeyException e) {
-                // 并发插入：另一个线程已创建，回退到查询
+                // Concurrent insert: another thread won the race — re-query
+                // and fall through to the owner-correction block below.
+                // 并发插入：另一个线程已创建，回退到查询；继续走下面的 owner 修正逻辑。
                 conv = conversationMapper.selectOne(new LambdaQueryWrapper<ConversationEntity>()
                         .eq(ConversationEntity::getConversationId, conversationId));
                 if (conv == null) {
                     throw new IllegalStateException("Conversation vanished after duplicate key: " + conversationId, e);
                 }
-                // 继续走下面的 owner 修正逻辑
             }
         }
 
@@ -193,8 +525,38 @@ public class ConversationService {
             conv.setUsername(SYSTEM_USER);
             changed = true;
         }
-        if (conv.getAgentId() == null && agentId != null) {
+        // Shared conversations (IM channel sessions, cron job-specific rows)
+        // take their agent from the caller's current authoritative binding —
+        // the channel's bound agent for IM, the job's bound agent for cron.
+        // Sync so the admin sidebar / dashboard / context resolution all see
+        // the same agent the runtime is dispatching to; otherwise an admin
+        // who rebinds a channel from A to B leaves every existing
+        // conversation pointing at the old A.
+        //
+        // Exception: Web-origin cron uses {@code tasks_<workspaceId>} as a
+        // single aggregate conversation for ALL of the workspace's web cron
+        // runs (see CronConversationResolver). Many jobs with different
+        // bound agents land in that same row; overwriting agentId per run
+        // would make the header / avatar / model selector flicker to
+        // whichever cron fired last. The aggregate has no single "owner
+        // agent" — leave its agentId alone (the original first-runner value
+        // is fine; UI treats this conversation specially anyway).
+        boolean isCronAggregate = conversationId != null && conversationId.startsWith("tasks_");
+        if (!isCronAggregate && agentId != null && !agentId.equals(conv.getAgentId())) {
             conv.setAgentId(agentId);
+            changed = true;
+        }
+        // Backfill model on an already-existing conversation only when BOTH
+        // model fields are still null. Pinning is sticky once set: if the
+        // user (or an earlier turn) wrote either column, we don't touch it.
+        // This handles legacy IM conversations created before this fix
+        // landed — they get the agent default on next inbound message and
+        // remain pinned thereafter.
+        if (seedModel
+                && (conv.getModelProvider() == null || conv.getModelProvider().isBlank())
+                && (conv.getModelName() == null || conv.getModelName().isBlank())) {
+            conv.setModelProvider(defaultModelProvider);
+            conv.setModelName(defaultModelName);
             changed = true;
         }
         if (changed) {
@@ -204,7 +566,10 @@ public class ConversationService {
     }
 
     /**
-     * 保存消息并更新会话统计
+     * Persist a message and update the conversation's aggregate counters
+     * ({@code messageCount}, {@code lastActiveTime}, {@code lastMessage}).
+     *
+     * <p>保存消息并更新会话统计。
      */
     @Transactional
     public MessageEntity saveMessage(String conversationId, String role, String content) {
@@ -247,21 +612,26 @@ public class ConversationService {
         message.setCompletionTokens(completionTokens);
         message.setRuntimeModel(runtimeModel);
         message.setRuntimeProvider(runtimeProvider);
-        message.setMetadata(metadata != null ? metadata : "{}");  // 初始化为空对象
+        message.setMetadata(metadata != null ? metadata : "{}");  // Initialize as empty JSON object / 初始化为空对象
         messageMapper.insert(message);
 
-        // 更新会话信息
+        // Update aggregate counters on the parent conversation row.
+        // 更新会话信息（消息计数、最后活跃时间、最后一条摘要）。
         ConversationEntity conv = conversationMapper.selectOne(new LambdaQueryWrapper<ConversationEntity>()
                 .eq(ConversationEntity::getConversationId, conversationId));
         if (conv != null) {
             conv.setMessageCount(conv.getMessageCount() + 1);
             conv.setLastActiveTime(LocalDateTime.now());
             String summary = summarizeMessage(content, parts);
-            // 用第一条用户消息作为会话标题
+            // Derive the conversation title from the first user message
+            // (only when the title is still the default "新对话").
+            // 用第一条用户消息作为会话标题。
             if ("user".equals(role) && "新对话".equals(conv.getTitle())) {
                 conv.setTitle(summary.length() > 20 ? summary.substring(0, 20) + "..." : summary);
             }
-            // 保存最后一条 AI 回复摘要
+            // Keep a short preview of the latest assistant reply for the
+            // sidebar / list view (last_message column).
+            // 保存最后一条 AI 回复摘要。
             if ("assistant".equals(role)) {
                 conv.setLastMessage(summary.length() > 50 ? summary.substring(0, 50) + "..." : summary);
             }
@@ -271,7 +641,9 @@ public class ConversationService {
     }
 
     /**
-     * 更新消息的元数据（toolCalls, plan, currentPhase 等）
+     * Update a message's metadata JSON (toolCalls, plan, currentPhase, …).
+     *
+     * <p>更新消息的元数据（toolCalls / plan / currentPhase 等）。
      */
     @Transactional
     public void updateMessageMetadata(Long messageId, String metadata) {
@@ -282,7 +654,9 @@ public class ConversationService {
     }
 
     /**
-     * 重命名会话
+     * Rename a conversation.
+     *
+     * <p>重命名会话。
      */
     @Transactional
     public void renameConversation(String conversationId, String title) {
@@ -295,7 +669,37 @@ public class ConversationService {
     }
 
     /**
-     * 更新会话的流状态（running / idle）
+     * Pin or unpin a conversation. Pinned conversations sort ahead of unpinned
+     * ones in the sidebar list regardless of last-active time.
+     */
+    public void setPinned(String conversationId, boolean pinned) {
+        ConversationEntity conv = conversationMapper.selectOne(new LambdaQueryWrapper<ConversationEntity>()
+                .eq(ConversationEntity::getConversationId, conversationId));
+        if (conv != null) {
+            conv.setPinned(pinned ? 1 : 0);
+            conversationMapper.updateById(conv);
+        }
+    }
+
+    /**
+     * Archive or unarchive a conversation (webchat soft-close). Mirrors
+     * {@link #setPinned}: archived threads stay on disk (history preserved,
+     * addressable, downloadable) but are excluded from default listings; the
+     * caller opts back in via {@code includeArchived=true}.
+     */
+    public void setArchived(String conversationId, boolean archived) {
+        ConversationEntity conv = conversationMapper.selectOne(new LambdaQueryWrapper<ConversationEntity>()
+                .eq(ConversationEntity::getConversationId, conversationId));
+        if (conv != null) {
+            conv.setArchived(archived ? 1 : 0);
+            conversationMapper.updateById(conv);
+        }
+    }
+
+    /**
+     * Update a conversation's stream status ({@code running} / {@code idle}).
+     *
+     * <p>更新会话的流状态（running / idle）。
      */
     @Transactional
     public void updateStreamStatus(String conversationId, String streamStatus) {
@@ -308,7 +712,60 @@ public class ConversationService {
     }
 
     /**
-     * 获取会话最后一条消息内容（用于 rate limit 防护等场景）
+     * Pin the model a conversation uses. A blank provider or model id is a
+     * no-op (no override supplied — the conversation keeps inheriting the
+     * agent / global default). The write is skipped when the stored value
+     * already matches, so persisting the same model on every turn costs only
+     * a SELECT.
+     */
+    @Transactional
+    public void updateConversationModel(String conversationId, String modelProvider, String modelName) {
+        if (modelProvider == null || modelProvider.isBlank()
+                || modelName == null || modelName.isBlank()) {
+            return;
+        }
+        ConversationEntity conv = conversationMapper.selectOne(new LambdaQueryWrapper<ConversationEntity>()
+                .eq(ConversationEntity::getConversationId, conversationId));
+        if (conv == null) {
+            return;
+        }
+        if (modelProvider.equals(conv.getModelProvider()) && modelName.equals(conv.getModelName())) {
+            return;
+        }
+        conv.setModelProvider(modelProvider);
+        conv.setModelName(modelName);
+        conversationMapper.updateById(conv);
+    }
+
+    /**
+     * Persist an assistant placeholder marker only when the last message is a
+     * user turn (i.e., the assistant never got to reply). Used by the admin
+     * force-recycle path so a torn-down turn leaves a visible "已被用户中止"
+     * marker instead of an empty conversation. Idempotent: if the previous
+     * emergency-save path already wrote an assistant row, this is a no-op.
+     *
+     * @return the saved message, or {@code null} if the marker was not needed
+     */
+    @Transactional
+    public MessageEntity saveStopMarkerIfDangling(String conversationId, String markerText, String status) {
+        List<MessageEntity> recent = messageMapper.selectList(
+                new LambdaQueryWrapper<MessageEntity>()
+                        .eq(MessageEntity::getConversationId, conversationId)
+                        .orderByDesc(MessageEntity::getCreateTime)
+                        .orderByDesc(MessageEntity::getId)
+                        .last("LIMIT 1"));
+        if (recent.isEmpty()) return null;
+        MessageEntity last = recent.get(0);
+        if (!"user".equals(last.getRole())) return null;
+        return saveMessage(conversationId, "assistant", markerText, null,
+                status != null ? status : "stopped");
+    }
+
+    /**
+     * Get the latest message preview text for a conversation — used by
+     * rate-limit guards and similar duplicate-detection paths.
+     *
+     * <p>获取会话最后一条消息内容（用于 rate limit 防护等场景）。
      */
     public String getLastMessage(String conversationId) {
         ConversationEntity conv = conversationMapper.selectOne(new LambdaQueryWrapper<ConversationEntity>()
@@ -317,7 +774,33 @@ public class ConversationService {
     }
 
     /**
-     * 获取会话的消息数量
+     * Find the most recent message of a given role in a conversation.
+     * Used by the webchat regenerate flow to find the seed user message and
+     * locate the assistant reply to delete. Returns null if no match.
+     */
+    public MessageEntity findLastMessageByRole(String conversationId, String role) {
+        List<MessageEntity> msgs = messageMapper.selectList(new LambdaQueryWrapper<MessageEntity>()
+                .eq(MessageEntity::getConversationId, conversationId)
+                .eq(MessageEntity::getRole, role)
+                .orderByDesc(MessageEntity::getId)
+                .last("LIMIT 1"));
+        return msgs.isEmpty() ? null : msgs.get(0);
+    }
+
+    /**
+     * Delete a single message by its primary key. Used by the webchat
+     * regenerate flow to drop the last assistant reply before re-running.
+     * Does NOT touch the conversation's messageCount counter — that is
+     * rewritten when the new assistant message is persisted by saveMessage.
+     */
+    public void deleteMessageById(Long messageId) {
+        messageMapper.deleteById(messageId);
+    }
+
+    /**
+     * Get a conversation's message count.
+     *
+     * <p>获取会话的消息数量。
      */
     public int getMessageCount(String conversationId) {
         ConversationEntity conv = conversationMapper.selectOne(new LambdaQueryWrapper<ConversationEntity>()
@@ -326,7 +809,9 @@ public class ConversationService {
     }
 
     /**
-     * 获取会话的消息历史
+     * Load the full message history for a conversation in chronological order.
+     *
+     * <p>获取会话的消息历史。
      */
     public List<MessageEntity> listMessages(String conversationId) {
         return messageMapper.selectList(new LambdaQueryWrapper<MessageEntity>()
@@ -336,8 +821,36 @@ public class ConversationService {
     }
 
     /**
-     * 加载最近 N 条消息（倒序取出后翻转为正序）。
-     * 利用复合索引 (conversation_id, create_time) 高效分页。
+     * Returns the most recent compression boundary row for the conversation,
+     * or {@code null} if no boundary exists yet. Used by the agent loader to
+     * recover the structured summary when the boundary itself sits outside the
+     * recent-message window — without this, a long conversation that already
+     * compacted would feed the model the last N raw messages while silently
+     * dropping the goal / progress digest the boundary holds.
+     *
+     * <p>Implemented as a single indexed query rather than a full
+     * {@code listMessages} + filter so it stays cheap on conversations with
+     * thousands of messages. Selection: {@code role=system} +
+     * {@code metadata like '%compression_summary%'} (the metadata column always
+     * carries that literal — see {@link #saveCompressionSummary}).
+     */
+    public MessageEntity findLatestCompressionBoundary(String conversationId) {
+        return messageMapper.selectOne(new LambdaQueryWrapper<MessageEntity>()
+                .eq(MessageEntity::getConversationId, conversationId)
+                .eq(MessageEntity::getRole, "system")
+                .like(MessageEntity::getMetadata, "compression_summary")
+                .orderByDesc(MessageEntity::getCreateTime)
+                .orderByDesc(MessageEntity::getId)
+                .last("LIMIT 1"));
+    }
+
+    /**
+     * Load the most recent N messages — pulled DESC then reversed to ASC.
+     * Uses the composite index {@code (conversation_id, create_time)} for
+     * efficient tail pagination.
+     *
+     * <p>加载最近 N 条消息（倒序取出后翻转为正序）；利用复合索引
+     * {@code (conversation_id, create_time)} 高效分页。
      */
     public List<MessageEntity> listRecentMessages(String conversationId, int lastN) {
         List<MessageEntity> recent = messageMapper.selectList(
@@ -351,7 +864,11 @@ public class ConversationService {
     }
 
     /**
-     * 分页加载指定 ID 之前的消息（用于前端上拉加载更早消息）。
+     * Load a page of messages older than a given id — used by the frontend
+     * pull-up infinite-scroll. Results are returned DESC; the caller is
+     * responsible for reversing if it needs ASC.
+     *
+     * <p>分页加载指定 ID 之前的消息（用于前端上拉加载更早消息）；
      * 返回倒序结果，调用方需自行 reverse。
      */
     public List<MessageEntity> listMessagesBefore(String conversationId, Long beforeId, int limit) {
@@ -367,7 +884,9 @@ public class ConversationService {
     }
 
     /**
-     * 查询会话消息总数。
+     * Count the total number of messages in a conversation.
+     *
+     * <p>查询会话消息总数。
      */
     public long countMessages(String conversationId) {
         return messageMapper.selectCount(
@@ -376,18 +895,108 @@ public class ConversationService {
     }
 
     /**
-     * 将压缩摘要持久化为 role=system 的特殊消息。
-     * 下次加载历史时识别此消息，跳过它之前的已压缩消息。
+     * Persist a compaction boundary as a role=system message. The body is
+     * the summary text; the metadata describes <em>what happened</em> at
+     * this boundary (trigger, pre/post tokens, how many messages were
+     * summarised, how many spill files were produced, how many tail
+     * messages survived). On the next load this row is the cut-off — older
+     * messages are skipped, the model picks up from the summary forward.
+     *
+     * <p>Backward-compat overload: legacy callers that only know the row
+     * count still work and produce a minimal metadata block.
      */
     public void saveCompressionSummary(String conversationId, String summary, int compressedCount) {
+        saveCompressionSummary(conversationId, summary, compressedCount, Map.of());
+    }
+
+    /**
+     * Same as {@link #saveCompressionSummary(String, String, int, Map)} but
+     * returns the inserted row's id so callers (notably
+     * {@code ConversationWindowManager}) can include the {@code summaryId}
+     * in the {@code compact_status} SSE payload. The id is also written back
+     * into the row's metadata JSON by the underlying overload, so the row is
+     * still self-describing if a client misses the SSE event and loads
+     * history later.
+     *
+     * <p>Returns {@code null} when the insert path failed (logged at INFO);
+     * callers should treat that as "no boundary was persisted" and still
+     * broadcast a {@code done} event without {@code summaryId}.
+     */
+    public Long saveCompressionSummaryReturningId(String conversationId, String summary,
+                                                  int compressedCount, Map<String, Object> extraMetadata) {
+        return saveCompressionSummaryInternal(conversationId, summary, compressedCount, extraMetadata);
+    }
+
+    /**
+     * Same as the 3-arg overload but accepts extra structured fields that
+     * are merged into the boundary's metadata JSON. Fields the frontend
+     * and observability pipeline care about:
+     * <ul>
+     *   <li>{@code trigger} — what fired this boundary
+     *       ({@code token_threshold}, {@code user_compact}, etc.)</li>
+     *   <li>{@code preTokens} / {@code postTokens} — context size before
+     *       and after, for the in-prompt status row</li>
+     *   <li>{@code messagesSummarized} / {@code tailKept} — partition
+     *       counts the user sees in the boundary card</li>
+     *   <li>{@code toolResultsSpilled} — how many bodies the spill store
+     *       absorbed during this boundary</li>
+     *   <li>{@code summaryId} — stable id (the inserted message id) for
+     *       deep-linking from the SSE event</li>
+     * </ul>
+     * <p>{@code type=compression_summary} is always present — the loader
+     * keys off it. {@code compressedCount} is kept for backward compat.
+     */
+    public void saveCompressionSummary(String conversationId, String summary, int compressedCount,
+                                       Map<String, Object> extraMetadata) {
+        saveCompressionSummaryInternal(conversationId, summary, compressedCount, extraMetadata);
+    }
+
+    private Long saveCompressionSummaryInternal(String conversationId, String summary, int compressedCount,
+                                                Map<String, Object> extraMetadata) {
         MessageEntity entity = new MessageEntity();
         entity.setConversationId(conversationId);
         entity.setRole("system");
         entity.setContent(summary);
         entity.setStatus("completed");
-        entity.setMetadata("{\"type\":\"compression_summary\",\"compressedCount\":" + compressedCount + "}");
+
+        Map<String, Object> metadata = new java.util.LinkedHashMap<>();
+        metadata.put("type", "compression_summary");
+        metadata.put("compressedCount", compressedCount);
+        if (extraMetadata != null) {
+            extraMetadata.forEach((k, v) -> {
+                if (v != null) metadata.put(k, v);
+            });
+        }
+        // First write a placeholder so the row lands with the structured
+        // fields; we backfill summaryId in a second step once MyBatis Plus
+        // has assigned the snowflake id. ASSIGN_ID actually populates the
+        // id BEFORE flushing the INSERT, but reading it back this way means
+        // the contract holds even if the ID generation strategy changes.
+        try {
+            entity.setMetadata(objectMapper.writeValueAsString(metadata));
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            log.warn("[Conversation] Failed to serialise compaction metadata, falling back to minimal: {}",
+                    e.getMessage());
+            entity.setMetadata("{\"type\":\"compression_summary\",\"compressedCount\":" + compressedCount + "}");
+        }
         messageMapper.insert(entity);
-        log.info("[Conversation] Saved compression summary for conv={}, compressedCount={}", conversationId, compressedCount);
+
+        // Backfill summaryId now that the row owns an id. Best-effort: a
+        // failure here doesn't invalidate the boundary itself, it just
+        // means SSE clients won't have a deep-link target for this row.
+        if (entity.getId() != null) {
+            metadata.put("summaryId", entity.getId());
+            try {
+                entity.setMetadata(objectMapper.writeValueAsString(metadata));
+                messageMapper.updateById(entity);
+            } catch (Exception e) {
+                log.warn("[Conversation] Failed to backfill summaryId on compression boundary: {}",
+                        e.getMessage());
+            }
+        }
+        log.info("[Conversation] Saved compression boundary conv={}, compressedCount={}, metadata={}",
+                conversationId, compressedCount, entity.getMetadata());
+        return entity.getId();
     }
 
     public List<MessageVO> listMessageViews(String conversationId) {
@@ -397,19 +1006,134 @@ public class ConversationService {
     }
 
     /**
-     * 删除会话（同时删除消息和附件文件）
+     * External-facing message views for untrusted callers (webchat visitors).
+     * Strips the server-side absolute file path from both the structured parts
+     * ({@code path} nulled) and the rendered text, so the server filesystem
+     * layout is never disclosed. Visitors still get {@code fileUrl} / {@code
+     * fileName} / {@code contentType} to render and download attachments.
      */
-    @Transactional
-    public void deleteConversation(String conversationId) {
-        conversationMapper.delete(new LambdaQueryWrapper<ConversationEntity>()
-                .eq(ConversationEntity::getConversationId, conversationId));
-        messageMapper.delete(new LambdaQueryWrapper<MessageEntity>()
-                .eq(MessageEntity::getConversationId, conversationId));
-        cleanAttachmentFiles(conversationId);
+    public List<MessageVO> listMessageViewsExternal(String conversationId) {
+        return toExternalMessageViews(listMessages(conversationId));
     }
 
     /**
-     * 清空会话消息（同时清理附件文件）
+     * Map already-loaded message entities to external (path-stripped) views.
+     * Shared by the full-list and paginated webchat paths so sanitization stays
+     * in one place.
+     */
+    public List<MessageVO> toExternalMessageViews(List<MessageEntity> messages) {
+        return messages.stream()
+                .map(message -> {
+                    List<MessageContentPart> parts = parseMessageParts(message);
+                    parts.forEach(p -> {
+                        if (p != null) {
+                            p.setPath(null);
+                        }
+                    });
+                    return MessageVO.from(message, parts, renderMessageContent(message, false));
+                })
+                .toList();
+    }
+
+    /**
+     * Delete a conversation and cascade-clean every row that referenced it.
+     * <p>
+     * Tables cleaned in the same transaction:
+     * <ul>
+     *   <li>{@code mate_message} — chat history</li>
+     *   <li>{@code mate_tool_approval} — pending approvals would otherwise
+     *       point to a non-existent conversation and surface as ghost items
+     *       in the approvals list</li>
+     *   <li>{@code mate_async_task} — long-running task records keyed on
+     *       this conversation</li>
+     *   <li>{@code mate_channel_session} — channel-side session row (the
+     *       column is UNIQUE; leaving it would block reuse of the same id)</li>
+     *   <li>{@code mate_conversation} — the conversation itself</li>
+     * </ul>
+     * Child conversations (delegated turns) have their
+     * {@code parent_conversation_id} set to NULL rather than cascade-deleted,
+     * so the user keeps independent access to delegated work.
+     * <p>
+     * Audit / history tables ({@code mate_tool_guard_audit_log},
+     * {@code mate_cron_job_run}, {@code mate_skill.source_conversation_id},
+     * {@code mate_skill_usage_stat}) are intentionally left alone — those
+     * are append-only records that should outlive their source conversation.
+     * <p>
+     * Attachment file cleanup is registered as an after-commit hook so it
+     * runs only when the DB cascade actually persists, and an IO failure
+     * cannot roll back the database deletes.
+     */
+    @Transactional
+    public void deleteConversation(String conversationId) {
+        int messages = messageMapper.delete(new LambdaQueryWrapper<MessageEntity>()
+                .eq(MessageEntity::getConversationId, conversationId));
+        int approvals = toolApprovalMapper.delete(new LambdaQueryWrapper<ToolApprovalEntity>()
+                .eq(ToolApprovalEntity::getConversationId, conversationId));
+        int asyncTasks = asyncTaskMapper.delete(new LambdaQueryWrapper<AsyncTaskEntity>()
+                .eq(AsyncTaskEntity::getConversationId, conversationId));
+        int channelSessions = channelSessionMapper.delete(new LambdaQueryWrapper<ChannelSessionEntity>()
+                .eq(ChannelSessionEntity::getConversationId, conversationId));
+        int childrenUnlinked = conversationMapper.update(null, new LambdaUpdateWrapper<ConversationEntity>()
+                .set(ConversationEntity::getParentConversationId, null)
+                .eq(ConversationEntity::getParentConversationId, conversationId));
+        int conversations = conversationMapper.delete(new LambdaQueryWrapper<ConversationEntity>()
+                .eq(ConversationEntity::getConversationId, conversationId));
+
+        log.info("[Conversation] Deleted {}: messages={}, approvals={}, asyncTasks={},"
+                        + " channelSessions={}, childrenUnlinked={}, conversationRow={}",
+                conversationId, messages, approvals, asyncTasks,
+                channelSessions, childrenUnlinked, conversations);
+
+        registerPostCommitCleanup(conversationId);
+    }
+
+    /**
+     * After-commit cleanup: file IO and the {@link ConversationDeletedEvent}
+     * fan-out both run only if the cascade actually persists, and an IO
+     * failure cannot roll back the DB cascade. The event lets approval and
+     * async-task modules drop their in-memory state (pendingMap, active
+     * pollers, canceled-conv set) so workers cannot resurrect orphan rows
+     * after the conversation row is gone.
+     */
+    private void registerPostCommitCleanup(String conversationId) {
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    cleanAttachmentFiles(conversationId);
+                    purgeToolResultSpill(conversationId);
+                    eventPublisher.publishEvent(new ConversationDeletedEvent(conversationId));
+                }
+            });
+        } else {
+            cleanAttachmentFiles(conversationId);
+            purgeToolResultSpill(conversationId);
+            eventPublisher.publishEvent(new ConversationDeletedEvent(conversationId));
+        }
+    }
+
+    /**
+     * Best-effort: ask the spill store to delete every tool-result file this
+     * conversation produced. No-op when no spill store is wired in (legacy
+     * deployments or tests that don't need spill). Failures are logged but
+     * never propagated — leaving an extra file on disk is a small price
+     * compared to surfacing IO errors as a 500 on the delete endpoint.
+     */
+    private void purgeToolResultSpill(String conversationId) {
+        if (toolResultStorage == null) return;
+        try {
+            toolResultStorage.purgeConversation(conversationId);
+        } catch (Exception e) {
+            log.warn("[Conversation] tool-result spill purge failed for {}: {}",
+                    conversationId, e.getMessage());
+        }
+    }
+
+    /**
+     * Wipe all messages in a conversation and reset its aggregate counters,
+     * also cleaning any attachment files those messages produced.
+     *
+     * <p>清空会话消息（同时清理附件文件）。
      */
     @Transactional
     public void clearMessages(String conversationId) {
@@ -440,6 +1164,16 @@ public class ConversationService {
     }
 
     public String renderMessageContent(MessageEntity message) {
+        return renderMessageContent(message, true);
+    }
+
+    /**
+     * Render variant whose {@code includePath} controls whether the server-side
+     * file path is embedded in the text. Internal/LLM rendering keeps it (tools
+     * resolve files by path); external rendering (webchat visitors) drops it so
+     * the server filesystem layout is not disclosed to untrusted callers.
+     */
+    public String renderMessageContent(MessageEntity message, boolean includePath) {
         List<MessageContentPart> parts = parseMessageParts(message);
         if (parts.isEmpty()) {
             return message.getContent() != null ? message.getContent() : "";
@@ -453,7 +1187,8 @@ public class ConversationService {
             switch (part.getType()) {
                 case "text" -> appendSegment(text, part.getText());
                 case "thinking", "tool_call", "parse_error" -> { /* skip — frontend reads these from contentParts directly */ }
-                case "file" -> appendSegment(text, renderFilePart(part));
+                case "file" -> appendSegment(text, renderFilePart(part, includePath));
+                case "image", "video", "audio", "model3d" -> appendSegment(text, renderMediaPart(part, includePath));
                 default -> appendSegment(text, part.getText());
             }
         }
@@ -503,13 +1238,71 @@ public class ConversationService {
      * picks (read_file / extract_document_text / detect_file_type / …) can be called
      * with a path that resolves directly, instead of relying on per-tool fallbacks.
      */
-    private String renderFilePart(MessageContentPart part) {
+    private String renderFilePart(MessageContentPart part, boolean includePath) {
         String name = safe(part.getFileName());
         String path = safe(part.getPath());
-        if (path.isBlank()) {
+        if (!includePath || path.isBlank()) {
             return "[附件] " + name;
         }
         return "[附件] " + name + "（路径: " + path + "）";
+    }
+
+    /**
+     * Render an image/video/audio/3D-model content part for the LLM prompt.
+     * <p>
+     * Without this marker, media parts are invisible in the rendered text — the LLM
+     * sees only the user's accompanying text and has no idea an attachment was sent.
+     * That fails closed when the multimodal Media injection in {@code BaseAgent} is
+     * upstream-stripped (model heuristic claims vision but the actual provider drops
+     * the image), leaving the agent to ask "which image?" for an attachment the user
+     * already uploaded. The path lets file-reading tools ({@code read_file},
+     * {@code extract_document_text}, {@code detect_file_type}) work as a fallback.
+     */
+    private String renderMediaPart(MessageContentPart part, boolean includePath) {
+        String label = switch (part.getType()) {
+            case "image" -> "[图片]";
+            case "video" -> "[视频]";
+            case "audio" -> "[音频]";
+            case "model3d" -> "[3D 模型]";
+            default -> "[附件]";
+        };
+        String name = safe(part.getFileName());
+        if (name.isBlank()) {
+            name = "未命名";
+        }
+        String path = safe(part.getPath());
+        StringBuilder rendered = new StringBuilder(label).append(' ').append(name);
+        if (includePath && !path.isBlank()) {
+            rendered.append("（路径: ").append(path).append("）");
+        }
+        // A persisted caption (vision sidecar output) carries the image content
+        // into later turns: history user messages replay as text only, so without
+        // this the model would lose all knowledge of the attachment after turn 1.
+        String caption = safe(part.getCaption());
+        if (!caption.isBlank()) {
+            rendered.append("\n[图片内容] ").append(caption.trim());
+        }
+        return rendered.toString();
+    }
+
+    /**
+     * Overwrite a message's {@code content_parts} with an updated list — used by
+     * the vision sidecar to persist generated captions back onto image parts so
+     * later turns retain the image description (history replay is text-only).
+     * Best-effort: a serialization or DB failure is logged, not propagated, so
+     * the in-flight chat turn is never broken by a caption write.
+     */
+    public void updateMessageParts(MessageEntity message, List<MessageContentPart> parts) {
+        if (message == null || message.getId() == null || parts == null || parts.isEmpty()) {
+            return;
+        }
+        try {
+            message.setContentParts(serializeParts(parts));
+            messageMapper.updateById(message);
+        } catch (Exception e) {
+            log.warn("Failed to persist updated content_parts for message {}: {}",
+                    message.getId(), e.getMessage());
+        }
     }
 
     private void appendSegment(StringBuilder builder, String text) {
@@ -528,9 +1321,13 @@ public class ConversationService {
     }
 
     /**
-     * 删除指定会话中所有审批占位 assistant 消息
-     * <p>
-     * 在 replay 前调用，确保 LLM 上下文中不包含任何审批相关文本。
+     * Remove all approval-placeholder assistant messages from a conversation.
+     *
+     * <p>Called before replay so the LLM context contains no approval-related
+     * stub text that could confuse the next turn.
+     *
+     * <p>删除指定会话中所有审批占位 assistant 消息。在 replay 前调用，
+     * 确保 LLM 上下文中不包含任何审批相关文本。
      */
     /**
      * Reconcile persisted assistant-message state when one or more pending approvals
@@ -754,7 +1551,9 @@ public class ConversationService {
     }
 
     /**
-     * 检查会话是否存在
+     * Check whether a conversation row exists.
+     *
+     * <p>检查会话是否存在。
      */
     public boolean conversationExists(String conversationId) {
         return conversationMapper.selectCount(
@@ -763,8 +1562,37 @@ public class ConversationService {
     }
 
     /**
-     * 校验用户是否拥有该会话。
-     * 定时任务产生的会话（username=system）对所有登录用户可见。
+     * Check whether a user owns the conversation. Direct owners always pass;
+     * shared rows (system / IM / {@code webchat:<visitorId>} principals) are
+     * additionally gated by the requester's membership in the conversation's
+     * workspace, so they are not reachable cross-workspace by id.
+     *
+     * <p><b>Cross-workspace guard (issue #344).</b> The legacy contract let any
+     * logged-in user reach a system / IM / webchat-owned conversation by id —
+     * the list endpoints filtered by {@code workspaceId} but the direct-access
+     * endpoints did not. Under a multi-tenant model where workspaces are
+     * untrusted isolation boundaries, that asymmetry is a cross-workspace
+     * authorization gap. This method now also requires, for shared (non-direct)
+     * conversations, that the requester actually be a member of the
+     * conversation's workspace.
+     *
+     * <p>校验用户是否拥有该会话。直属会话直接放行;共享会话(system / IM / webchat)
+     * 额外要求请求者是该会话所属 workspace 的成员。
+     *
+     * <p>分支:
+     * <ul>
+     *   <li>会话不存在 → false</li>
+     *   <li>请求者是该会话的直属 owner → true(自己的会话,workspace 隐式一致)</li>
+     *   <li>会话无 workspace_id(老数据)→ 仅看是否 system owner(维持旧行为,避免回归)</li>
+     *   <li>请求者用户记录不存在(permitAll 端点的匿名重连)→ 仅看是否 system owner(维持旧行为)</li>
+     *   <li>请求者是全局 admin(user.role=admin)→ true(横切覆盖,与具体 workspace 无关)</li>
+     *   <li>请求者非该会话 workspace 的成员 → false</li>
+     *   <li>否则 → system owner 检查(共享会话对本 workspace 成员可见)</li>
+     * </ul>
+     *
+     * <p>调用方签名不变;调用方若需在不查 DB 的情况下做 admin 例外,可在外层先短路,
+     * 但通常让本方法统一处理以避免散落的 admin 例外逻辑。注意:本方法不读
+     * {@code X-Workspace-Id} header —— 该 header 客户端可伪造,以 DB 中的成员关系为准。
      */
     public boolean isConversationOwner(String conversationId, String username) {
         ConversationEntity conv = conversationMapper.selectOne(
@@ -773,11 +1601,53 @@ public class ConversationService {
         if (conv == null) {
             return false;
         }
-        return username.equals(conv.getUsername()) || SYSTEM_USER.equals(conv.getUsername());
+        // 直属 owner 一律放行:会话由该用户创建,workspace 自然一致,无需再做成员校验。
+        if (username != null && username.equals(conv.getUsername())) {
+            return true;
+        }
+        // 共享会话(system / IM / webchat owner)以下收紧。
+        Long convWorkspaceId = conv.getWorkspaceId();
+        UserEntity requester = authService.findByUsername(username);
+        // 老数据无 workspace_id,或请求者为匿名(permitAll 端点重连场景):维持旧行为,
+        // 仅 system owner 可见。避免数据迁移未完成或匿名流式场景下回归。
+        if (convWorkspaceId == null || requester == null) {
+            return SYSTEM_USER.equals(conv.getUsername());
+        }
+        // 全局 admin 横切放行,覆盖所有 workspace。
+        if ("admin".equalsIgnoreCase(requester.getRole())) {
+            return true;
+        }
+        // #344 的核心守卫:必须是该会话所属 workspace 的成员(viewer 或更高)。
+        // 不读 X-Workspace-Id header —— 客户端可伪造;以 DB 成员关系为准。
+        if (!workspaceService.hasPermissionCached(convWorkspaceId, requester.getId(), "viewer")) {
+            return false;
+        }
+        return SYSTEM_USER.equals(conv.getUsername());
     }
 
     /**
-     * 获取会话的持久化流状态
+     * Look up a conversation by its string (UUID-style) id, returning the
+     * full entity or {@code null} when not found. Read-only — does not
+     * create or mutate.
+     *
+     * <p>Callers that need to derive {@code agentId} / {@code workspaceId}
+     * from a conversation (so the request cannot lie about either) should
+     * use this rather than re-running the {@code LambdaQueryWrapper}
+     * boilerplate inline.
+     */
+    public ConversationEntity findByConversationId(String conversationId) {
+        if (conversationId == null || conversationId.isBlank()) {
+            return null;
+        }
+        return conversationMapper.selectOne(
+                new LambdaQueryWrapper<ConversationEntity>()
+                        .eq(ConversationEntity::getConversationId, conversationId));
+    }
+
+    /**
+     * Get the persisted stream status for a conversation.
+     *
+     * <p>获取会话的持久化流状态。
      */
     public String getStreamStatus(String conversationId) {
         ConversationEntity conv = conversationMapper.selectOne(

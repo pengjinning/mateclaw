@@ -6,12 +6,15 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
+import org.springframework.http.client.JdkClientHttpRequestFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 import org.springframework.web.client.RestClient;
 import vip.mate.exception.MateClawException;
 import vip.mate.llm.model.*;
+import vip.mate.llm.oauth.OpenAIOAuthService;
 
+import java.net.http.HttpClient;
 import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
@@ -30,8 +33,45 @@ public class ModelDiscoveryService {
     private final ModelProviderService modelProviderService;
     private final ModelConfigService modelConfigService;
     private final ObjectMapper objectMapper;
+    private final OpenAIOAuthService openAIOAuthService;
+
+    /**
+     * The Codex models endpoint that the ChatGPT subscription OAuth path exposes.
+     * Returns a JSON object {@code {"models": [{slug, supported_in_api, visibility,
+     * priority, ...}]}} once authenticated with a Bearer access token.
+     */
+    static final String CHATGPT_CODEX_MODELS_URL =
+            "https://chatgpt.com/backend-api/codex/models?client_version=1.0.0";
+
+    /**
+     * Synthetic forward-compat catalog: when a newer Codex slug is not surfaced
+     * by the live API but a known older sibling is, append the newer slug so
+     * users can opt into models OpenAI is rolling out without waiting for the
+     * metadata to flip. Mirrors the upstream Codex CLI behaviour.
+     */
+    private static final List<Map.Entry<String, List<String>>> CHATGPT_FORWARD_COMPAT =
+            List.of(
+                    Map.entry("gpt-5.5", List.of("gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex")),
+                    Map.entry("gpt-5.4-mini", List.of("gpt-5.3-codex", "gpt-5.2-codex")),
+                    Map.entry("gpt-5.4", List.of("gpt-5.3-codex", "gpt-5.2-codex")),
+                    Map.entry("gpt-5.3-codex", List.of("gpt-5.2-codex"))
+            );
+
+    private RestClient chatgptCodexClient = RestClient.create();
+
+    /** Test seam — let unit tests point this at a {@link org.springframework.test.web.client.MockRestServiceServer}. */
+    void setChatgptCodexClient(RestClient client) {
+        this.chatgptCodexClient = client;
+    }
 
     private static final Duration TIMEOUT = Duration.ofSeconds(10);
+
+    // Shared HttpClient for OpenAI-compatible providers — avoids creating a new
+    // native thread + connection pool per request (was causing thread-leak OOM).
+    private static final HttpClient SHARED_HTTP_CLIENT = HttpClient.newBuilder()
+            .version(HttpClient.Version.HTTP_1_1)
+            .connectTimeout(Duration.ofSeconds(30))
+            .build();
 
     // Virtual-thread executor for parallel model probing (lightweight, short-lived)
     private static final ExecutorService PROBE_EXECUTOR = Executors.newVirtualThreadPerTaskExecutor();
@@ -107,9 +147,20 @@ public class ModelDiscoveryService {
     );
 
     /**
+     * Model-id prefixes that mark an embedding model. These pass the chat-focused
+     * acceptable-id check (so the manual "Add model" form works) but must be
+     * excluded from chat-style runtime probes and from "new chat models" auto
+     * suggestions — they only speak the embeddings protocol, not chat completion.
+     */
+    private static final Set<String> EMBEDDING_MODEL_PREFIXES = Set.of(
+            "text-embedding-",
+            "embedding-"
+    );
+
+    /**
      * Allow-list prefixes for DashScope models that are known to work on the native
-     * chat protocol. An empty set means "no prefix filter" (we still apply DENY).
-     * Extend conservatively as new families are verified.
+     * protocol (chat or embedding). An empty set means "no prefix filter" (we still
+     * apply DENY). Extend conservatively as new families are verified.
      */
     private static final Set<String> DASHSCOPE_NATIVE_ALLOW_PREFIXES = Set.of(
             "qwen-",          // qwen-max / qwen-plus / qwen-turbo / qwen-coder-* / qwen-long
@@ -118,7 +169,8 @@ public class ModelDiscoveryService {
             "deepseek-",      // deepseek-v3.x / deepseek-r1*
             "baichuan",
             "yi-",
-            "llama"
+            "llama",
+            "text-embedding-" // DashScope embedding models (text-embedding-v1/v2/v3/v4)
     );
 
     // ==================== 模型发现 ====================
@@ -149,10 +201,13 @@ public class ModelDiscoveryService {
                 .map(ModelConfigEntity::getModelName)
                 .collect(Collectors.toSet());
 
-        // Only propose models that passed the probe (or were not probed) as "new"
+        // Only propose models that passed the probe (or were not probed) as "new".
+        // Embedding models are catalog-visible but excluded from the chat-discovery
+        // suggestion bucket — adding them as chat models would 400 at runtime.
         List<ModelInfoDTO> newModels = discovered.stream()
                 .filter(m -> !existingIds.contains(m.getId()))
                 .filter(m -> !Boolean.FALSE.equals(m.getProbeOk()))
+                .filter(m -> !isEmbeddingModelId(m.getId()))
                 .toList();
 
         return new DiscoverResult(discovered, newModels, discovered.size(), newModels.size());
@@ -202,6 +257,18 @@ public class ModelDiscoveryService {
     }
 
     /**
+     * Returns true when a model id looks like an embedding model (e.g.
+     * {@code text-embedding-v3}). Used to skip chat-style probes and to keep
+     * embedding entries out of the "new chat models to add" auto-suggestion.
+     * Package-private for unit tests.
+     */
+    static boolean isEmbeddingModelId(String modelId) {
+        if (modelId == null) return false;
+        String lower = modelId.toLowerCase();
+        return EMBEDDING_MODEL_PREFIXES.stream().anyMatch(lower::startsWith);
+    }
+
+    /**
      * Defensive guard for code paths that persist a model id without going through
      * discovery (e.g. the manual "Add model" form). Throws a MateClawException with
      * a user-friendly message if the id is known to be unusable under the provider's
@@ -236,6 +303,13 @@ public class ModelDiscoveryService {
         Semaphore sem = new Semaphore(MAX_PROBE_CONCURRENCY);
         List<CompletableFuture<Void>> futures = new ArrayList<>(discovered.size());
         for (ModelInfoDTO dto : discovered) {
+            if (isEmbeddingModelId(dto.getId())) {
+                // Embedding models don't speak chat completion — sendTestPrompt would
+                // 400 with InvalidParameter. Leave probeOk null (no warning badge)
+                // and surface a clear, non-error reason in probeError.
+                dto.setProbeError("Embedding model — not chat-probeable");
+                continue;
+            }
             futures.add(CompletableFuture.runAsync(() -> {
                 try { sem.acquire(); }
                 catch (InterruptedException ie) { Thread.currentThread().interrupt(); return; }
@@ -364,10 +438,12 @@ public class ModelDiscoveryService {
             case DASHSCOPE_NATIVE -> fetchDashScopeModels(provider);
             case GEMINI_NATIVE -> fetchGeminiModels(provider);
             case ANTHROPIC_MESSAGES -> fetchAnthropicModels(provider);
-            // Claude Code OAuth provider has a fixed model catalog (Anthropic
-            // doesn't expose model discovery on Bearer-auth requests). Models
-            // are seeded via Flyway, not discovered.
-            case OPENAI_CHATGPT, ANTHROPIC_CLAUDE_CODE ->
+            // ChatGPT OAuth has its own discovery endpoint at chatgpt.com/backend-api/codex.
+            case OPENAI_CHATGPT -> fetchChatGPTOAuthModels(provider);
+            // Claude Code OAuth has a fixed model catalog — Anthropic doesn't
+            // expose a discovery endpoint to Bearer-auth requests, so models
+            // are seeded via Flyway.
+            case ANTHROPIC_CLAUDE_CODE ->
                     throw new MateClawException("err.llm.oauth_no_discovery",
                             "OAuth provider 不支持模型发现");
         };
@@ -380,7 +456,7 @@ public class ModelDiscoveryService {
         }
         String apiKey = provider.getApiKey();
 
-        RestClient client = RestClient.builder()
+        RestClient client = openAiCompatibleClientBuilder()
                 .baseUrl(baseUrl)
                 .defaultHeader(HttpHeaders.ACCEPT, MediaType.APPLICATION_JSON_VALUE)
                 .build();
@@ -453,6 +529,112 @@ public class ModelDiscoveryService {
         return parseAnthropicModelsResponse(body);
     }
 
+    /**
+     * Fetch the ChatGPT subscription OAuth model catalog. Uses the user's
+     * already-stored OAuth access token (auto-refreshed if it's near expiry)
+     * and hits the same Codex endpoint the upstream client uses. Filters out
+     * models the API marks as not exposed ({@code supported_in_api == false})
+     * or hidden, sorts by priority, then layers in synthetic forward-compat
+     * entries (e.g. surface {@code gpt-5.5} when only older siblings are
+     * returned).
+     */
+    private List<ModelInfoDTO> fetchChatGPTOAuthModels(ModelProviderEntity provider) {
+        String accessToken;
+        try {
+            accessToken = openAIOAuthService.ensureValidAccessToken();
+        } catch (MateClawException e) {
+            // Surface the precise i18n key from OpenAIOAuthService (e.g.
+            // err.llm.oauth_not_connected) so the UI can prompt the user to
+            // sign in. Wrapping would lose that signal.
+            throw e;
+        }
+
+        String body;
+        try {
+            body = chatgptCodexClient.get()
+                    .uri(CHATGPT_CODEX_MODELS_URL)
+                    .header(HttpHeaders.AUTHORIZATION, "Bearer " + accessToken)
+                    .header(HttpHeaders.ACCEPT, MediaType.APPLICATION_JSON_VALUE)
+                    .retrieve()
+                    .body(String.class);
+        } catch (Exception e) {
+            log.warn("[ModelDiscovery] ChatGPT OAuth models fetch failed: {}", e.getMessage());
+            throw new MateClawException("err.llm.chatgpt_models_fetch_failed",
+                    "拉取 ChatGPT 可用模型失败: " + e.getMessage());
+        }
+
+        return addChatGPTForwardCompatModels(parseChatGPTCodexModelsResponse(body));
+    }
+
+    /**
+     * Parse the {@code {"models": [{slug, supported_in_api, visibility, priority}]}}
+     * response. Drops entries the API hides from the OAuth catalog and orders
+     * the rest by ascending {@code priority} (lower = higher precedence in
+     * the upstream client's UX).
+     */
+    List<ModelInfoDTO> parseChatGPTCodexModelsResponse(String body) {
+        if (body == null || body.isBlank()) return List.of();
+        try {
+            JsonNode root = objectMapper.readTree(body);
+            JsonNode entries = root.path("models");
+            if (!entries.isArray()) return List.of();
+
+            // Sort by priority ascending while preserving the API-listed slug
+            List<int[]> indices = new ArrayList<>();
+            for (int i = 0; i < entries.size(); i++) {
+                JsonNode item = entries.get(i);
+                if (!item.isObject()) continue;
+                String slug = item.path("slug").asText("").trim();
+                if (slug.isEmpty()) continue;
+                if (item.path("supported_in_api").asBoolean(true) == false) continue;
+                String vis = item.path("visibility").asText("").trim().toLowerCase();
+                if ("hide".equals(vis) || "hidden".equals(vis)) continue;
+                int priority = item.has("priority") && item.get("priority").isNumber()
+                        ? item.get("priority").asInt()
+                        : 10_000;
+                indices.add(new int[]{priority, i});
+            }
+            indices.sort(Comparator.comparingInt((int[] a) -> a[0]).thenComparingInt(a -> a[1]));
+
+            Set<String> seen = new LinkedHashSet<>();
+            List<ModelInfoDTO> out = new ArrayList<>();
+            for (int[] idx : indices) {
+                JsonNode item = entries.get(idx[1]);
+                String slug = item.path("slug").asText("").trim();
+                if (!seen.add(slug)) continue;
+                out.add(new ModelInfoDTO(slug, slug));
+            }
+            return out;
+        } catch (Exception e) {
+            log.warn("[ModelDiscovery] Failed to parse ChatGPT codex models response: {}",
+                    e.getMessage());
+            return List.of();
+        }
+    }
+
+    /**
+     * Append synthetic forward-compat entries for newer slugs that the API
+     * has not yet surfaced but a known older sibling is present for. Mirrors
+     * the reference client's behaviour so users can opt into {@code gpt-5.5}
+     * during a staged rollout.
+     */
+    static List<ModelInfoDTO> addChatGPTForwardCompatModels(List<ModelInfoDTO> input) {
+        Set<String> seen = new LinkedHashSet<>();
+        List<ModelInfoDTO> out = new ArrayList<>(input.size() + CHATGPT_FORWARD_COMPAT.size());
+        for (ModelInfoDTO m : input) {
+            if (m.getId() != null && seen.add(m.getId())) out.add(m);
+        }
+        for (Map.Entry<String, List<String>> e : CHATGPT_FORWARD_COMPAT) {
+            String synthetic = e.getKey();
+            if (seen.contains(synthetic)) continue;
+            if (e.getValue().stream().anyMatch(seen::contains)) {
+                seen.add(synthetic);
+                out.add(new ModelInfoDTO(synthetic, synthetic));
+            }
+        }
+        return out;
+    }
+
     // ==================== 协议分派：单模型测试 ====================
 
     private String sendTestPrompt(ModelProviderEntity provider, ModelProtocol protocol, String modelId) {
@@ -484,7 +666,7 @@ public class ModelDiscoveryService {
         Map<String, Object> kwargs = modelProviderService.readProviderGenerateKwargs(provider);
         String completionsPath = resolveCompletionsPath(baseUrl, kwargs);
 
-        RestClient.RequestHeadersSpec<?> spec = RestClient.builder()
+        RestClient.RequestHeadersSpec<?> spec = openAiCompatibleClientBuilder()
                 .baseUrl(baseUrl)
                 .defaultHeader(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE)
                 .build()
@@ -774,6 +956,20 @@ public class ModelDiscoveryService {
             normalized = normalized.substring(0, normalized.length() - 3);
         }
         return normalized;
+    }
+
+    /**
+     * Build a RestClient.Builder pinned to HTTP/1.1 for self-hosted OpenAI-compatible
+     * servers. Java's HttpClient defaults to HTTP/2 and over cleartext attempts an
+     * H2C upgrade ({@code Upgrade: h2c, Connection: Upgrade, HTTP2-Settings: ...}).
+     * Uvicorn-based stacks (vLLM, lmstudio, llama.cpp, ollama) reject the upgrade
+     * by closing the socket mid-handshake — surfacing as either
+     * "header parser received no bytes" on the chat path or, more subtly, a
+     * 400 with body=None on the test path because the body never makes it past
+     * the upgrade negotiation.
+     */
+    private RestClient.Builder openAiCompatibleClientBuilder() {
+        return RestClient.builder().requestFactory(new JdkClientHttpRequestFactory(SHARED_HTTP_CLIENT));
     }
 
     @SuppressWarnings("unchecked")

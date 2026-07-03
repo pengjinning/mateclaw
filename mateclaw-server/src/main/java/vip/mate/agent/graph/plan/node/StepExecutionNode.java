@@ -27,16 +27,27 @@ import vip.mate.agent.context.RuntimeContextInjector;
 import vip.mate.agent.graph.executor.ToolExecutionExecutor;
 import vip.mate.channel.web.ChatStreamTracker;
 import vip.mate.planning.service.PlanningService;
+import vip.mate.agent.context.ChatOrigin;
+import vip.mate.skill.runtime.SkillCatalogRenderer;
+import vip.mate.tool.builtin.DelegateAgentTool;
+import vip.mate.tool.builtin.DelegationContext;
+import vip.mate.tool.builtin.ToolExecutionContext;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * 步骤执行节点
  * <p>
  * 执行当前步骤，使用显式工具执行循环（internalToolExecutionEnabled=false）。
- * 单步最大工具调用次数限制为 5 次，防止无限循环。
+ * 单步最大工具调用次数限制为 {@link #MAX_TOOL_CALLS_PER_STEP} 次，与
+ * {@code BaseAgent.MAX_ITERATIONS_HARD_CEILING} 对齐——因此实际生效的上限
+ * 永远是 agent 的 {@code max_iterations}（DB 列），单步本身不会先于 agent
+ * 的整体预算被打掉。早期 5 次的硬限制对"查新闻 + 整理 Word"这种合理多
+ * 工具任务过紧，被 LimitExceededNode 提前拦截后用户看到的是冷冰冰的
+ * "工具调用次数超出最大限制"。
  * <p>
  * 支持 NEEDS_APPROVAL 审批流程：对需要审批的工具调用创建 pending，
  * 发出 SSE 事件后立即返回审批提示（非阻塞）。审批通过后通过 replay 重新执行。
@@ -54,8 +65,56 @@ public class StepExecutionNode implements NodeAction {
     private final ConversationWindowManager conversationWindowManager;
     private final String reasoningEffort;
     private final NodeStreamingChatHelper streamingHelper;
+    private final long stepWallClockTimeoutMs;
+    /**
+     * Renders the {@code ## Skills} catalog at runtime. Null in legacy / test
+     * constructors — when null, no catalog segment is appended (the Plan path's
+     * pre-disclosure behavior of baking it into the system prompt is gone).
+     */
+    private final SkillCatalogRenderer skillCatalogRenderer;
 
-    private static final int MAX_TOOL_CALLS_PER_STEP = 5;
+    /**
+     * Optional per-step delegation executor. Set after construction (this node is
+     * built by AgentGraphBuilder, not Spring) so a plan step assigned to a
+     * specialist agent runs on that agent. Null disables per-step delegation.
+     */
+    private DelegateAgentTool delegateAgentTool;
+
+    public void setDelegateAgentTool(DelegateAgentTool delegateAgentTool) {
+        this.delegateAgentTool = delegateAgentTool;
+    }
+
+    /**
+     * Per-step tool-call ceiling, aligned with {@code BaseAgent.MAX_ITERATIONS_HARD_CEILING}.
+     * Matching the agent-level cap means this constant is never the bottleneck —
+     * the agent's own {@code max_iterations} (DB column) will fire first if a
+     * task is genuinely runaway, and a well-budgeted multi-tool step (e.g.
+     * web_search + browser_navigate + browser_read*N + file_write) is no longer
+     * cut short by an arbitrary 5-call ceiling.
+     */
+    private static final int MAX_TOOL_CALLS_PER_STEP = 100;
+
+    /**
+     * Wall-clock budget per step, complementing {@link #MAX_TOOL_CALLS_PER_STEP}.
+     * The call-count cap doesn't help when a single LLM stream stalls or a
+     * concurrency-unsafe tool runs synchronously without a per-tool deadline
+     * (the parallel batch path enforces {@code ToolTimeoutProperties}, but the
+     * single-unsafe path in {@code ToolExecutionExecutor#executeSingleTool}
+     * currently does not). 10 minutes is generous for legitimate long steps
+     * (large file edits, multi-page browser flows) while still cutting off the
+     * pathological cases where the agent appears frozen to the user.
+     */
+    private static final long STEP_WALL_CLOCK_TIMEOUT_MS = 10 * 60 * 1000L;
+
+    /**
+     * Max re-plans per graph run. When a step throws, the executor re-plans the
+     * remaining work around the failure instead of aborting the whole plan — a
+     * single transient tool error or one badly-scoped step no longer kills the
+     * task. Bounded so a step that fails every attempt can't re-plan forever;
+     * once exhausted the plan aborts as before. Kept small (the recursion
+     * ceiling already accommodates it) — raise with care.
+     */
+    private static final int MAX_REPLANS_PER_RUN = 1;
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     public StepExecutionNode(ChatModel chatModel, AgentToolSet toolSet,
@@ -64,6 +123,45 @@ public class StepExecutionNode implements NodeAction {
                              ChatStreamTracker streamTracker,
                              String reasoningEffort, NodeStreamingChatHelper streamingHelper,
                              ConversationWindowManager conversationWindowManager) {
+        this(chatModel, toolSet, executor, planningService, streamTracker,
+                reasoningEffort, streamingHelper, conversationWindowManager,
+                null, STEP_WALL_CLOCK_TIMEOUT_MS);
+    }
+
+    /** Production constructor with the runtime skill-catalog renderer. */
+    public StepExecutionNode(ChatModel chatModel, AgentToolSet toolSet,
+                             ToolExecutionExecutor executor,
+                             PlanningService planningService,
+                             ChatStreamTracker streamTracker,
+                             String reasoningEffort, NodeStreamingChatHelper streamingHelper,
+                             ConversationWindowManager conversationWindowManager,
+                             SkillCatalogRenderer skillCatalogRenderer) {
+        this(chatModel, toolSet, executor, planningService, streamTracker,
+                reasoningEffort, streamingHelper, conversationWindowManager,
+                skillCatalogRenderer, STEP_WALL_CLOCK_TIMEOUT_MS);
+    }
+
+    /** Test-friendly overload — production callers use the default timeout. */
+    StepExecutionNode(ChatModel chatModel, AgentToolSet toolSet,
+                      ToolExecutionExecutor executor,
+                      PlanningService planningService,
+                      ChatStreamTracker streamTracker,
+                      String reasoningEffort, NodeStreamingChatHelper streamingHelper,
+                      ConversationWindowManager conversationWindowManager,
+                      long stepWallClockTimeoutMs) {
+        this(chatModel, toolSet, executor, planningService, streamTracker,
+                reasoningEffort, streamingHelper, conversationWindowManager,
+                null, stepWallClockTimeoutMs);
+    }
+
+    StepExecutionNode(ChatModel chatModel, AgentToolSet toolSet,
+                      ToolExecutionExecutor executor,
+                      PlanningService planningService,
+                      ChatStreamTracker streamTracker,
+                      String reasoningEffort, NodeStreamingChatHelper streamingHelper,
+                      ConversationWindowManager conversationWindowManager,
+                      SkillCatalogRenderer skillCatalogRenderer,
+                      long stepWallClockTimeoutMs) {
         this.chatModel = chatModel;
         this.toolSet = toolSet;
         this.executor = executor;
@@ -72,6 +170,8 @@ public class StepExecutionNode implements NodeAction {
         this.conversationWindowManager = conversationWindowManager;
         this.reasoningEffort = reasoningEffort;
         this.streamingHelper = streamingHelper;
+        this.skillCatalogRenderer = skillCatalogRenderer;
+        this.stepWallClockTimeoutMs = stepWallClockTimeoutMs;
     }
 
     @Override
@@ -92,6 +192,8 @@ public class StepExecutionNode implements NodeAction {
         vip.mate.agent.context.ChatOrigin chatOrigin =
                 state.<vip.mate.agent.context.ChatOrigin>value(MateClawStateKeys.CHAT_ORIGIN)
                         .orElse(vip.mate.agent.context.ChatOrigin.EMPTY);
+        String runtimeModelName = state.value(MateClawStateKeys.RUNTIME_MODEL_NAME, "");
+        String runtimeProviderId = state.value(MateClawStateKeys.RUNTIME_PROVIDER_ID, "");
 
         if (stepIndex >= steps.size()) {
             log.warn("[StepExecution] stepIndex {} >= steps.size() {}, skipping", stepIndex, steps.size());
@@ -106,13 +208,36 @@ public class StepExecutionNode implements NodeAction {
         log.info("[StepExecution] Executing step {}/{}: {}", stepIndex + 1, steps.size(), step);
 
         List<GraphEventPublisher.GraphEvent> events = new ArrayList<>();
+        // Iteration boundary for the plan-execute loop: each step is one
+        // iteration that may itself fan out to multiple LLM calls. Reason is
+        // "plan_step" so consumers can distinguish it from ReAct's
+        // "react_step" / "first_turn" markers when both stream into the
+        // same SSE feed.
+        boolean iterationEventsOn = streamTracker == null || streamTracker.isIterationEventsEnabled();
+
+        // Per-step delegation: when this step is assigned to a different
+        // specialist agent, run it on that agent (as an isolated child) and use
+        // its reply as the step result, instead of executing locally with the
+        // parent agent's tools. assignedAgentId comes from the DB so it survives
+        // replay / approval-resume.
+        Long assignedAgentId = planningService.getStepAssignedAgent(planId, stepIndex);
+        if (delegateAgentTool != null && assignedAgentId != null
+                && !assignedAgentId.equals(parseLongOrNull(agentId))) {
+            return executeDelegatedStep(accessor, stepIndex, step, planId, assignedAgentId,
+                    conversationId, chatOrigin, events, iterationEventsOn);
+        }
+
+        if (iterationEventsOn) {
+            events.add(GraphEventPublisher.iterationStart(stepIndex, "plan_step", "parent", null));
+        }
         events.add(GraphEventPublisher.stepStarted(stepIndex, step));
         events.add(GraphEventPublisher.phase("executing", Map.of("stepIndex", stepIndex, "stepTitle", step)));
 
         planningService.updateSubPlanStatus(planId, stepIndex, "running");
 
         // 构建消息列表
-        List<Message> messages = buildStepMessages(accessor, step, systemPrompt, workspaceBasePath);
+        List<Message> messages = buildStepMessages(accessor, step, systemPrompt, workspaceBasePath,
+                runtimeModelName, runtimeProviderId);
 
         // 显式工具执行循环
         String finalResult = null;
@@ -128,8 +253,30 @@ public class StepExecutionNode implements NodeAction {
         // outputs across the inner loop and break out as soon as one appears.
         List<DirectToolOutput> stepDirectOutputs = new ArrayList<>();
 
+        // Wall-clock budget guards against a single hung LLM stream or
+        // synchronous unsafe-tool call (the per-tool timeout is enforced only
+        // in the parallel batch path of ToolExecutionExecutor). Checked at the
+        // top of each iteration so we never issue another LLM call after the
+        // budget is gone.
+        long stepStartedAtMs = System.currentTimeMillis();
+        boolean wallClockExceeded = false;
+
+        // Signature-based progress detector: nudges the model to change strategy
+        // when a round stalls (repeated failures / identical results), and flags
+        // the step as stuck past a hard threshold so we re-plan instead of
+        // burning the whole tool-call budget and advancing with junk.
+        StepProgressTracker progressTracker = new StepProgressTracker();
+
         try {
             while (toolCallCount < MAX_TOOL_CALLS_PER_STEP) {
+                long elapsedMs = System.currentTimeMillis() - stepStartedAtMs;
+                if (elapsedMs > stepWallClockTimeoutMs) {
+                    log.warn("[StepExecution] Step {} exceeded wall-clock budget " +
+                            "({} ms > {} ms) after {} tool round(s); aborting step",
+                            stepIndex, elapsedMs, stepWallClockTimeoutMs, toolCallCount);
+                    wallClockExceeded = true;
+                    break;
+                }
                 // PR-2 (RFC-049 §2.3.4): always use OpenAiChatOptions so the relay
                 // producer in NodeStreamingChatHelper.doStreamCall can attach the
                 // user-token. Using ToolCallingChatOptions when reasoningEffort is
@@ -144,6 +291,14 @@ public class StepExecutionNode implements NodeAction {
                 }
                 oaiOpts.setInternalToolExecutionEnabled(false);
                 ChatOptions options = oaiOpts;
+
+                if (conversationWindowManager != null) {
+                    // Pass conversationId + workspaceBasePath so oversized
+                    // older tool results can be spilled to disk instead of
+                    // being rewritten into a lossy single-line summary.
+                    messages = conversationWindowManager.pruneOldToolResultsForModelInput(
+                            messages, conversationId, workspaceBasePath);
+                }
 
                 NodeStreamingChatHelper.StreamResult result = streamingHelper.streamCall(
                         chatModel, new Prompt(messages, options), conversationId,
@@ -243,6 +398,30 @@ public class StepExecutionNode implements NodeAction {
                     break;
                 }
 
+                // Progress tracking: feed this round's tool results to the
+                // detector. A WARN-level stall injects a one-shot "change
+                // strategy" SystemMessage the model sees on its next call; a
+                // HALT-level stall stops the inner loop so the post-loop logic
+                // re-plans instead of spinning to the tool-call ceiling.
+                java.util.Map<String, String> idToArgs = new java.util.HashMap<>();
+                for (AssistantMessage.ToolCall tc : allToolCalls) {
+                    if (tc != null && tc.id() != null) {
+                        idToArgs.put(tc.id(), tc.arguments());
+                    }
+                }
+                for (ToolResponseMessage.ToolResponse tr : toolResponses) {
+                    var nudge = progressTracker.record(
+                            tr.name(), idToArgs.getOrDefault(tr.id(), ""), tr.responseData());
+                    if (nudge.isPresent()) {
+                        messages.add(new SystemMessage(nudge.get()));
+                    }
+                }
+                if (progressTracker.isStuck()) {
+                    log.warn("[StepExecution] Step {} stalled ({}); stopping inner loop to re-plan",
+                            stepIndex, progressTracker.haltReason());
+                    break;
+                }
+
                 // RFC-052: returnDirect short-circuit. Any direct tool in this
                 // step ends the plan immediately; the dispatcher routes via
                 // currentPhase=plan_aborted so no further LLM call happens.
@@ -288,6 +467,10 @@ public class StepExecutionNode implements NodeAction {
                         "Plan completed via returnDirect tool: " +
                         stepDirectOutputs.get(0).toolName());
                 events.add(GraphEventPublisher.stepCompleted(stepIndex, assembled));
+                if (iterationEventsOn) {
+                    events.add(GraphEventPublisher.iterationEnd(stepIndex, "parent", null,
+                            assembled != null ? assembled.length() : 0, 0));
+                }
                 return PlanStateAccessor.output()
                         .currentStepResult(assembled)
                         .currentStepIndex(steps.size())  // 越界 → dispatcher 收束
@@ -304,9 +487,64 @@ public class StepExecutionNode implements NodeAction {
                         .build();
             }
 
+            // Step-failure recovery WITHOUT an exception: the inner loop ended
+            // with no usable result — stalled (repeated failures / identical
+            // results, flagged by the progress tracker), hit the wall-clock or
+            // tool-call ceiling, or returned an empty answer. Re-plan the
+            // remaining work around it instead of advancing dependent steps with
+            // junk. Shares PLAN_REPLAN_COUNT with the exception path; once the
+            // budget is spent we fall through to the legacy "complete with a
+            // failure note" path below so the plan still terminates.
+            boolean noUsableResult = progressTracker.isStuck()
+                    || finalResult == null || finalResult.isBlank();
+            int noProgressReplanCount = accessor.replanCount();
+            if (noUsableResult && noProgressReplanCount < MAX_REPLANS_PER_RUN) {
+                String reason = progressTracker.isStuck()
+                        ? "本步骤陷入停滞（" + progressTracker.haltReason() + "），未取得有效结果"
+                        : wallClockExceeded
+                            ? "本步骤超过最大耗时限制，未取得有效结果"
+                            : finalResult == null
+                                ? "本步骤超过最大工具调用次数，未取得有效结果"
+                                : "本步骤未产出有效结果";
+                planningService.updateSubPlanFailure(planId, stepIndex, reason);
+                planningService.markPlanFailed(planId, "步骤" + (stepIndex + 1) + "：" + reason);
+                events.add(GraphEventPublisher.stepCompleted(stepIndex, reason));
+                if (iterationEventsOn) {
+                    events.add(GraphEventPublisher.iterationEnd(stepIndex, "parent", null, reason.length(), 0));
+                }
+                events.add(new GraphEventPublisher.GraphEvent("plan_replan", Map.of(
+                        "failedStepIndex", stepIndex,
+                        "attempt", noProgressReplanCount + 1,
+                        "maxReplans", MAX_REPLANS_PER_RUN,
+                        "reason", reason), System.currentTimeMillis()));
+                log.warn("[StepExecution] Step {} produced no usable result ({}); re-planning (attempt {}/{})",
+                        stepIndex + 1, reason, noProgressReplanCount + 1, MAX_REPLANS_PER_RUN);
+                return PlanStateAccessor.output()
+                        .workingContext(buildReplanContext(accessor, stepIndex, reason))
+                        .currentPhase("plan_replan")
+                        .replanCount(noProgressReplanCount + 1)
+                        .planId(null)
+                        .planSteps(List.of())
+                        .planValid(false)
+                        .needsPlanning(true)
+                        .currentStepIndex(0)
+                        .currentStepTitle("")
+                        .currentStepResult("")
+                        .contentStreamed(false)
+                        .put(MateClawStateKeys.PROMPT_TOKENS, state.value(MateClawStateKeys.PROMPT_TOKENS, 0) + stepPromptTokens)
+                        .put(MateClawStateKeys.COMPLETION_TOKENS, state.value(MateClawStateKeys.COMPLETION_TOKENS, 0) + stepCompletionTokens)
+                        .events(events)
+                        .build();
+            }
+
             if (finalResult == null) {
-                finalResult = "步骤执行超过最大工具调用次数限制（" + MAX_TOOL_CALLS_PER_STEP + "次）";
-                log.warn("[StepExecution] Step {} exceeded max tool call limit", stepIndex);
+                if (wallClockExceeded) {
+                    finalResult = "步骤执行超过最大耗时限制（"
+                            + (stepWallClockTimeoutMs / 1000) + "秒），已中止本步骤";
+                } else {
+                    finalResult = "步骤执行超过最大工具调用次数限制（" + MAX_TOOL_CALLS_PER_STEP + "次）";
+                    log.warn("[StepExecution] Step {} exceeded max tool call limit", stepIndex);
+                }
             }
 
         } catch (Exception e) {
@@ -315,6 +553,50 @@ public class StepExecutionNode implements NodeAction {
             planningService.updateSubPlanFailure(planId, stepIndex, shortError);
             planningService.markPlanFailed(planId, "步骤" + (stepIndex + 1) + " 执行失败：" + shortError);
             events.add(GraphEventPublisher.stepCompleted(stepIndex, shortError));
+            if (iterationEventsOn) {
+                events.add(GraphEventPublisher.iterationEnd(stepIndex, "parent", null,
+                        shortError != null ? shortError.length() : 0, 0));
+            }
+
+            // Step-failure recovery: rather than aborting the whole plan on a
+            // single failed step, re-plan the remaining work around the failure
+            // (up to MAX_REPLANS_PER_RUN). Completed steps are preserved in
+            // WORKING_CONTEXT, so the next PlanGeneration pass can skip them and
+            // route around (or retry) what broke. The mid-pass plan state is
+            // cleared so a fresh plan is derived; PLAN_REPLAN_COUNT bounds the loop.
+            int replanCount = accessor.replanCount();
+            if (replanCount < MAX_REPLANS_PER_RUN) {
+                String replanContext = buildReplanContext(accessor, stepIndex, shortError);
+                events.add(new GraphEventPublisher.GraphEvent("plan_replan", Map.of(
+                        "failedStepIndex", stepIndex,
+                        "attempt", replanCount + 1,
+                        "maxReplans", MAX_REPLANS_PER_RUN,
+                        "error", shortError == null ? "" : shortError),
+                        System.currentTimeMillis()));
+                log.warn("[StepExecution] Step {} failed; re-planning remaining work (attempt {}/{})",
+                        stepIndex + 1, replanCount + 1, MAX_REPLANS_PER_RUN);
+                return PlanStateAccessor.output()
+                        .workingContext(replanContext)
+                        .currentPhase("plan_replan")
+                        .replanCount(replanCount + 1)
+                        // Wipe mid-pass plan state so PlanGenerationNode re-derives
+                        // a fresh plan from goal + (failure-augmented) context.
+                        .planId(null)
+                        .planSteps(List.of())
+                        .planValid(false)
+                        .needsPlanning(true)
+                        .currentStepIndex(0)
+                        .currentStepTitle("")
+                        .currentStepResult("")
+                        .contentStreamed(false)
+                        .put(MateClawStateKeys.PROMPT_TOKENS, state.value(MateClawStateKeys.PROMPT_TOKENS, 0) + stepPromptTokens)
+                        .put(MateClawStateKeys.COMPLETION_TOKENS, state.value(MateClawStateKeys.COMPLETION_TOKENS, 0) + stepCompletionTokens)
+                        .events(events)
+                        .build();
+            }
+
+            log.warn("[StepExecution] Step {} failed and re-plan budget exhausted ({}); aborting plan",
+                    stepIndex + 1, MAX_REPLANS_PER_RUN);
             return PlanStateAccessor.output()
                     .currentStepResult(shortError)
                     .currentPhase("plan_aborted")
@@ -327,6 +609,11 @@ public class StepExecutionNode implements NodeAction {
 
         planningService.updateSubPlanResult(planId, stepIndex, finalResult);
         events.add(GraphEventPublisher.stepCompleted(stepIndex, finalResult));
+        if (iterationEventsOn) {
+            events.add(GraphEventPublisher.iterationEnd(stepIndex, "parent", null,
+                    finalResult != null ? finalResult.length() : 0,
+                    stepThinking != null ? stepThinking.length() : 0));
+        }
 
         log.info("[StepExecution] Step {}/{} completed: {}",
                 stepIndex + 1, steps.size(),
@@ -365,6 +652,98 @@ public class StepExecutionNode implements NodeAction {
     }
 
     /**
+     * Execute a step by delegating it to its assigned specialist agent. The
+     * delegated agent runs the step description as a self-contained goal and its
+     * reply becomes the step result. Mirrors the success/failure bookkeeping of
+     * the local execution path (sub-plan status, completed-results accumulation,
+     * incremental working-context update) so the rest of the plan graph is
+     * unaffected by where the step ran.
+     */
+    private Map<String, Object> executeDelegatedStep(
+            PlanStateAccessor accessor, int stepIndex, String step, Long planId,
+            Long assignedAgentId, String conversationId, ChatOrigin chatOrigin,
+            List<GraphEventPublisher.GraphEvent> events, boolean iterationEventsOn) {
+
+        if (iterationEventsOn) {
+            events.add(GraphEventPublisher.iterationStart(stepIndex, "plan_step", "parent", null));
+        }
+        events.add(GraphEventPublisher.stepStarted(stepIndex, step));
+        events.add(GraphEventPublisher.phase("executing", Map.of(
+                "stepIndex", stepIndex, "stepTitle", step,
+                "delegatedAgentId", String.valueOf(assignedAgentId))));
+        planningService.updateSubPlanStatus(planId, stepIndex, "running");
+
+        log.info("[StepExecution] Delegating step {} to agent {}", stepIndex + 1, assignedAgentId);
+
+        // Seed the delegation context with the plan's REAL conversation id (from
+        // graph state) so the delegated child conversation is parented to it and
+        // stays hidden from the user's conversation list. The ChatOrigin in the
+        // plan-execute path carries no conversationId, so delegateByAgentId can't
+        // derive the parent on its own — we provide it here.
+        boolean seeded = false;
+        if (conversationId != null && !conversationId.isBlank()
+                && DelegationContext.parentConversationId() == null
+                && ToolExecutionContext.conversationId() == null) {
+            DelegationContext.enter(conversationId, Set.of(), conversationId, null, 0);
+            seeded = true;
+        }
+        String result;
+        try {
+            result = delegateAgentTool.delegateByAgentId(assignedAgentId, step, chatOrigin);
+        } catch (Exception e) {
+            log.error("[StepExecution] Delegated step {} threw: {}", stepIndex, e.getMessage(), e);
+            result = "[错误] 委派执行异常：" + e.getMessage();
+        } finally {
+            if (seeded) {
+                DelegationContext.exit();
+            }
+        }
+
+        String finalResult = result != null ? result : "";
+        boolean failed = finalResult.isEmpty() || finalResult.startsWith("[错误]");
+        if (failed) {
+            planningService.updateSubPlanFailure(planId, stepIndex, finalResult);
+        } else {
+            planningService.updateSubPlanResult(planId, stepIndex, finalResult);
+        }
+
+        events.add(GraphEventPublisher.stepCompleted(stepIndex, finalResult));
+        if (iterationEventsOn) {
+            events.add(GraphEventPublisher.iterationEnd(stepIndex, "parent", null, finalResult.length(), 0));
+        }
+
+        // Keep the rolling working-context in sync exactly like the local path
+        // so later steps see this delegated step's result.
+        String prevWorkingContext = accessor.workingContext();
+        String formattedNewStep = formatStepResult(stepIndex, finalResult);
+        String updatedWorkingContext = prevWorkingContext.isEmpty()
+                ? rebuildWorkingContext(accessor, appendOne(accessor.completedResults(), formattedNewStep))
+                : appendStepIncremental(prevWorkingContext, formattedNewStep);
+
+        return PlanStateAccessor.output()
+                .currentStepResult(finalResult)
+                .completedResults(formattedNewStep)
+                .currentStepIndex(stepIndex + 1)
+                .workingContext(updatedWorkingContext)
+                .currentPhase("step_completed")
+                .contentStreamed(true)
+                .events(events)
+                .build();
+    }
+
+    /** Parse a string id to Long, or null when blank / non-numeric. */
+    private static Long parseLongOrNull(String s) {
+        if (s == null || s.isBlank()) {
+            return null;
+        }
+        try {
+            return Long.parseLong(s.trim());
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    /**
      * RFC-052: assemble the final answer text from direct tool outputs in this
      * step. Mirrors {@code FinalAnswerNode#assembleDirectAnswer} so the user
      * sees the same shape regardless of which graph (ReAct / Plan-Execute)
@@ -384,7 +763,8 @@ public class StepExecutionNode implements NodeAction {
         return sb.toString();
     }
 
-    private List<Message> buildStepMessages(PlanStateAccessor accessor, String step, String systemPrompt, String workspaceBasePath) {
+    private List<Message> buildStepMessages(PlanStateAccessor accessor, String step, String systemPrompt,
+                                            String workspaceBasePath, String runtimeModelName, String runtimeProviderId) {
         List<Message> messages = new ArrayList<>();
 
         // Layer 1: System prompt（增强指令）
@@ -403,8 +783,19 @@ public class StepExecutionNode implements NodeAction {
                 8. 每一步最多做一个必要的检查和一个必要的执行，不要无意义循环。
                 """;
         messages.add(new SystemMessage(enhancedSystemPrompt));
-        // 注入运行时上下文（当前时间 + 工作目录）
-        messages.add(new UserMessage(RuntimeContextInjector.buildContextMessage(workspaceBasePath)));
+        // Runtime skill catalog (rendered here instead of baked into the system
+        // prompt). The Plan path never pins per-run loads, so render with an
+        // empty loaded set — this reproduces the pre-disclosure DB ordering.
+        if (skillCatalogRenderer != null) {
+            String skillCatalog = skillCatalogRenderer.render(java.util.Set.of());
+            if (skillCatalog != null && !skillCatalog.isBlank()) {
+                messages.add(new SystemMessage(skillCatalog));
+            }
+        }
+        // 注入运行时上下文（当前时间 + 工作目录 + 发起者上下文 + 模型身份）
+        messages.add(new UserMessage(
+                RuntimeContextInjector.buildContextMessage(
+                        workspaceBasePath, null, accessor.chatOrigin(), runtimeModelName, runtimeProviderId)));
 
         // Layer 2: Working context（对话历史 + 步骤结果的受控长度摘要）
         String workingContext = accessor.workingContext();
@@ -470,6 +861,30 @@ public class StepExecutionNode implements NodeAction {
             log.warn("[StepExecution] Failed to parse pre-approved payload: {}", e.getMessage());
             return false;
         }
+    }
+
+    /**
+     * Augment the working context with a note about the failed step so the next
+     * PlanGeneration pass re-plans around it. The completed-step results are
+     * already encoded in {@code WORKING_CONTEXT}; this appends only the failure
+     * so the planner can skip what's done, retry differently, or route around
+     * the broken step. The note is an internal LLM prompt (Chinese, matching the
+     * surrounding planning/execution prompts).
+     */
+    static String buildReplanContext(PlanStateAccessor accessor, int failedStepIndex, String error) {
+        List<String> steps = accessor.planSteps();
+        String failedTitle = (failedStepIndex >= 0 && failedStepIndex < steps.size())
+                ? steps.get(failedStepIndex) : ("步骤 " + (failedStepIndex + 1));
+        StringBuilder sb = new StringBuilder(accessor.workingContext());
+        if (sb.length() > 0) {
+            sb.append("\n\n");
+        }
+        sb.append("【上一轮计划执行失败】步骤 ").append(failedStepIndex + 1)
+          .append("（").append(failedTitle).append("）执行失败：")
+          .append(error == null ? "未知错误" : error)
+          .append("\n请基于上面已完成的工作，重新规划达成总目标所需的剩余步骤：")
+          .append("绕开或换一种方式完成失败的部分，不要重复已经完成的步骤。");
+        return sb.toString();
     }
 
     /**

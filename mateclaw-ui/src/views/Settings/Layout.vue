@@ -25,10 +25,14 @@
               </router-link>
             </el-tooltip>
           </template>
-          <!-- 折叠切换按钮 -->
-          <button class="nav-collapse-btn" @click="toggleNav" :title="navCollapsed ? t('common.expandSidebar') : t('common.collapseSidebar')">
-            <svg v-if="!navCollapsed" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>
-            <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          <!-- Floating collapse toggle, pinned to the bottom of the nav -->
+          <button
+            class="nav-collapse-btn"
+            @click="toggleNav"
+            :title="navCollapsed ? t('common.expandSidebar') : t('common.collapseSidebar')"
+          >
+            <svg v-if="!navCollapsed" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+            <svg v-else width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
           </button>
         </div>
 
@@ -43,41 +47,39 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, onMounted, onBeforeUnmount } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
+import { useMediaQuery, BREAKPOINTS } from '@/composables/useBreakpoint'
 import { useI18n } from 'vue-i18n'
 
 const route = useRoute()
 const { t } = useI18n()
 
-// 折叠状态
+// Routes that benefit from extra editor width — the sub-nav auto-collapses
+// to a 56px rail unless the user has explicitly toggled it open.
+const COMPACT_ROUTES = ['/settings/workflows']
+
 const navCollapsed = ref(localStorage.getItem('mc-settings-nav-collapsed') === 'true')
-const userExplicit = ref(localStorage.getItem('mc-settings-nav-collapsed') === 'true')
-let mediumQuery: MediaQueryList | null = null
+const userExplicit = ref(localStorage.getItem('mc-settings-nav-collapsed') !== null)
+const compactViewport = useMediaQuery(BREAKPOINTS.compact)
 
 function toggleNav() {
   navCollapsed.value = !navCollapsed.value
-  userExplicit.value = navCollapsed.value
+  userExplicit.value = true
   localStorage.setItem('mc-settings-nav-collapsed', String(navCollapsed.value))
 }
 
-function handleMediumChange(e: MediaQueryListEvent | MediaQueryList) {
-  if (e.matches && !userExplicit.value) {
-    navCollapsed.value = true
-  } else if (!e.matches && !userExplicit.value) {
-    navCollapsed.value = false
-  }
+function isCompactRoute(path: string): boolean {
+  return COMPACT_ROUTES.some((p) => path.startsWith(p))
 }
 
-onMounted(() => {
-  mediumQuery = window.matchMedia('(max-width: 1200px)')
-  handleMediumChange(mediumQuery)
-  mediumQuery.addEventListener('change', handleMediumChange)
-})
+function recomputeAuto() {
+  if (userExplicit.value) return
+  navCollapsed.value = isCompactRoute(route.path) || compactViewport.value
+}
 
-onBeforeUnmount(() => {
-  mediumQuery?.removeEventListener('change', handleMediumChange)
-})
+watch(() => route.path, recomputeAuto)
+watch(compactViewport, recomputeAuto, { immediate: true })
 
 const sections = computed(() => [
   {
@@ -122,6 +124,12 @@ const sections = computed(() => [
     label: t('settings.sections.video'),
     icon: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>',
   },
+  {
+    id: 'model3d',
+    path: '/settings/model3d',
+    label: t('settings.sections.model3d'),
+    icon: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2 L21 7 L21 17 L12 22 L3 17 L3 7 Z"/><path d="M3 7 L12 12 L21 7"/><path d="M12 12 L12 22"/></svg>',
+  },
   // Divider: Workspace
   { id: 'divider-workspace', path: '', label: t('settings.sections.workspace', 'Workspace'), icon: '', isDivider: true },
   {
@@ -142,19 +150,26 @@ const sections = computed(() => [
     label: t('security.sections.members', 'Members'),
     icon: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>',
   },
-  {
-    id: 'activity',
-    path: '/settings/activity',
-    label: t('security.sections.activity', 'Activity'),
-    icon: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>',
-  },
+  // RFC-090 Phase 4: Activity 子项移除，提升至顶层 /activity
   // Divider: Advanced
   { id: 'divider-advanced', path: '', label: t('settings.sections.advanced'), icon: '', isDivider: true },
   {
-    id: 'cron-jobs',
-    path: '/settings/cron-jobs',
-    label: t('nav.cronJobs'),
+    id: 'scheduler',
+    path: '/settings/scheduler',
+    label: t('nav.scheduler', 'Scheduler'),
     icon: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>',
+  },
+  {
+    id: 'workflows',
+    path: '/settings/workflows',
+    label: t('nav.workflows', 'Workflows'),
+    icon: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>',
+  },
+  {
+    id: 'skill-curator',
+    path: '/settings/skill-curator',
+    label: t('settings.sections.skillCurator', 'Skill Curator'),
+    icon: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 8v13H3V8"/><rect x="1" y="3" width="22" height="5" rx="1"/><line x1="10" y1="12" x2="14" y2="12"/></svg>',
   },
   {
     id: 'datasources',
@@ -165,14 +180,39 @@ const sections = computed(() => [
   {
     id: 'mcp-servers',
     path: '/settings/mcp-servers',
-    label: t('nav.mcpServers'),
+    label: t('nav.mcpConnections'),
     icon: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"/><rect x="2" y="14" width="20" height="8" rx="2" ry="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>',
+  },
+  {
+    id: 'tools',
+    path: '/settings/tools',
+    label: t('nav.toolsCatalog'),
+    icon: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>',
+  },
+  {
+    id: 'proxy',
+    path: '/settings/proxy',
+    label: t('settings.sections.proxy', '网络代理'),
+    icon: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>',
+  },
+  // RFC-090 Phase 7: ACP endpoints
+  {
+    id: 'acp',
+    path: '/settings/acp',
+    label: t('nav.acpEndpoints'),
+    icon: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>',
   },
   {
     id: 'token-usage',
     path: '/settings/token-usage',
     label: t('nav.tokenUsage'),
     icon: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1v22M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>',
+  },
+  {
+    id: 'feature-flags',
+    path: '/settings/feature-flags',
+    label: t('settings.sections.featureFlags', 'Feature Flags'),
+    icon: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 21V4l12 4-12 4"/><path d="M4 12v9"/></svg>',
   },
   {
     id: 'about',
@@ -248,24 +288,53 @@ function isActive(path: string) {
 .nav-divider { font-size: 10px; font-weight: 700; color: var(--mc-text-tertiary); text-transform: uppercase; letter-spacing: 0.1em; padding: 12px 8px 4px; margin-top: 2px; }
 
 .nav-collapse-btn {
+  align-self: center;
+  margin-top: auto;
+  margin-bottom: 8px;
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 100%;
+  width: 32px;
   height: 32px;
-  margin-top: auto;
-  border: none;
-  border-top: 1px solid var(--mc-border-light);
-  background: transparent;
-  color: var(--mc-text-tertiary);
+  padding: 0;
+  border: 1px solid rgba(217, 109, 70, 0.22);
+  border-radius: 50%;
+  background: var(--mc-primary-bg);
+  color: var(--mc-primary);
   cursor: pointer;
-  transition: all 0.15s;
   flex-shrink: 0;
+  box-shadow:
+    0 6px 16px rgba(217, 109, 70, 0.18),
+    0 2px 4px rgba(217, 109, 70, 0.10),
+    inset 0 1px 0 rgba(255, 255, 255, 0.6);
+  transition:
+    background 0.18s ease,
+    color 0.18s ease,
+    border-color 0.18s ease,
+    box-shadow 0.18s ease,
+    transform 0.18s cubic-bezier(0.4, 0, 0.2, 1);
+  position: sticky;
+  bottom: 8px;
 }
 
 .nav-collapse-btn:hover {
-  background: var(--mc-bg-muted);
-  color: var(--mc-text-primary);
+  background: var(--mc-primary);
+  color: #fff;
+  border-color: var(--mc-primary);
+  box-shadow:
+    0 10px 22px rgba(217, 109, 70, 0.34),
+    0 3px 6px rgba(217, 109, 70, 0.20);
+  transform: scale(1.06);
+}
+
+.nav-collapse-btn:active {
+  transform: scale(0.96);
+  transition-duration: 0.08s;
+}
+
+.nav-collapse-btn:focus-visible {
+  outline: 2px solid var(--mc-primary);
+  outline-offset: 2px;
 }
 
 .settings-content {

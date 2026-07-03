@@ -23,10 +23,13 @@ public class WikiRawMaterialEntity {
     /** 材料标题 */
     private String title;
 
-    /** 来源类型：text / pdf / docx / url / paste */
+    /** Source type: text / pdf / docx / image / url / paste. */
     private String sourceType;
 
-    /** 原始文件路径（二进制文件） */
+    /** Original Content-Type from the upload (e.g. {@code image/png}); null for text. */
+    private String mimeType;
+
+    /** Original file path on disk (binary uploads only). */
     private String sourcePath;
 
     /** 原始文本内容（文本类型） */
@@ -43,8 +46,17 @@ public class WikiRawMaterialEntity {
     /** 文件大小（字节） */
     private Long fileSize;
 
-    /** 处理状态：pending / processing / completed / failed */
+    /** 处理状态：pending / processing / completed / failed / partial / cancelled */
     private String processingStatus;
+
+    /**
+     * User-requested cancellation flag. Set to {@code true} via the cancel
+     * endpoint while a raw material is in {@code processing}. The pipeline
+     * observes the flag at its abort checkpoints and exits early with
+     * {@code processingStatus = "cancelled"}; the flag is cleared on the
+     * next successful claim for processing.
+     */
+    private Boolean cancelRequested;
 
     /** 上次处理时间 */
     private LocalDateTime lastProcessedAt;

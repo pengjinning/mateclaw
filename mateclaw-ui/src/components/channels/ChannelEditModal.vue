@@ -39,12 +39,13 @@
           </div>
           <div class="form-group">
             <label class="form-label">{{ t('channels.fields.bindAgent') }}</label>
-            <select v-model="form.agentId" class="form-input">
-              <option :value="null">{{ t('channels.placeholders.selectAgent') }}</option>
-              <option v-for="agent in agents" :key="agent.id" :value="agent.id">
-                {{ agent.icon || '🤖' }} {{ agent.name }}
-              </option>
-            </select>
+            <AgentPickerDialog
+              block
+              :model-value="form.agentId ?? null"
+              :agents="props.agents"
+              :placeholder="t('channels.placeholders.selectAgent')"
+              @update:model-value="(v) => (form.agentId = v ?? undefined)"
+            />
           </div>
         </div>
 
@@ -189,6 +190,43 @@
                   <template v-else-if="feishuRegister.status.value === 'denied'">{{ t('channels.feishuRegister.denied') }}</template>
                   <template v-else-if="feishuRegister.status.value === 'error'">{{ t('channels.feishuRegister.error') }}</template>
                   <template v-else>{{ t('channels.feishuRegister.scanHint') }}</template>
+                </p>
+              </div>
+            </div>
+
+            <!-- QQ 扫码绑定（QQ 开放平台 Lite portal） -->
+            <div v-if="form.channelType === 'qq'" class="qq-register-card">
+              <div class="qq-register-header">
+                <strong>{{ t('channels.qqRegister.title') }}</strong>
+              </div>
+              <p class="qq-register-hint">{{ t('channels.qqRegister.hint') }}</p>
+              <button
+                type="button"
+                class="qq-register-btn"
+                @click="qqRegister.start()"
+                :disabled="qqRegister.loading.value || qqRegister.status.value === 'waiting'"
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/>
+                  <rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="3" height="3"/>
+                  <line x1="21" y1="14" x2="21" y2="17"/><line x1="14" y1="21" x2="17" y2="21"/>
+                  <line x1="21" y1="21" x2="21" y2="21"/>
+                </svg>
+                {{ qqRegister.loading.value
+                  ? t('channels.qqRegister.buttonLoading')
+                  : t('channels.qqRegister.button') }}
+              </button>
+              <div v-if="qqRegister.loading.value && !qqRegister.qrcodeUrl.value" class="qq-register-qrcode qq-register-qrcode--loading">
+                <div class="qq-register-qrcode-spinner"></div>
+                <p class="qq-register-status">{{ t('channels.qqRegister.qrcodeLoading') }}…</p>
+              </div>
+              <div v-else-if="qqRegister.qrcodeUrl.value" class="qq-register-qrcode">
+                <img :src="qqRegister.qrcodeUrl.value" :alt="t('channels.qqRegister.button')" class="qq-register-qrcode-img" />
+                <p class="qq-register-status" :class="qqRegister.status.value">
+                  <template v-if="qqRegister.status.value === 'confirmed'">{{ t('channels.qqRegister.confirmed') }}</template>
+                  <template v-else-if="qqRegister.status.value === 'expired'">{{ t('channels.qqRegister.expired') }}</template>
+                  <template v-else-if="qqRegister.status.value === 'denied'">{{ t('channels.qqRegister.denied') }}</template>
+                  <template v-else>{{ t('channels.qqRegister.scanHint') }}</template>
                 </p>
               </div>
             </div>
@@ -422,8 +460,9 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { ElMessage } from 'element-plus'
+import { mcToast } from '@/composables/useMcToast'
 import { CHANNEL_FIELD_DEFS } from '@/types'
+import { copyToClipboard } from '@/utils/clipboard'
 import type { Agent, Channel, ChannelFieldDef } from '@/types'
 import {
   buildConfigJson,
@@ -440,6 +479,8 @@ import { useWeixinQrcodePoll } from '@/composables/channels/useWeixinQrcodePoll'
 import { useWecomBotAuth } from '@/composables/channels/useWecomBotAuth'
 import { useFeishuAppRegister } from '@/composables/channels/useFeishuAppRegister'
 import { useDingTalkAppRegister } from '@/composables/channels/useDingTalkAppRegister'
+import { useQqAppRegister } from '@/composables/channels/useQqAppRegister'
+import AgentPickerDialog from '@/components/common/AgentPickerDialog.vue'
 
 interface Props {
   modelValue: boolean
@@ -527,6 +568,15 @@ const feishuRegister = useFeishuAppRegister(({ appId, appSecret }) => {
 // feishu's flow, returns client_id/client_secret instead.
 const dingtalkRegister = useDingTalkAppRegister(({ clientId, clientSecret }) => {
   channelConfig.value.client_id = clientId
+  channelConfig.value.client_secret = clientSecret
+  form.value.enabled = true
+})
+
+// QQ Bot scan-to-bind via the Lite portal — fills app_id/client_secret.
+// The user must have created the bot on q.qq.com beforehand; this flow only
+// skips the manual copy-paste of credentials.
+const qqRegister = useQqAppRegister(({ appId, clientSecret }) => {
+  channelConfig.value.app_id = appId
   channelConfig.value.client_secret = clientSecret
   form.value.enabled = true
 })
@@ -628,20 +678,20 @@ const copyLabel = ref(t('channels.webhook.copy'))
 
 async function copyWebhookUrl() {
   try {
-    await navigator.clipboard.writeText(webhookUrl.value)
+    await copyToClipboard(webhookUrl.value)
     copyLabel.value = t('channels.webhook.copied')
     setTimeout(() => { copyLabel.value = t('channels.webhook.copy') }, 2000)
   } catch {
-    ElMessage.warning(t('channels.webhook.copyFailed'))
+    mcToast.warning(t('channels.webhook.copyFailed'))
   }
 }
 
 async function copyText(text: string) {
   try {
-    await navigator.clipboard.writeText(text)
-    ElMessage.success(t('common.copied'))
+    await copyToClipboard(text)
+    mcToast.success(t('common.copied'))
   } catch {
-    ElMessage.warning(t('channels.webhook.copyFailed'))
+    mcToast.warning(t('channels.webhook.copyFailed'))
   }
 }
 
@@ -669,6 +719,59 @@ function initForCreate() {
   configTab.value = 'form'
   showAdvanced.value = false
   initDefaultFieldValues()
+  // Pre-fill description with the i18n type-level fallback so the new
+  // channel card never lands on the list page with an empty middle area.
+  // The user can keep, edit, or clear it before saving.
+  applyTypeDescriptionFallback(true)
+}
+
+/**
+ * Set {@code form.description} to the type-level i18n fallback when
+ * appropriate. Called on mount and whenever {@code channelType} changes
+ * (create flow only — never overrides an editing row).
+ *
+ * @param force when {@code true}, overwrite an empty / auto-filled
+ *              description regardless. We treat ANY description that
+ *              matches one of the known type fallbacks as "auto", so
+ *              switching from dingtalk → wecom in the wizard updates
+ *              the placeholder cleanly. A description the user typed
+ *              themselves never matches and is preserved.
+ */
+function applyTypeDescriptionFallback(force = false) {
+  if (props.editingChannel) return  // never touch user data on edit
+  const type = form.value.channelType
+  if (!type) return
+  const candidate = t(`channels.cardDesc.typeFallback.${type}` as any)
+  // vue-i18n returns the key itself when missing → leave description alone.
+  const haveTranslation = candidate && candidate !== `channels.cardDesc.typeFallback.${type}`
+  if (!haveTranslation) return
+  const current = (form.value.description || '').trim()
+  if (force && !current) {
+    form.value.description = candidate
+    return
+  }
+  // Switching channel types — update only if the description is still one
+  // of the auto-filled fallbacks (user hasn't typed their own).
+  if (current && isAutoTypeFallback(current)) {
+    form.value.description = candidate
+  } else if (!current) {
+    form.value.description = candidate
+  }
+}
+
+/** True when the given string equals any of the known channel-type
+ *  fallback i18n strings — used to detect "user hasn't customized this". */
+function isAutoTypeFallback(text: string): boolean {
+  const trimmed = text.trim()
+  // Iterate the known channel types we ship i18n for. List mirrors
+  // CHANNEL_TYPE_OPTIONS but we keep a local copy to avoid coupling.
+  const known = ['web', 'dingtalk', 'wecom', 'weixin', 'feishu', 'telegram',
+                 'slack', 'discord', 'qq', 'matrix', 'qqbot', 'yuanbao']
+  for (const k of known) {
+    const s = t(`channels.cardDesc.typeFallback.${k}` as any)
+    if (s && s === trimmed) return true
+  }
+  return false
 }
 
 function initDefaultFieldValues() {
@@ -692,6 +795,8 @@ function onChannelTypeChange() {
   visibleFields.value = {}
   weixin.reset()
   initDefaultFieldValues()
+  // Refresh the auto-filled description if the user hasn't customized it.
+  applyTypeDescriptionFallback(false)
 }
 
 function switchTab(tab: 'form' | 'json') {
@@ -722,7 +827,7 @@ function save() {
     if (rawConfigJson.value.trim()) {
       try { JSON.parse(rawConfigJson.value) }
       catch {
-        ElMessage.error(t('channels.messages.invalidJson'))
+        mcToast.error(t('channels.messages.invalidJson'))
         return
       }
     }
@@ -810,6 +915,24 @@ function save() {
 .dingtalk-register-status.confirmed { color: #10b981; font-weight: 500; }
 .dingtalk-register-status.expired { color: #f56c6c; }
 .dingtalk-register-status.denied { color: #f56c6c; }
+
+/* QQ scan-to-bind (QQ Open Platform Lite portal) */
+.qq-register-card { background: linear-gradient(135deg, rgba(20,134,255,0.05), rgba(96,165,250,0.05)); border: 1px solid rgba(20,134,255,0.2); border-radius: 10px; padding: 14px 16px; margin-bottom: 16px; }
+.qq-register-header { font-size: 13px; color: var(--mc-text-primary); margin-bottom: 6px; }
+.qq-register-hint { font-size: 12px; color: var(--mc-text-secondary); margin: 0 0 10px 0; line-height: 1.6; }
+.qq-register-btn { display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; padding: 10px 16px; background: #1486ff; color: #fff; border: none; border-radius: 8px; font-size: 14px; font-weight: 500; cursor: pointer; transition: all 0.2s; }
+.qq-register-btn:hover:not(:disabled) { background: #0d6fd9; transform: translateY(-1px); box-shadow: 0 2px 8px rgba(20,134,255,0.3); }
+.qq-register-btn:active:not(:disabled) { transform: translateY(0); }
+.qq-register-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+.qq-register-qrcode { display: flex; flex-direction: column; align-items: center; margin-top: 16px; padding: 16px; background: #fff; border-radius: 8px; border: 1px solid var(--mc-border); }
+.qq-register-qrcode-img { width: 200px; height: 200px; border-radius: 4px; }
+.qq-register-qrcode--loading { min-height: 240px; justify-content: center; }
+.qq-register-qrcode-spinner { width: 40px; height: 40px; border: 3px solid rgba(20,134,255,0.2); border-top-color: #1486ff; border-radius: 50%; animation: qq-register-spin 0.8s linear infinite; }
+@keyframes qq-register-spin { to { transform: rotate(360deg); } }
+.qq-register-status { font-size: 13px; color: var(--mc-text-secondary); margin-top: 10px; transition: color 0.2s; text-align: center; }
+.qq-register-status.confirmed { color: #10b981; font-weight: 500; }
+.qq-register-status.expired { color: #f56c6c; }
+.qq-register-status.denied { color: #f56c6c; }
 
 /* Feishu one-click register */
 .feishu-register-card { background: linear-gradient(135deg, rgba(0,128,255,0.05), rgba(99,102,241,0.05)); border: 1px solid rgba(99,102,241,0.2); border-radius: 10px; padding: 14px 16px; margin-bottom: 16px; }
@@ -900,4 +1023,7 @@ function save() {
 
 .json-hint { font-size: 12px; color: var(--mc-text-tertiary); margin: 0 0 8px; }
 .json-editor { font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace; font-size: 13px; line-height: 1.5; tab-size: 2; }
+
+.fade-enter-active, .fade-leave-active { transition: opacity 0.15s; }
+.fade-enter-from, .fade-leave-to { opacity: 0; }
 </style>

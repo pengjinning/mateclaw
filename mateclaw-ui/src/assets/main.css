@@ -140,6 +140,11 @@
   --mc-scrollbar-thumb: #C4B5A8;
   --mc-scrollbar-thumb-hover: #A08070;
 
+  /* workflow canvas — vue-flow surfaces */
+  --mc-canvas-dot: rgba(0, 0, 0, 0.18);
+  --mc-edge: #c2b3a5;
+  --mc-edge-strong: #8a7261;
+
   /* Element Plus light override */
   --el-color-primary: #D97757;
   --el-font-family: var(--mc-font-body);
@@ -260,7 +265,76 @@ html.dark {
   --mc-scrollbar-thumb: #5A4438;
   --mc-scrollbar-thumb-hover: #7A6050;
 
+  /* workflow canvas — darker dots + softer edge color so they read on
+     the dark background without overpowering the node card. */
+  --mc-canvas-dot: rgba(255, 255, 255, 0.14);
+  --mc-edge: #5a4a3e;
+  --mc-edge-strong: #8c7361;
+
   color-scheme: dark;
+}
+
+/* Vue Flow theme bridge — its default stylesheet ships hard-coded
+   light colors for handles / mini-map / control buttons. Map them to
+   our theme tokens so dark mode inherits cleanly.
+
+   Each selector is bumped to (0,2,0) specificity by scoping to
+   `.workflow-canvas` because vue-flow's component CSS imports inside
+   WorkflowCanvas.vue land in the bundle AFTER main.css; equal
+   specificity would lose. */
+.workflow-canvas .vue-flow__handle {
+  background: var(--mc-edge-strong, #777);
+  border-color: var(--mc-bg-elevated, #fff);
+}
+.workflow-canvas .vue-flow__edge-path {
+  stroke: var(--mc-edge, #999);
+}
+.workflow-canvas .vue-flow__edge-text {
+  fill: var(--mc-text-secondary, #555);
+  font-size: 11px;
+}
+.workflow-canvas .vue-flow__edge-textbg {
+  fill: var(--mc-bg-elevated, #fff);
+}
+.workflow-canvas .vue-flow__background {
+  background: transparent;
+}
+.workflow-canvas .vue-flow__minimap {
+  background: var(--mc-bg-sunken, rgba(0, 0, 0, 0.04));
+  border: 1px solid var(--mc-border-light, rgba(0, 0, 0, 0.08));
+  border-radius: 6px;
+}
+.workflow-canvas .vue-flow__minimap-mask {
+  fill: var(--mc-bg-muted, rgba(0, 0, 0, 0.06));
+  stroke: var(--mc-border, transparent);
+}
+.workflow-canvas .vue-flow__controls {
+  box-shadow: var(--mc-shadow-soft, 0 2px 6px rgba(0, 0, 0, 0.1));
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--mc-bg-elevated, #ffffff);
+  border: 1px solid var(--mc-border-light, rgba(0, 0, 0, 0.08));
+}
+.workflow-canvas .vue-flow__controls-button {
+  background: var(--mc-bg-elevated, #ffffff);
+  border-bottom: 1px solid var(--mc-border-light, rgba(0, 0, 0, 0.08));
+  fill: var(--mc-text-primary, #333);
+  color: var(--mc-text-primary, #333);
+}
+.workflow-canvas .vue-flow__controls-button svg {
+  fill: currentColor;
+}
+.workflow-canvas .vue-flow__controls-button:hover {
+  background: var(--mc-bg-muted, rgba(0, 0, 0, 0.05));
+}
+/* Round the bottom button so the corner doesn't show the hardcoded grey
+   border vue-flow ships with. */
+.workflow-canvas .vue-flow__controls-button:last-child {
+  border-bottom: none;
+}
+/* Selection ring matches the brand accent in both modes. */
+.workflow-canvas .vue-flow__node.selected {
+  box-shadow: 0 0 0 2px var(--mc-primary, #4084ff);
 }
 
 /* ================================================================
@@ -542,6 +616,168 @@ html.dark body::before {
   font-size: 13px;
 }
 
+/* Streaming placeholder for echarts/mermaid blocks (shown until the fenced
+   source finishes streaming, then replaced by the real chart). */
+.markdown-body .chart-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin: 14px 0;
+  min-height: 120px;
+  border-radius: 12px;
+  background: var(--mc-bg-elevated);
+  border: 1px solid var(--mc-border-light);
+}
+.markdown-body .chart-loading__dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--mc-border, #cbd5e1);
+  animation: mc-product-pulse 1.4s ease-in-out infinite;
+}
+.markdown-body .chart-loading__dot:nth-child(2) { animation-delay: 0.2s; }
+.markdown-body .chart-loading__dot:nth-child(3) { animation-delay: 0.4s; }
+
+/* ================================================================
+   Product cards (from ```product-cards fenced blocks — shopping /
+   price-comparison results rendered as a clickable card grid)
+   ================================================================ */
+.markdown-body .product-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 12px;
+  margin: 14px 0;
+}
+.markdown-body .product-card {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--mc-border-light);
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--mc-bg-elevated);
+  text-decoration: none;
+  color: inherit;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;
+}
+.markdown-body a.product-card:hover {
+  border-color: var(--mc-primary, #4f46e5);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.1);
+  transform: translateY(-2px);
+}
+/* The whole card is an <a>, so the global `.markdown-body a:hover` underline
+   would streak across every line of card text. Suppress it — hover feedback
+   comes from the lift/shadow and the name turning primary instead. */
+.markdown-body a.product-card,
+.markdown-body a.product-card:hover,
+.markdown-body a.product-card:hover * {
+  text-decoration: none;
+}
+.markdown-body a.product-card:hover .product-card__name {
+  color: var(--mc-primary, #d96d46);
+}
+.markdown-body .product-card__media {
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  background: var(--mc-bg-subtle, #f1f5f9);
+  overflow: hidden;
+}
+.markdown-body .product-card__media img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+.markdown-body .product-card__body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px 12px;
+}
+.markdown-body .product-card__name {
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--mc-text-primary);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.markdown-body .product-card__price {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-top: 2px;
+}
+.markdown-body .product-card__price-now {
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--mc-danger, #e11d48);
+}
+.markdown-body .product-card__price-was {
+  font-size: 12px;
+  color: var(--mc-text-tertiary);
+  text-decoration: line-through;
+}
+.markdown-body .product-card__meta {
+  font-size: 12px;
+  color: var(--mc-text-secondary);
+}
+.markdown-body .product-card__low {
+  font-size: 11px;
+  color: var(--mc-text-tertiary);
+}
+.markdown-body .product-card__advice {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--mc-text-secondary);
+  margin-top: 2px;
+}
+.markdown-body .product-card__buy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  margin-top: 8px;
+  padding: 7px 12px;
+  border-radius: 8px;
+  background: var(--mc-primary, #d96d46);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  transition: background 0.15s ease;
+}
+.markdown-body a.product-card:hover .product-card__buy {
+  background: var(--mc-primary-hover, #bb4f27);
+}
+.markdown-body .product-card__buy-arrow {
+  transition: transform 0.15s ease;
+}
+.markdown-body a.product-card:hover .product-card__buy-arrow {
+  transform: translateX(3px);
+}
+/* Streaming placeholder while the product-cards JSON is still incomplete. */
+.markdown-body .product-cards--loading {
+  display: flex;
+  gap: 6px;
+  padding: 16px 4px;
+}
+.markdown-body .product-cards__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--mc-border, #cbd5e1);
+  animation: mc-product-pulse 1.4s ease-in-out infinite;
+}
+.markdown-body .product-cards__dot:nth-child(2) { animation-delay: 0.2s; }
+.markdown-body .product-cards__dot:nth-child(3) { animation-delay: 0.4s; }
+@keyframes mc-product-pulse {
+  0%, 80%, 100% { opacity: 0.3; }
+  40% { opacity: 1; }
+}
+
 /* ================================================================
    Shared page shell
    ================================================================ */
@@ -558,6 +794,19 @@ html.dark body::before {
   backdrop-filter: blur(12px) saturate(1.1);
   border-radius: 28px;
   box-shadow: var(--mc-shadow-soft);
+}
+
+/* While a workflow canvas is in fullscreen mode, suppress the backdrop
+   filter on every page frame. A non-`none` backdrop-filter promotes the
+   element to a containing block for position:fixed descendants, which
+   pinned the fullscreen canvas to the frame's top-left instead of the
+   viewport. The frames sit behind the fullscreen overlay anyway, so
+   the blur has no visible cost during this transient state. */
+body.workflow-canvas-fullscreen .mc-page-frame {
+  backdrop-filter: none;
+}
+body.workflow-canvas-fullscreen .mc-page-frame::before {
+  display: none;
 }
 
 .mc-page-frame::before {
@@ -737,7 +986,17 @@ html.dark .hljs-deletion { color: #e06c75; background: rgba(224, 108, 117, 0.1);
 
 .markdown-body p { margin: 8px 0; }
 .markdown-body ul, .markdown-body ol { padding-left: 1.5rem; margin: 8px 0; }
-.markdown-body table { border-collapse: collapse; width: 100%; margin: 12px 0; }
+.markdown-body table {
+  border-collapse: collapse;
+  /* display:block + overflow-x:auto turns a wide table into its own horizontal
+     scroll region instead of overflowing the message bubble and getting clipped
+     by the list's overflow-x:hidden. Narrow tables still stretch to full width. */
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+  margin: 12px 0;
+}
 .markdown-body th, .markdown-body td { border: 1px solid var(--mc-table-border); padding: 8px 12px; text-align: left; }
 .markdown-body th { background: var(--mc-table-header-bg); font-weight: 600; }
 .markdown-body blockquote {

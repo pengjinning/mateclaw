@@ -29,6 +29,12 @@ nbbuild/
 nbdist/
 .nb-gradle/
 
+### frontend build artifacts ###
+# Vite's primary output goes to mateclaw-server/.../static; the only thing
+# that lands here is rollup-plugin-visualizer's stats.html when running
+# ANALYZE=1 pnpm build.
+mateclaw-ui/dist/
+
 ### maven ###
 target/
 *.war
@@ -98,3 +104,15 @@ CLAUDE.md
 
 # Codex CLI local artifacts
 .codex/
+
+# Sync tooling local state (generated each run; report is intentionally tracked)
+scripts/.*-sync-state.json
+
+# Sandbox / external client work that lives in this directory
+# but should not ship in the repo.
+outputs/
+
+# This is a pnpm monorepo — pnpm-lock.yaml is the only lockfile we track.
+# Ignore stray npm/yarn lockfiles so they are not committed by mistake.
+package-lock.json
+yarn.lock

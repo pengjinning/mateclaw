@@ -47,4 +47,31 @@ public class WikiKbConfig {
      * {@link vip.mate.wiki.WikiProperties#isUseStructuredRoute()}.
      */
     private Boolean useStructuredRoute;
+
+    /**
+     * KB-level default read policy applied when an agent has no
+     * {@code mate_wiki_agent_page_type_permission} rows for this KB.
+     * {@code "allow_all"} (the default when {@code null}) keeps existing
+     * behaviour — every agent reads every pageType. {@code "deny_all"} flips
+     * the default closed so a professional KB can require each readable
+     * pageType to be granted explicitly per agent.
+     */
+    private String defaultReadPolicy;
+
+    /**
+     * Opt-in for entity-level knowledge graph extraction on this KB. When
+     * {@code true}, an extraction pass runs after ingest/embedding to pull
+     * named entities (person, organization, location, ...) and their
+     * relations from source chunks into the {@code mate_wiki_entity*} tables.
+     * {@code null} or {@code false} keeps the legacy behaviour (page graph
+     * only). Off by default because extraction adds LLM calls per chunk.
+     */
+    private Boolean entityExtractionEnabled;
+
+    /**
+     * Optional whitelist of entity types to extract, e.g.
+     * {@code ["person","organization","location"]}. {@code null} or empty
+     * lets the extractor use its built-in default type set.
+     */
+    private List<String> entityTypes;
 }

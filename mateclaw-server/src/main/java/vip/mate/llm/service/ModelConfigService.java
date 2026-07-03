@@ -11,6 +11,7 @@ import vip.mate.llm.event.ModelConfigChangedEvent;
 import vip.mate.llm.model.ModelConfigEntity;
 import vip.mate.llm.repository.ModelConfigMapper;
 
+import java.util.Comparator;
 import java.util.List;
 import org.springframework.context.ApplicationEventPublisher;
 
@@ -23,6 +24,7 @@ public class ModelConfigService {
 
     private final ModelConfigMapper modelConfigMapper;
     private final ApplicationEventPublisher eventPublisher;
+    private final ModelCapabilityService modelCapabilityService;
 
     /**
      * Lazy to break circular dependency: ModelProviderService → ModelConfigService.
@@ -42,10 +44,10 @@ public class ModelConfigService {
     public List<ModelConfigEntity> listEnabledModels() {
         return modelConfigMapper.selectList(new LambdaQueryWrapper<ModelConfigEntity>()
                 .eq(ModelConfigEntity::getEnabled, true)
-                .eq(ModelConfigEntity::getProvider, "dashscope")
                 // 仅 chat 类型（排除 embedding），NULL 兼容老数据
                 .and(w -> w.isNull(ModelConfigEntity::getModelType)
                            .or().eq(ModelConfigEntity::getModelType, "chat"))
+                .orderByAsc(ModelConfigEntity::getProvider)
                 .orderByDesc(ModelConfigEntity::getIsDefault)
                 .orderByAsc(ModelConfigEntity::getName));
     }
@@ -67,17 +69,54 @@ public class ModelConfigService {
      * </ul>
      */
     public List<ModelConfigEntity> listByType(String modelType) {
+        return listByType(modelType, null);
+    }
+
+    /**
+     * Optional modality filter (case-insensitive: {@code "vision" / "video" / "audio"}).
+     * Used by the multimodal sidecar settings UI to populate "default vision model" /
+     * "default video model" dropdowns.
+     * <p>
+     * The filter does <b>not</b> hide models the built-in heuristics fail to recognize:
+     * a provider-compatible model (e.g. a DashScope OpenAI-compatible vision model with
+     * a custom name) is vision-capable in practice even though its name matches no
+     * built-in prefix and it carries no declared {@code modalities}. Hard-filtering
+     * those out left them un-selectable as a sidecar. Instead every <em>enabled</em>
+     * chat model is returned; each row's transient {@link ModelConfigEntity#getModalityCapable()}
+     * flag records whether its declared / heuristic capabilities already cover the
+     * requested modality, and known-capable rows are sorted to the top so the UI can
+     * highlight them while still letting the user pick any model.
+     */
+    public List<ModelConfigEntity> listByType(String modelType, String modality) {
+        List<ModelConfigEntity> rows;
         if ("chat".equals(modelType)) {
-            return modelConfigMapper.selectList(new LambdaQueryWrapper<ModelConfigEntity>()
+            rows = modelConfigMapper.selectList(new LambdaQueryWrapper<ModelConfigEntity>()
                     .and(w -> w.isNull(ModelConfigEntity::getModelType)
                                .or().eq(ModelConfigEntity::getModelType, "chat"))
                     .orderByDesc(ModelConfigEntity::getIsDefault)
                     .orderByAsc(ModelConfigEntity::getName));
+        } else {
+            rows = modelConfigMapper.selectList(new LambdaQueryWrapper<ModelConfigEntity>()
+                    .eq(ModelConfigEntity::getModelType, modelType)
+                    .orderByDesc(ModelConfigEntity::getIsDefault)
+                    .orderByAsc(ModelConfigEntity::getName));
         }
-        return modelConfigMapper.selectList(new LambdaQueryWrapper<ModelConfigEntity>()
-                .eq(ModelConfigEntity::getModelType, modelType)
-                .orderByDesc(ModelConfigEntity::getIsDefault)
-                .orderByAsc(ModelConfigEntity::getName));
+        if (modality == null || modality.isBlank()) return rows;
+        ModelCapabilityService.Modality required;
+        try {
+            required = ModelCapabilityService.Modality.valueOf(modality.trim().toUpperCase());
+        } catch (IllegalArgumentException e) {
+            return rows;
+        }
+        return rows.stream()
+                .filter(m -> Boolean.TRUE.equals(m.getEnabled()))
+                .peek(m -> m.setModalityCapable(
+                        modelCapabilityService.supports(m.getModelName(), m.getModalities(), required)))
+                // Known-capable models first; preserve the existing default-then-name
+                // order within each group.
+                .sorted(Comparator.comparing(
+                        (ModelConfigEntity m) -> Boolean.TRUE.equals(m.getModalityCapable())).reversed())
+                .toList();
     }
 
     /**
@@ -107,7 +146,7 @@ public class ModelConfigService {
                 .and(w -> w.isNull(ModelConfigEntity::getModelType)
                            .or().eq(ModelConfigEntity::getModelType, "chat"))
                 .last("LIMIT 1"));
-        if (defaultMarked != null && isProviderConfigured(defaultMarked.getProvider())) {
+        if (defaultMarked != null && isProviderEnabledAndConfigured(defaultMarked.getProvider())) {
             return defaultMarked;
         }
 
@@ -120,7 +159,7 @@ public class ModelConfigService {
                 .orderByDesc(ModelConfigEntity::getIsDefault)
                 .orderByAsc(ModelConfigEntity::getName));
         for (ModelConfigEntity candidate : candidates) {
-            if (isProviderConfigured(candidate.getProvider())) {
+            if (isProviderEnabledAndConfigured(candidate.getProvider())) {
                 return candidate;
             }
         }
@@ -141,12 +180,12 @@ public class ModelConfigService {
      * dependency. Falls back to {@code true} when the service is not yet available
      * (e.g., during early bootstrap) so we don't accidentally block startup.
      */
-    private boolean isProviderConfigured(String providerId) {
+    private boolean isProviderEnabledAndConfigured(String providerId) {
         if (modelProviderService == null || providerId == null) {
             return true;
         }
         try {
-            return modelProviderService.isProviderConfigured(providerId);
+            return modelProviderService.isProviderEnabledAndConfigured(providerId);
         } catch (Exception e) {
             return true; // conservative: don't filter if lookup fails
         }
@@ -156,6 +195,32 @@ public class ModelConfigService {
         return modelConfigMapper.selectOne(new LambdaQueryWrapper<ModelConfigEntity>()
                 .eq(ModelConfigEntity::getProvider, providerId)
                 .eq(ModelConfigEntity::getIsDefault, true)
+                .last("LIMIT 1"));
+    }
+
+    /**
+     * Resolve a provider's primary chat model for routing.
+     *
+     * <p>Prefers the row carrying the system default flag when it happens to
+     * belong to this provider; otherwise falls back to the provider's
+     * earliest-configured enabled chat model. The {@code is_default} flag is a
+     * single system-wide marker (see {@link #clearDefaultFlag}), so a provider
+     * that does not own it has no row matching {@link #getDefaultModelByProvider}.
+     * Without this fallback a preferred provider could never contribute a
+     * primary model unless it already held the global default.
+     *
+     * @return the provider's primary chat model, or {@code null} when the
+     *         provider has no enabled chat model configured
+     */
+    public ModelConfigEntity getPrimaryChatModelByProvider(String providerId) {
+        if (providerId == null || providerId.isBlank()) return null;
+        ModelConfigEntity def = getDefaultModelByProvider(providerId);
+        if (def != null) return def;
+        return modelConfigMapper.selectOne(new LambdaQueryWrapper<ModelConfigEntity>()
+                .eq(ModelConfigEntity::getProvider, providerId)
+                .eq(ModelConfigEntity::getEnabled, true)
+                .eq(ModelConfigEntity::getModelType, "chat")
+                .orderByAsc(ModelConfigEntity::getId)
                 .last("LIMIT 1"));
     }
 
@@ -299,6 +364,24 @@ public class ModelConfigService {
         return getDefaultModel();
     }
 
+    /**
+     * Resolve an enabled model by its exact (provider, modelName) pair. Unlike
+     * {@link #resolveModel(String)} this does NOT fall back to the default —
+     * it returns {@code null} when nothing matches, leaving the fallback
+     * decision to the caller. Used to honour a per-conversation model pin while
+     * still degrading gracefully when that model was later disabled or deleted.
+     */
+    public ModelConfigEntity findEnabledModel(String provider, String modelName) {
+        if (!StringUtils.hasText(provider) || !StringUtils.hasText(modelName)) {
+            return null;
+        }
+        return modelConfigMapper.selectOne(new LambdaQueryWrapper<ModelConfigEntity>()
+                .eq(ModelConfigEntity::getProvider, provider)
+                .eq(ModelConfigEntity::getModelName, modelName)
+                .eq(ModelConfigEntity::getEnabled, true)
+                .last("LIMIT 1"));
+    }
+
     private void validateModel(ModelConfigEntity entity, Long currentId) {
         if (!StringUtils.hasText(entity.getName())) {
             throw new MateClawException("err.llm.name_required", "模型名称不能为空");
@@ -312,6 +395,7 @@ public class ModelConfigService {
         ModelConfigEntity duplicate = modelConfigMapper.selectOne(new LambdaQueryWrapper<ModelConfigEntity>()
                 .eq(ModelConfigEntity::getProvider, entity.getProvider())
                 .eq(ModelConfigEntity::getModelName, entity.getModelName())
+                .eq(ModelConfigEntity::getDeleted, 0)
                 .ne(currentId != null, ModelConfigEntity::getId, currentId)
                 .last("LIMIT 1"));
         if (duplicate != null) {

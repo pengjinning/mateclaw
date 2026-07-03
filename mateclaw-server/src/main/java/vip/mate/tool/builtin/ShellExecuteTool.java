@@ -3,17 +3,21 @@ package vip.mate.tool.builtin;
 import cn.hutool.json.JSONObject;
 import cn.hutool.json.JSONUtil;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.ai.chat.model.ToolContext;
 import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.ai.tool.annotation.ToolParam;
+import org.springframework.lang.Nullable;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.util.Locale;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Predicate;
 
 /**
  * 内置工具：本地命令执行（跨平台）
@@ -49,7 +53,10 @@ public class ShellExecuteTool {
             + "Dangerous operations trigger security approval. Returns structured result with exitCode, stdout, stderr, timedOut.")
     public String execute_shell_command(
             @ToolParam(description = "Shell command to execute") String command,
-            @ToolParam(description = "Timeout in seconds, default 60", required = false) Integer timeoutSeconds) {
+            @ToolParam(description = "Timeout in seconds, default 60", required = false) Integer timeoutSeconds,
+            // RFC-063r §2.5: hidden from LLM by JsonSchemaGenerator. Carries the
+            // ChatOrigin so the workspace boundary check honors per-agent basePath.
+            @Nullable ToolContext ctx) {
 
         int timeout = (timeoutSeconds != null && timeoutSeconds > 0) ? timeoutSeconds : DEFAULT_TIMEOUT_SECONDS;
         // 硬上限：不允许超过 300 秒
@@ -61,6 +68,21 @@ public class ShellExecuteTool {
         JSONObject result = new JSONObject();
         result.set("command", command);
 
+        // Enforce the workspace boundary on the command string itself before
+        // the process starts. The pb.directory() set later only constrains
+        // the CWD — absolute paths in the command would still reach anywhere.
+        try {
+            vip.mate.tool.guard.WorkspacePathGuard.validateShellCommand(command, ctx);
+        } catch (IllegalArgumentException e) {
+            log.warn("[ShellExecute] Sandbox rejected command: {}", e.getMessage());
+            result.set("exitCode", -1);
+            result.set("stdout", "");
+            result.set("stderr", e.getMessage());
+            result.set("timedOut", false);
+            result.set("error", e.getMessage());
+            return JSONUtil.toJsonPrettyStr(result);
+        }
+
         Path stdoutFile = null;
         Path stderrFile = null;
 
@@ -69,7 +91,7 @@ public class ShellExecuteTool {
             // Windows cmd.exe 会在第一个换行处截断命令，Unix sh 也可能误解
             String sanitizedCommand = collapseEmbeddedNewlines(command);
 
-            ProcessBuilder pb = buildShellProcess(sanitizedCommand);
+            ProcessBuilder pb = buildShellProcess(sanitizedCommand, ctx);
             // 不继承环境变量中的敏感信息
             pb.environment().keySet().removeIf(key ->
                     key.contains("KEY") || key.contains("SECRET") || key.contains("TOKEN")
@@ -130,19 +152,28 @@ public class ShellExecuteTool {
      * Windows: cmd.exe /D /S /C "command"
      *   /D 禁用 AutoRun 注册表项，避免副作用
      *   /S 保留引号原样传递给命令
-     * Unix: /bin/sh -c command
+     * Unix: $SHELL -c command (honors the user's interactive shell)
+     *   honors the user's interactive shell so alias resolution / PATH
+     *   from the calling environment still apply; falls back to /bin/sh
+     *   when $SHELL is unset or points at a non-executable path.
      */
-    private static ProcessBuilder buildShellProcess(String command) {
+    private static ProcessBuilder buildShellProcess(String command, @Nullable ToolContext ctx) {
         ProcessBuilder pb;
         if (IS_WINDOWS) {
             String winCommand = sanitizeWindowsCommand(command);
             pb = new ProcessBuilder("cmd.exe", "/D", "/S", "/C", winCommand);
         } else {
-            pb = new ProcessBuilder("/bin/sh", "-c", command);
+            String shell = selectPosixShell(System.getenv("SHELL"));
+            pb = new ProcessBuilder(shell, "-c", command);
         }
 
-        // 设置工作区活动目录
-        java.nio.file.Path workingDir = vip.mate.tool.guard.WorkspacePathGuard.getWorkingDirectory();
+        // Pin the process cwd to the same workspace basePath the validator
+        // checked against. Using getWorkingDirectory(ctx) (not the no-arg
+        // ThreadLocal-only overload) keeps validation and execution on a
+        // single source of truth — otherwise a caller that only sets
+        // ToolContext could validate against one basePath and run with the
+        // ThreadLocal fallback's basePath.
+        java.nio.file.Path workingDir = vip.mate.tool.guard.WorkspacePathGuard.getWorkingDirectory(ctx);
         if (workingDir != null && java.nio.file.Files.isDirectory(workingDir)) {
             pb.directory(workingDir.toFile());
             log.info("[ShellExecute] Working directory set to: {}", workingDir);
@@ -179,6 +210,48 @@ public class ShellExecuteTool {
             return command;
         }
         return command.replace("\r\n", " ").replace("\n", " ");
+    }
+
+    /**
+     * Pick the POSIX shell binary to invoke for a non-Windows tool call.
+     *
+     * <p>Returns {@code userShellEnv} verbatim when:
+     * <ul>
+     *   <li>the value is non-blank,</li>
+     *   <li>parses as a valid path,</li>
+     *   <li>and the resolved binary is executable.</li>
+     * </ul>
+     *
+     * <p>Otherwise falls back to {@code /bin/sh} — the legacy hardcoded
+     * default. Important: {@code /bin/sh} on Debian/Ubuntu is dash, which
+     * does NOT honor users' bash-isms; the whole point of this method is
+     * to prefer the user's actual interactive shell when one is configured.
+     */
+    static String selectPosixShell(String userShellEnv) {
+        return selectPosixShell(userShellEnv, Files::isExecutable);
+    }
+
+    /**
+     * Test seam — same logic as {@link #selectPosixShell(String)} but with
+     * an injectable executable check so unit tests can drive every branch
+     * without depending on which shells actually exist on the test runner
+     * (Windows CI has no {@code /bin/sh}, POSIX dev hosts have varying
+     * shells installed). Production callers go through the single-arg
+     * overload above.
+     */
+    static String selectPosixShell(String userShellEnv, Predicate<Path> executableCheck) {
+        if (userShellEnv == null || userShellEnv.isBlank()) {
+            return "/bin/sh";
+        }
+        try {
+            Path candidate = Path.of(userShellEnv);
+            if (executableCheck.test(candidate)) {
+                return userShellEnv;
+            }
+        } catch (InvalidPathException ignored) {
+            // Some exotic $SHELL value that isn't a path — fall through to default.
+        }
+        return "/bin/sh";
     }
 
     /**

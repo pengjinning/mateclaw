@@ -56,6 +56,29 @@ public class WikiProperties {
     /** 注入 agent prompt 的最大字符数 */
     private int maxContextChars = 10000;
 
+    /**
+     * Hard cap on the existing-pages index injected into the route / batch-create
+     * prompts. The index lists every non-archived page in the KB so the router can
+     * decide create-vs-update and emit cross-links. Without a cap it grows linearly
+     * with the KB and eventually overflows the model context window
+     * ("Prompt exceeds max length"). When the rendered index exceeds this many
+     * characters the listing stops and a trailing marker records how many pages
+     * were omitted. Title-based dedup at persist time (findByCanonicalTitle) keeps
+     * truncation safe: a page the router can no longer see is converted from
+     * create to update on save rather than duplicated. Set to 0 to disable the
+     * char cap.
+     */
+    private int existingPagesIndexMaxChars = 12000;
+
+    /**
+     * Hard cap on the number of pages listed in the existing-pages index, applied
+     * together with {@link #existingPagesIndexMaxChars} — whichever limit is hit
+     * first stops the listing. Manually-edited pages are listed first so
+     * user-curated entries are never the ones dropped. Set to 0 to disable the
+     * page-count cap.
+     */
+    private int existingPagesIndexMaxPages = 200;
+
     /** 单个原始材料最多生成的 Wiki 页面数 */
     private int maxPagesPerRaw = 15;
 
@@ -70,6 +93,36 @@ public class WikiProperties {
 
     /** 扫描时跳过大于此大小的文件（字节），默认 50MB */
     private long maxScanFileSize = 50 * 1024 * 1024;
+
+    /**
+     * Allowed root directories for KB source directories. When non-empty, a
+     * configured source directory must resolve (after symlink resolution) to a
+     * path inside one of these roots, blocking arbitrary directory reads. Empty
+     * (the default) disables the containment check — suitable for desktop /
+     * single-tenant; server operators should set this.
+     */
+    private java.util.List<String> allowedSourceRoots = new java.util.ArrayList<>();
+
+    /**
+     * Fail-closed switch for source-path validation. When {@code true} and
+     * {@link #allowedSourceRoots} is empty, every source directory is rejected
+     * (no path is allowed until a root is configured) — recommended for
+     * multi-tenant servers so a missing allow-list cannot silently re-open
+     * full-filesystem reads. Default {@code false} keeps the opt-in behaviour
+     * for desktop / single-tenant where no roots are configured.
+     */
+    private boolean requireAllowedRoots = false;
+
+    /**
+     * When {@code true}, a scheduled job (single-owner via ShedLock) scans each
+     * KB's configured source directory and auto-ingests new files. Off by
+     * default — operators opt in. Existing dedup by source path keeps re-scans
+     * idempotent; deletes are never propagated.
+     */
+    private boolean watcherEnabled = false;
+
+    /** Interval between watcher scan cycles, milliseconds. Default 5 minutes. */
+    private long watcherIntervalMs = 300_000;
 
     /**
      * Wiki LLM 重试最大尝试次数（含首次）。
@@ -130,8 +183,55 @@ public class WikiProperties {
      */
     private int embeddingMaxChars = 6000;
 
+    /**
+     * Expected embedding-input format version. The authoritative source is
+     * the builder's {@code CURRENT_INPUT_VERSION} constant; this property
+     * exists for staged rollouts and ops overrides.
+     * <p>
+     * Behavior on startup:
+     * <ul>
+     *   <li>Blank: use the builder version.</li>
+     *   <li>Less than builder version: WARN and continue, so a KB can be
+     *       embedded against an older format during a gradual rollback.</li>
+     *   <li>Greater than builder version: fail fast — this usually means the
+     *       config was deployed ahead of the code that implements that format.</li>
+     * </ul>
+     */
+    private String embeddingTextVersionCurrent = "";
+
+    /**
+     * Circuit-breaker threshold: abort an embedding pass after this many
+     * consecutive batch failures (auth / rate-limit / network errors that
+     * cause an entire batch to embed zero chunks). Without it, a broken
+     * provider would silently iterate through every pending chunk in the
+     * KB, producing only log noise and wasted wall-clock time before the
+     * user can intervene.
+     * <p>
+     * Set too low and a transient blip aborts a healthy pass; set too
+     * high and the user waits forever on a clearly-broken provider.
+     * Default 5 covers most real outages while tolerating a couple of
+     * isolated 5xx hiccups.
+     */
+    private int embeddingConsecutiveFailureThreshold = 5;
+
     /** 混合搜索默认模式：keyword / semantic / hybrid */
     private String searchDefaultMode = "hybrid";
+
+    /**
+     * Minimum trimmed char length for a user message before per-turn wiki
+     * retrieval kicks in. Short messages like "继续" / "嗯" / "OK" carry no
+     * semantic signal and the retriever falls back to whichever pages happen
+     * to dominate the index, polluting the prompt with off-topic content.
+     */
+    private int relevantContextMinQueryLength = 3;
+
+    /**
+     * Relative score floor for relevant-wiki hits. A hit is dropped when its
+     * score is below {@code topHit.score * this ratio}, so a single strong
+     * match does not drag in low-relevance tail pages alongside it. Set to
+     * 0 to disable.
+     */
+    private double relevantContextMinRelativeScore = 0.5;
 
     // ==================== RFC-031: Light processing tiers ====================
 
@@ -223,4 +323,17 @@ public class WikiProperties {
      * top-3 RRF hit but doesn't dominate it.
      */
     private double relationBoostLambda = 0.05;
+
+    /**
+     * Feature flag for the cascade-delete / cascade-rename pipeline: when a
+     * page is deleted (or renamed), find every other page that linked to it
+     * via {@code [[slug]]} and rewrite those references so they don't dangle.
+     * <p>
+     * Defaults to {@code true} — the legacy row-only delete left dangling
+     * {@code [[slug]]} markers behind, which is exactly the bug class this
+     * RFC closes. Set to {@code false} only as a temporary kill-switch if a
+     * cascade pass starts mangling referrer content (which would be a real
+     * bug to chase down, not a steady state).
+     */
+    private boolean cascadeDeleteEnabled = true;
 }

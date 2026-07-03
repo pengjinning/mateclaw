@@ -8,6 +8,7 @@ import org.springframework.security.config.annotation.web.configuration.EnableWe
 import org.springframework.security.config.annotation.web.configurers.AbstractHttpConfigurer;
 import org.springframework.security.config.http.SessionCreationPolicy;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+import org.springframework.http.HttpMethod;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
 
@@ -48,10 +49,12 @@ public class SecurityConfig {
             )
             .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
             .authorizeHttpRequests(auth -> auth
+                // GET /settings/language stays anonymous (first-paint i18n). PUT
+                // requires login + admin (see @RequireGlobalAdmin on the controller).
+                .requestMatchers(HttpMethod.GET, "/api/v1/settings/language").permitAll()
                 // 公开 API 接口
                 .requestMatchers(
                     "/api/v1/auth/login",
-                    "/api/v1/settings/language",
                     "/api/v1/agents/*/chat/stream",
                     "/api/v1/chat/stream",
                     "/api/v1/chat/*/stop",
@@ -59,7 +62,9 @@ public class SecurityConfig {
                     "/api/v1/channels/webhook/**",
                     "/api/v1/channels/webchat/**",
                     "/api/v1/talk/ws",
-                    // RFC-045: tool-generated files served via unguessable UUID + 10-min TTL
+                    // RFC-045: tool-generated files served via unguessable UUID; entries
+                    // expire after GeneratedFileCache.TTL (7 days) — delayed access (e.g. an
+                    // IM-delivered link opened later) is intentional, the UUID is the guard.
                     "/api/v1/files/generated/**"
                 ).permitAll()
                 // 所有其他 API 接口需要认证

@@ -80,6 +80,11 @@ public final class MateClawStateAccessor {
         return state.value(LLM_CALL_COUNT, 0);
     }
 
+    /** Iterations refunded this run for setup-only (progressive-disclosure) rounds (0 at run start). */
+    public int iterationRefundCount() {
+        return state.value(ITERATION_REFUND_COUNT, 0);
+    }
+
     // ===== 观察历史 =====
 
     @SuppressWarnings("unchecked")
@@ -207,6 +212,10 @@ public final class MateClawStateAccessor {
         return state.<List<DirectToolOutput>>value(DIRECT_TOOL_OUTPUTS).orElse(List.of());
     }
 
+    public SourceEvidenceLedger sourceEvidenceLedger() {
+        return state.<SourceEvidenceLedger>value(SOURCE_EVIDENCE_LEDGER).orElse(SourceEvidenceLedger.empty());
+    }
+
     // ===== 审批重放 =====
 
     public String forcedToolCall() {
@@ -222,6 +231,26 @@ public final class MateClawStateAccessor {
      */
     public ChatOrigin chatOrigin() {
         return state.<ChatOrigin>value(CHAT_ORIGIN).orElse(ChatOrigin.EMPTY);
+    }
+
+    // ===== Skill progressive disclosure =====
+
+    /**
+     * Skills loaded via {@code load_skill} so far this run. Empty when none
+     * have been loaded (the common first-iteration case).
+     */
+    @SuppressWarnings("unchecked")
+    public Set<String> loadedSkills() {
+        return state.<Set<String>>value(LOADED_SKILLS).orElse(Set.of());
+    }
+
+    /**
+     * Extension tools activated via {@code enable_tool} so far this run. Empty
+     * when none have been enabled (the common case).
+     */
+    @SuppressWarnings("unchecked")
+    public Set<String> enabledExtensionTools() {
+        return state.<Set<String>>value(ENABLED_EXTENSION_TOOLS).orElse(Set.of());
     }
 
     // ===== Token Usage =====
@@ -240,6 +269,72 @@ public final class MateClawStateAccessor {
 
     public String runtimeProviderId() {
         return state.value(RUNTIME_PROVIDER_ID, "");
+    }
+
+    // ===== Persistent goal accessors =====
+
+    /**
+     * Active goal snapshot or empty. The injected object is the
+     * {@code vip.mate.goal.model.GoalEntity}; we reference it by Object
+     * here to avoid pulling the goal package into core graph state.
+     */
+    public Optional<Object> activeGoal() {
+        return state.<Object>value(ACTIVE_GOAL);
+    }
+
+    public boolean hasActiveGoal() {
+        return state.<Object>value(ACTIVE_GOAL).isPresent();
+    }
+
+    public boolean goalEvaluatedThisRun() {
+        return state.value(GOAL_EVALUATED_THIS_RUN, false);
+    }
+
+    public boolean goalFollowupInjected() {
+        return state.value(GOAL_FOLLOWUP_INJECTED, false);
+    }
+
+    public String goalFollowupPrompt() {
+        return state.value(GOAL_FOLLOWUP_PROMPT, "");
+    }
+
+    /** Auto-followups already injected in this graph run (0 at run start). */
+    public int goalFollowupCount() {
+        return state.value(GOAL_FOLLOWUP_COUNT, 0);
+    }
+
+    /** Cumulative agent LLM calls already billed to the goal this run (0 at run start). */
+    public int goalAccountedLlmCallCount() {
+        return state.value(GOAL_ACCOUNTED_LLM_CALL_COUNT, 0);
+    }
+
+    /** Hard continuations (fresh-budget ReAct segments) performed this run (0 at run start). */
+    public int goalHardContinuationCount() {
+        return state.value(GOAL_HARD_CONTINUATION_COUNT, 0);
+    }
+
+    /**
+     * Bridge across ReAct and Plan-Execute: ReAct writes the terminal text
+     * to {@link MateClawStateKeys#FINAL_ANSWER} via FinalAnswerNode;
+     * Plan-Execute writes to {@code PlanStateKeys.FINAL_SUMMARY} (long
+     * path) or {@code PlanStateKeys.DIRECT_ANSWER} (short path). The
+     * GoalEvaluationNode reads whichever is populated without having to
+     * know which graph it's inside.
+     */
+    public String terminalAnswer() {
+        String fa = state.value(FINAL_ANSWER, "");
+        if (!fa.isEmpty()) {
+            return fa;
+        }
+        // Avoid a direct compile-time reference to PlanStateKeys (the plan
+        // sub-package depends on core graph state); use the string keys
+        // verbatim. Mismatches would surface as terminalAnswer() returning
+        // empty in tests — the v3 TerminalAnswerTest pins exactly that.
+        String summary = state.value("final_summary", "");
+        if (!summary.isEmpty()) {
+            return summary;
+        }
+        return state.value("direct_answer", "");
     }
 
     // ===== 输出构建器 =====
@@ -281,6 +376,10 @@ public final class MateClawStateAccessor {
 
         public OutputBuilder needsToolCall(boolean needs) {
             return put(NEEDS_TOOL_CALL, needs);
+        }
+
+        public OutputBuilder iterationRefundCount(int count) {
+            return put(ITERATION_REFUND_COUNT, count);
         }
 
         // ---- 消息 ----
@@ -405,6 +504,10 @@ public final class MateClawStateAccessor {
             return put(DIRECT_TOOL_OUTPUTS, outputs);
         }
 
+        public OutputBuilder sourceEvidenceLedger(SourceEvidenceLedger ledger) {
+            return put(SOURCE_EVIDENCE_LEDGER, ledger);
+        }
+
         // ---- 审批重放 ----
         public OutputBuilder forcedToolCall(String json) {
             return put(FORCED_TOOL_CALL, json);
@@ -413,6 +516,16 @@ public final class MateClawStateAccessor {
         // ---- RFC-063r: ChatOrigin ----
         public OutputBuilder chatOrigin(ChatOrigin origin) {
             return put(CHAT_ORIGIN, origin);
+        }
+
+        // ---- Skill progressive disclosure ----
+        public OutputBuilder loadedSkills(Set<String> names) {
+            return put(LOADED_SKILLS, names);
+        }
+
+        // ---- Tool progressive disclosure ----
+        public OutputBuilder enabledExtensionTools(Set<String> names) {
+            return put(ENABLED_EXTENSION_TOOLS, names);
         }
 
         // ---- Token Usage ----
@@ -425,6 +538,113 @@ public final class MateClawStateAccessor {
             map.put(PROMPT_TOKENS, existingPrompt + result.promptTokens());
             map.put(COMPLETION_TOKENS, existingCompletion + result.completionTokens());
             return this;
+        }
+
+        // ---- Persistent goal ----
+
+        public OutputBuilder goalEvaluationResult(Map<String, Object> result) {
+            return put(GOAL_EVALUATION_RESULT, result);
+        }
+
+        public OutputBuilder goalFollowupInjected(boolean injected) {
+            return put(GOAL_FOLLOWUP_INJECTED, injected);
+        }
+
+        public OutputBuilder goalFollowupPrompt(String prompt) {
+            return put(GOAL_FOLLOWUP_PROMPT, prompt);
+        }
+
+        public OutputBuilder goalEvaluatedThisRun(boolean v) {
+            return put(GOAL_EVALUATED_THIS_RUN, v);
+        }
+
+        public OutputBuilder goalFollowupCount(int n) {
+            return put(GOAL_FOLLOWUP_COUNT, n);
+        }
+
+        public OutputBuilder goalAccountedLlmCallCount(int n) {
+            return put(GOAL_ACCOUNTED_LLM_CALL_COUNT, n);
+        }
+
+        public OutputBuilder goalHardContinuationCount(int n) {
+            return put(GOAL_HARD_CONTINUATION_COUNT, n);
+        }
+
+        /** Wipe FINAL_ANSWER on follow-up so the next graph pass doesn't
+         *  immediately re-terminate via the existing final text. */
+        public OutputBuilder clearFinalAnswer() {
+            return put(FINAL_ANSWER, "");
+        }
+
+        /** Wipe FINISH_REASON for the same reason as clearFinalAnswer(). */
+        public OutputBuilder clearFinishReason() {
+            return put(FINISH_REASON, "");
+        }
+
+        /**
+         * Wipe the limit-exceeded draft + flag. Required before a hard
+         * continuation re-enters the ReAct loop: FinalAnswerNode prefers
+         * FINAL_ANSWER_DRAFT over a freshly reasoned answer, so a stale draft
+         * left by LimitExceededNode would otherwise resurface as the next
+         * segment's answer.
+         */
+        public OutputBuilder clearLimitExceededDraft() {
+            put(FINAL_ANSWER_DRAFT, "");
+            return put(LIMIT_EXCEEDED, false);
+        }
+
+        /** Plan-Execute follow-up: clear the terminal-side plan summary so
+         *  the next PlanGeneration pass starts clean. Identifier is the
+         *  string literal "final_summary" to avoid a compile-time link to
+         *  the plan sub-package from core graph state. */
+        public OutputBuilder clearPlanFinalSummary() {
+            return put("final_summary", "");
+        }
+
+        public OutputBuilder clearPlanDirectAnswer() {
+            return put("direct_answer", "");
+        }
+
+        /** Plan-Execute follow-up: wipe the mid-pass plan state so the next
+         *  PlanGenerationNode pass re-derives everything from scratch. */
+        public OutputBuilder clearPlanId() {
+            return put("plan_id", null);
+        }
+
+        public OutputBuilder clearPlanSteps() {
+            return put("plan_steps", List.of());
+        }
+
+        public OutputBuilder clearPlanValid() {
+            return put("plan_valid", false);
+        }
+
+        public OutputBuilder clearNeedsPlanning() {
+            return put("needs_planning", true);
+        }
+
+        public OutputBuilder clearCurrentStepIndex() {
+            return put("current_step_index", 0);
+        }
+
+        public OutputBuilder clearCurrentStepTitle() {
+            return put("current_step_title", "");
+        }
+
+        public OutputBuilder clearCurrentStepResult() {
+            return put("current_step_result", "");
+        }
+
+        public OutputBuilder clearCompletedResults() {
+            return put("completed_results", List.of());
+        }
+
+        public OutputBuilder clearFinalSummaryThinking() {
+            return put("final_summary_thinking", "");
+        }
+
+        public OutputBuilder clearCurrentStepThinking() {
+            return put("current_step_thinking", "");
         }
 
         public Map<String, Object> build() {

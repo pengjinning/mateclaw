@@ -43,6 +43,29 @@ export interface Agent {
   enabled: boolean
   icon?: string
   tags?: string
+  workspaceBasePath?: string | null
+  /** Agent-level primary wiki KB. Null means use workspace fallback. */
+  primaryKbId?: string | number | null
+  /**
+   * Explicit opt-out: drop every SKILL.md catalog entry from the system
+   * prompt and exclude skill-expanded tools. Independent of binding rows
+   * (when `true`, the agent is treated as "no skills" regardless of any
+   * leftover `mate_agent_skill` rows). Defaults to `false`.
+   */
+  skillsDisabled?: boolean
+  /**
+   * Explicit opt-out: exclude every non-system-level tool from the agent's
+   * effective set and suppress MCP auto-include. System-level memory and
+   * delegation primitives still pass through. Defaults to `false`.
+   */
+  toolsDisabled?: boolean
+  /**
+   * Explicit opt-out: this agent sees zero knowledge bases regardless of
+   * leftover `mate_agent_wiki_kb` rows. Wiki tools degrade with their
+   * standard "no knowledge base" message; the webchat `/wiki/pages` picker
+   * returns an empty list. Defaults to `false`. Issue #304.
+   */
+  wikiDisabled?: boolean
   createTime?: string
   updateTime?: string
 }
@@ -65,6 +88,11 @@ export interface Conversation {
   status?: 'active' | 'closed'
   streamStatus?: 'idle' | 'running'
   source?: string
+  pinned?: number
+  /** Provider id of the model this conversation is pinned to (per-conversation model). */
+  modelProvider?: string
+  /** Model id this conversation is pinned to. Paired with modelProvider. */
+  modelName?: string
   lastActiveTime?: string
   updateTime?: string
   createTime?: string
@@ -83,6 +111,9 @@ export interface Message {
   // Token 统计
   promptTokens?: number
   completionTokens?: number
+  // Runtime model attribution (assistant messages): the model that actually produced this reply
+  runtimeModel?: string
+  runtimeProvider?: string
   // 前端临时字段
   streaming?: boolean  // 内部动画控制，UI 渲染以 status 为准
   attachments?: ChatAttachment[]
@@ -117,6 +148,34 @@ export interface PlanMeta {
   steps: string[]
   currentStep: number
   stepResults?: { result: string; status: string }[]
+}
+
+/** One tool the subagent called, shown in the nested delegation timeline. */
+export interface DelegationToolEntry {
+  name: string
+  status: 'running' | 'completed' | 'error'
+}
+
+/**
+ * A subagent at depth >= 2 in the delegation tree (a grandchild and deeper).
+ * Built on the frontend from the flat delegation_* event stream, keyed by
+ * subagentId and nested by parentSubagentId.
+ */
+export interface DelegationNode {
+  subagentId: string
+  agentName: string
+  status: 'running' | 'completed' | 'error'
+  depth: number
+  task?: string
+  plan?: PlanMeta
+  tools?: DelegationToolEntry[]
+  result?: string
+  durationMs?: number
+  /** Heartbeat watchdog flagged this subagent as making no observable progress. */
+  stale?: boolean
+  /** Spawned via fire-and-forget delegation: runs detached, result via task_output. */
+  async?: boolean
+  children: DelegationNode[]
 }
 
 export interface PendingApprovalMeta {
@@ -160,8 +219,42 @@ export interface MessageSegment {
   approval?: PendingApprovalMeta
   /** type=plan */
   plan?: PlanMeta
+  /**
+   * For delegation segments (toolName starts with "→"): the subagent's own
+   * activity, relayed from the child conversation. Renders as a nested timeline
+   * (its plan checklist + the tools it called + any grandchildren it delegated)
+   * instead of jammed text in toolArgs. The depth-1 child is the segment itself;
+   * `children` holds depth-2+ subagents as a recursive tree.
+   */
+  childTimeline?: {
+    plan?: PlanMeta
+    tools?: DelegationToolEntry[]
+    children?: DelegationNode[]
+  }
+  /** For a delegation segment: heartbeat flagged the subagent as stalled (no progress). */
+  delegationStale?: boolean
+  /** For a delegation segment: spawned fire-and-forget, runs detached (result via task_output). */
+  delegationAsync?: boolean
   /** 时间戳 */
   timestamp?: number
+  /**
+   * Iteration index this segment belongs to (0-based). Set by iteration_start —
+   * lets MessageBubble group thinking/tool/content segments per iteration so
+   * the next iteration's output never appends onto the previous one's tail.
+   */
+  iterationIndex?: number
+  /** Subagent / delegation child ID, when this segment was emitted under a child scope. */
+  subagentId?: string
+  /** Backend signaled the running content was truncated to break a repetition pattern. */
+  repetitionWarning?: 'char_pattern' | 'sentence_repetition'
+  /** Number of trailing characters dropped when the repetition guard fired. */
+  truncatedChars?: number
+  /** Backend marked this model-predicted tool result as replaced by a later actual tool result. */
+  superseded?: boolean
+  /** Segment ID that replaced this pre-tool prediction. */
+  supersededBySegmentId?: string
+  /** Machine-readable reason for superseding this segment. */
+  supersededReason?: string
 }
 
 export interface MessageMetadata {
@@ -185,10 +278,40 @@ export interface MessageMetadata {
     durationMs: number
     timestamp: number
   }>
+  /**
+   * Multimodal sidecar routing snapshot for this turn — written by the backend
+   * when the user uploaded an image / video the primary model couldn't handle
+   * natively. The chat bubble renders a "primary 🔀 sidecar" badge from this.
+   */
+  routing?: RoutingMeta
+}
+
+export interface RoutingMeta {
+  /** "none" | "sidecar" | "native" — lowercased on the wire to keep the JSON small. */
+  strategy: 'none' | 'sidecar' | 'native'
+  sidecarModelId?: number
+  sidecarModel?: string
+  sidecarProvider?: string
+  /** Modality names like ["VISION"] / ["VIDEO"] / ... — uppercase to match the backend enum. */
+  requiredModalities?: string[]
+  primaryMissing?: string[]
+  skipped?: Array<{ type: string; fileName?: string; reason: string }>
+}
+
+export interface AgentCapabilities {
+  agentId: number
+  modelName: string
+  providerId: string
+  /** Modality enum values: TEXT / VISION / VIDEO / AUDIO. */
+  modalities: string[]
+  defaultVisionModelId?: number | null
+  defaultVisionModelLabel?: string | null
+  defaultVideoModelId?: number | null
+  defaultVideoModelLabel?: string | null
 }
 
 export interface MessageContentPart {
-  type: 'text' | 'thinking' | 'image' | 'file' | 'audio' | 'video' | 'tool_call' | 'parse_error'
+  type: 'text' | 'thinking' | 'image' | 'file' | 'audio' | 'video' | 'model3d' | 'tool_call' | 'parse_error'
   text?: string
   fileUrl?: string
   fileName?: string
@@ -229,10 +352,20 @@ export interface Skill {
   securityScanResult?: string
   /** RFC-042 §2.3 — wall-clock time of the last scan */
   securityScanTime?: string
+  /** Lifecycle curator state: 'active' / 'stale' / 'archived' */
+  lifecycleState?: string
+  /** User-pinned skill — exempt from automatic archival */
+  pinned?: boolean
+  /** Last activity timestamp — drives the curator's idle window */
+  lastActivityAt?: string
+  /** When the curator moved this skill to archived state */
+  archivedAt?: string
 }
 
 /** 运行时解析状态（来自 /runtime/status） */
 export interface SkillRuntimeStatus {
+  /** RFC-090 Phase 2 — entity primary key */
+  id?: number
   name: string
   description?: string
   source: string  // "directory" | "database"
@@ -256,6 +389,79 @@ export interface SkillRuntimeStatus {
   dependencySummary?: string | null
   // Computed label
   runtimeStatusLabel?: string
+  // RFC-090 §14.1 — features matrix + manifest SoT
+  manifest?: SkillManifest | null
+  /** Map<featureId, "READY" | "SETUP_NEEDED" | "UNSUPPORTED"> */
+  featureStatuses?: Record<string, string>
+  /** featureIds whose status is READY */
+  activeFeatures?: string[]
+  /** Tools advertised to the LLM after feature filtering */
+  effectiveAllowedTools?: string[]
+  /** Human-readable tool names for display after feature filtering */
+  effectiveAllowedToolsDisplay?: string[]
+}
+
+/** RFC-090 §14.6 — typed view onto manifest_json */
+export interface SkillManifest {
+  id?: string
+  name?: string
+  description?: string
+  icon?: string
+  version?: string
+  author?: string
+  /** prompt | code | mcp | acp | knowledge */
+  type?: string
+  category?: string
+  allowedTools?: string[]
+  requires?: SkillManifestRequirement[]
+  platforms?: string[]
+  features?: SkillManifestFeature[]
+  settings?: SkillManifestSetting[]
+  requiresModel?: string[]
+  dashboardMetrics?: SkillManifestDashboardMetric[]
+  selfEvolution?: { lessonsEnabled?: boolean; lessonsMaxEntries?: number; memoryWritesAllowed?: boolean }
+  knowledge?: {
+    bindKb?: string
+    retrieval?: string
+    topK?: number
+    citation?: string
+    rerank?: boolean
+    boundKbId?: number | null
+  } | null
+  extras?: Record<string, any>
+}
+
+export interface SkillManifestRequirement {
+  key: string
+  type?: string
+  check?: string
+  optional?: boolean
+  description?: string
+  install?: Record<string, string>
+}
+
+export interface SkillManifestFeature {
+  id: string
+  label?: string
+  requires?: string[]
+  platforms?: string[]
+  tools?: string[]
+  fallbackMessage?: string
+  unsupportedMessage?: string
+}
+
+export interface SkillManifestSetting {
+  key: string
+  label?: string
+  type?: string
+  defaultValue?: any
+  options?: Record<string, any>[]
+}
+
+export interface SkillManifestDashboardMetric {
+  label?: string
+  memoryKey?: string
+  format?: string
 }
 
 /** 安全扫描发现 */
@@ -320,11 +526,16 @@ export interface Tool {
   description?: string
   beanName?: string
   toolType: string
+  /** Runtime @Tool function names shown to the model, when resolvable. */
+  runtimeNames?: string[]
   icon?: string
   mcpEndpoint?: string
   paramsSchema?: string
   enabled: boolean
   builtin?: boolean
+  /** Progressive-disclosure tier: 'core' | 'extension'. Null/absent = core. */
+  disclosureTier?: string
+  channelId?: string | number
   createTime: string
 }
 
@@ -336,6 +547,9 @@ export interface Channel {
   agentId?: string | number
   botPrefix?: string
   configJson?: string
+  /** Identity snapshot from the most recent successful credential verify
+   *  (RFC-084). JSON-encoded {accountName, accountId, team, region, ...}. */
+  identityJson?: string
   enabled: boolean
   description?: string
   // 前端扩展字段
@@ -504,11 +718,16 @@ export interface SubPlan {
   result?: string
   startTime?: string
   endTime?: string
+  /** Delegated specialist agent for this step (snowflake id — keep as string).
+   *  Absent/null means the step runs with the parent (plan) agent. */
+  assignedAgentId?: string | number
 }
 
 export interface Plan {
   id: string | number
   agentId: string
+  /** Conversation/run that produced the plan (may be absent on legacy rows). */
+  conversationId?: string
   goal: string
   status: 'pending' | 'running' | 'completed' | 'failed'
   totalSteps: number
@@ -654,6 +873,24 @@ export interface ProviderInfo {
   cooldownRemainingMs?: number
   /** RFC-074: whether the user has explicitly opted this provider into the dropdown. */
   enabled?: boolean
+
+  // Issue #81: derived liveness fields powering the chat-console popup state machine.
+  /** CONFIGURED / MISSING / NOT_REQUIRED / OAUTH_PENDING. */
+  authStatus?: string
+  /** null = base url N/A; true/false = applicable and complete/incomplete. */
+  baseUrlComplete?: boolean | null
+  /** Comma-joined missing field names ("apiKey", "baseUrl"); empty when nothing missing. */
+  missingFields?: string
+  /**
+   * Machine-readable next-step key driving the popup primary button.
+   * fill_base_url / fill_api_key / start_oauth / configure_required_fields /
+   * test_connection / pull_model / wait_cooldown / reprobe / none.
+   */
+  suggestedAction?: string
+  /** i18n key for the actionable hint, e.g. "provider.hint.llamacppBaseUrlExample". */
+  suggestedActionHintKey?: string | null
+  /** Template params for vue-i18n t(key, args). */
+  suggestedActionHintArgs?: Record<string, unknown>
 }
 
 /**
@@ -776,9 +1013,9 @@ export interface CronJob {
   name: string
   cronExpression: string
   timezone: string
-  agentId: string | number
+  agentId: string | number | null
   agentName?: string
-  taskType: 'text' | 'agent'
+  taskType: 'text' | 'agent' | 'reminder' | 'wiki_process'
   triggerMessage?: string
   requestBody?: string
   enabled: boolean
@@ -795,4 +1032,93 @@ export interface CronJob {
   deliveryConfig?: { targetId?: string | null; threadId?: string | null; accountId?: string | null } | null
   lastDeliveryStatus?: 'NONE' | 'PENDING' | 'DELIVERED' | 'NOT_DELIVERED'
   lastDeliveryError?: string | null
+}
+
+// ==================== Approval Auto-Grant ====================
+
+export type GrantScope = 'USER' | 'AGENT' | 'CONVERSATION' | 'WORKSPACE'
+export type GrantKind = 'ALWAYS' | 'UNTIL_TIMESTAMP' | 'UNTIL_CONVERSATION_END'
+export type GrantSeverity = 'LOW' | 'MEDIUM' | 'HIGH'
+export type ResolutionDecisionSource = 'USER_MANUAL' | 'AUTO_GRANT' | 'HARD_BLOCK' | 'TIMEOUT'
+
+/**
+ * A user-authorized rule that lets ApprovalGrantResolver skip the manual
+ * approval step for matching tool calls. All snowflake-typed fields are
+ * strings end-to-end per CLAUDE.md precision convention.
+ */
+export interface ApprovalGrant {
+  id: string
+  workspaceId: string
+  scopeType: GrantScope
+  scopeId: string
+  toolName: string | null
+  ruleId: string | null
+  maxSeverity: GrantSeverity
+  grantKind: GrantKind
+  expireAt: string | null
+  grantedBy: string
+  /** Display name (nickname → username) of the granter; null if the user was deleted. */
+  grantedByName?: string | null
+  grantedAt: string
+  revoked: number
+  revokedBy: string | null
+  revokedAt: string | null
+  note: string | null
+}
+
+/** Active-grant summary for the global chip + ChatInput pill counters. */
+export interface ActiveGrantsSummary {
+  count: number
+  hasWorkspaceWide: boolean
+}
+
+/**
+ * Paged response shape from /approval/grants. Mirrors the MyBatis Plus
+ * {@code IPage} JSON layout already used by skills and other paged endpoints in
+ * mateclaw. {@code total/size/current/pages} arrive as JSON strings because the
+ * global Long→String serializer catches them; the consumer coerces via
+ * {@code Number(...)} at the use site so the el-pagination component gets numbers.
+ */
+export interface ApprovalGrantPage {
+  records: ApprovalGrant[]
+  total: number | string
+  size: number | string
+  current: number | string
+  pages: number | string
+}
+
+/**
+ * Approval-layer final decision row. workspaceId can be null for HARD_BLOCK
+ * events that fired before workspace resolution.
+ */
+export interface ResolutionLog {
+  id: string
+  workspaceId: string | null
+  conversationId: string | null
+  agentId: string | null
+  userId: string | null
+  toolCallId: string | null
+  toolName: string
+  maxSeverity: GrantSeverity | null
+  ruleIds: string | null
+  decisionSource: ResolutionDecisionSource
+  grantId: string | null
+  pendingId: string | null
+  argsPreview: string | null
+  note: string | null
+  createTime: string
+}
+
+/** Payload for POST /approval/grants. */
+export interface CreateGrantPayload {
+  scopeType: GrantScope
+  scopeId: string
+  toolName?: string | null
+  ruleId?: string | null
+  maxSeverity: GrantSeverity
+  grantKind: GrantKind
+  expireAt?: string | null
+  note?: string | null
+  /** Required when scope+toolName combination is admin+password (see §2.4.5). */
+  password?: string
 }

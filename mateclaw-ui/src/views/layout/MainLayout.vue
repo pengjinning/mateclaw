@@ -41,18 +41,38 @@
         <template v-for="group in navGroups" :key="group.key">
           <div class="nav-group">
             <div v-if="!effectiveCollapsed" class="nav-group-title">{{ group.label }}</div>
-            <router-link
+            <McTooltip
               v-for="item in group.items"
               :key="item.path"
-              :to="item.path"
-              class="nav-item"
-              :class="{ active: isNavItemActive(item) }"
-              :title="effectiveCollapsed ? item.label : ''"
-              @click="onNavClick"
+              :content="item.tooltip || item.label"
+              placement="right"
+              :disabled="!effectiveCollapsed"
             >
-              <span class="nav-icon" v-html="item.icon"></span>
-              <span v-if="!effectiveCollapsed" class="nav-label">{{ item.label }}</span>
-            </router-link>
+              <router-link
+                :to="item.path"
+                class="nav-item"
+                :class="{ active: isNavItemActive(item) }"
+                :title="effectiveCollapsed ? '' : (item.tooltip || '')"
+                @click="onNavClick"
+              >
+                <span class="nav-icon" v-html="item.icon"></span>
+                <span v-if="!effectiveCollapsed" class="nav-label">{{ item.label }}</span>
+                <NavBadge
+                  v-if="item.path === '/agents' && isAdminRole"
+                  :dot="liveAlertActive"
+                  tone="warning"
+                  :collapsed="effectiveCollapsed"
+                  :title="t('live.attention')"
+                />
+                <NavBadge
+                  v-else-if="item.path === '/security' && isAdminRole"
+                  :count="pendingApprovals"
+                  tone="urgent"
+                  :collapsed="effectiveCollapsed"
+                  :title="t('notifications.pendingApprovals', { n: pendingApprovals })"
+                />
+              </router-link>
+            </McTooltip>
           </div>
         </template>
       </nav>
@@ -60,11 +80,34 @@
       <!-- 底部 -->
       <div class="sidebar-footer">
         <template v-if="!sidebarCollapsed || isMobile">
-          <!-- Doctor 健康指示器 -->
-          <button class="health-indicator" :class="healthStatus" @click="showDoctor = true" :title="t('doctor.title')">
-            <span class="health-dot"></span>
-            <span class="health-label">{{ t('doctor.title') }}</span>
-          </button>
+          <!--
+            Status row: two side-by-side status cards. Doctor health on the left
+            stays always visible; the auto-approve chip on the right only renders
+            when at least one grant is active. When the chip is hidden, flex
+            naturally lets the doctor card expand to full width again — so the
+            row never wastes vertical space the way a stacked banner did.
+          -->
+          <div class="footer-status-row">
+            <button
+              class="health-indicator"
+              :class="[healthStatus, { 'is-half': autoApproveSummary && autoApproveSummary.count > 0 }]"
+              @click="showDoctor = true"
+              :title="t('doctor.title')"
+            >
+              <span class="health-dot"></span>
+              <span class="health-label">{{ t('doctor.title') }}</span>
+            </button>
+            <button
+              v-if="autoApproveSummary && autoApproveSummary.count > 0"
+              class="auto-approve-chip"
+              @click="goAutoApproveSettings"
+              :title="t('approval.grant.title')"
+            >
+              <span class="auto-approve-chip__dot"></span>
+              <el-icon :size="13"><Unlock /></el-icon>
+              <span class="auto-approve-chip__label">{{ t('approval.grant.chipShort', { count: autoApproveSummary.count }) }}</span>
+            </button>
+          </div>
 
           <div class="sidebar-utility-card">
             <div class="compact-utility-row">
@@ -111,6 +154,14 @@
             <button class="logout-btn" @click="logout" :title="t('nav.logout')">
               <el-icon :size="16"><SwitchButton /></el-icon>
             </button>
+          </div>
+
+          <div class="shortcuts-hint" :title="shortcutsHintText">
+            <kbd>Ctrl+K</kbd>
+            <span>{{ t('nav.shortcutAgents') }}</span>
+            <span class="shortcuts-hint__sep">|</span>
+            <kbd>Ctrl+N</kbd>
+            <span>{{ t('nav.shortcutNew') }}</span>
           </div>
         </template>
 
@@ -164,17 +215,22 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { useIsMobile, useMediaQuery } from '@/composables/useBreakpoint'
 import { useI18n } from 'vue-i18n'
 import { useThemeStore } from '@/stores/useThemeStore'
 import { version as appVersion } from '../../../package.json'
 import type { ThemeMode } from '@/stores/useThemeStore'
-import { http, settingsApi, setupApi } from '@/api/index'
+import { http, settingsApi, setupApi, approvalApi } from '@/api/index'
+import type { ActiveGrantsSummary } from '@/types'
 import OnboardingWizard from '@/views/Onboarding/OnboardingWizard.vue'
 import DoctorDrawer from '@/views/Doctor/DoctorDrawer.vue'
 import WorkspaceSwitcher from '@/components/workspace/WorkspaceSwitcher.vue'
+import NavBadge from '@/components/common/NavBadge.vue'
+import McTooltip from '@/components/common/McTooltip.vue'
+import { useNotificationCenter } from '@/composables/useNotificationCenter'
 import { useWorkspaceStore } from '@/stores/useWorkspaceStore'
 import { applyLocale, currentLocale, type AppLocale } from '@/i18n'
-import { SwitchButton, Lock } from '@element-plus/icons-vue'
+import { SwitchButton, Lock, Unlock } from '@element-plus/icons-vue'
 import ChangePasswordDialog from '@/components/ChangePasswordDialog.vue'
 
 const router = useRouter()
@@ -205,36 +261,93 @@ async function fetchHealthStatus() {
   }
 }
 
-// 移动端状态
-const isMobile = ref(false)
-const mobileMenuOpen = ref(false)
-let mobileQuery: MediaQueryList | null = null
-// 中等屏幕自动折叠（≤1024px）
-let mediumQuery: MediaQueryList | null = null
-const userExplicitCollapse = ref(localStorage.getItem('mc-sidebar-collapsed') === 'true')
-
-function handleMobileChange(e: MediaQueryListEvent | MediaQueryList) {
-  isMobile.value = e.matches
-  if (!e.matches) mobileMenuOpen.value = false
-  if (e.matches) footerPanelOpen.value = false
+// Active auto-approve grants summary — drives the red "auto-approve active (N)"
+// chip in the sidebar footer. Red (not green) is intentional: this is a
+// security-reducing setting and the UI should keep reminding the user it's on.
+const autoApproveSummary = ref<ActiveGrantsSummary | null>(null)
+async function fetchAutoApproveSummary() {
+  try {
+    const res: any = await approvalApi.activeSummary()
+    autoApproveSummary.value = res?.data || res
+  } catch {
+    autoApproveSummary.value = null
+  }
+}
+function goAutoApproveSettings() {
+  router.push('/security/auto-approve')
 }
 
-function handleMediumChange(e: MediaQueryListEvent | MediaQueryList) {
-  if (e.matches && !userExplicitCollapse.value) {
-    sidebarCollapsed.value = true
-  } else if (!e.matches && !userExplicitCollapse.value) {
-    sidebarCollapsed.value = false
+// Sidebar attention signals — admin-only. Both `/agents` (stuck agents in the
+// Live view) and `/security` (pending approvals) read from a shared 15s poller
+// so multiple consumers don't multiply HTTP traffic.
+const isAdminRole = computed(() => (localStorage.getItem('role') || 'user') === 'admin')
+const { stuckAgents, pendingApprovals } = useNotificationCenter()
+const liveAlertActive = computed(() => isAdminRole.value && stuckAgents.value > 0)
+
+// 移动端状态
+const mobileMenuOpen = ref(false)
+const userExplicitCollapse = ref(localStorage.getItem('mc-sidebar-collapsed') === 'true')
+
+const isMobile = useIsMobile()
+// 中等屏幕自动折叠（≤1024px）
+const compactViewport = useMediaQuery('(max-width: 1024px)')
+
+// Mobile breakpoint side effects: close the drawer / footer panel when the
+// layout flips between mobile and desktop.
+watch(isMobile, (mobile) => {
+  if (!mobile) mobileMenuOpen.value = false
+  if (mobile) footerPanelOpen.value = false
+})
+
+// Auto-collapse the sidebar on narrow desktop unless the user set it explicitly.
+watch(compactViewport, (compact) => {
+  if (!userExplicitCollapse.value) sidebarCollapsed.value = compact
+}, { immediate: true })
+
+const shortcutsHintText = computed(() =>
+  `Ctrl+K ${t('nav.shortcutAgents')} | Ctrl+N ${t('nav.shortcutNew')}`,
+)
+
+function openAgentsMenu() {
+  if (!workspaceStore.can('manage:agents' as never)) return
+  if (route.path !== '/agents') router.push('/agents')
+}
+
+function fireNewChatShortcut() {
+  if (route.path === '/chat') {
+    window.dispatchEvent(new CustomEvent('mc:chat-shortcut', { detail: 'newChat' }))
+  } else {
+    router.push({ path: '/chat', query: { action: 'newChat' } })
+  }
+}
+
+function isEditableTarget(el: EventTarget | null): boolean {
+  if (!(el instanceof HTMLElement)) return false
+  if (el.isContentEditable) return true
+  const tag = el.tagName
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true
+  return false
+}
+
+function onGlobalKeydown(e: KeyboardEvent) {
+  const mod = e.metaKey || e.ctrlKey
+  if (!mod || e.altKey) return
+  const key = e.key.toLowerCase()
+  if (key !== 'k' && key !== 'n') return
+  // Ctrl+N within an editable field should keep its native behavior; Ctrl+K
+  // is rarely used by browsers (Firefox uses it for search-bar focus), but we
+  // still want to let the chat input handle native paste / undo unblocked.
+  if (key === 'n' && isEditableTarget(e.target)) return
+  e.preventDefault()
+  if (key === 'k') {
+    openAgentsMenu()
+  } else {
+    fireNewChatShortcut()
   }
 }
 
 onMounted(async () => {
-  mobileQuery = window.matchMedia('(max-width: 768px)')
-  handleMobileChange(mobileQuery)
-  mobileQuery.addEventListener('change', handleMobileChange)
-
-  mediumQuery = window.matchMedia('(max-width: 1024px)')
-  handleMediumChange(mediumQuery)
-  mediumQuery.addEventListener('change', handleMediumChange)
+  window.addEventListener('keydown', onGlobalKeydown)
 
   // Check onboarding status
   if (!localStorage.getItem('mc-onboarding-done')) {
@@ -250,11 +363,16 @@ onMounted(async () => {
 
   // Fetch initial health status for sidebar indicator
   fetchHealthStatus()
+  // Auto-approve chip count. Cheap query (single SELECT COUNT) so we just
+  // fetch on mount and on workspace switch (handled by router-view key change
+  // which re-mounts the route subtree).
+  fetchAutoApproveSummary()
+  // Sidebar attention counts (live / security) are driven by
+  // useNotificationCenter — it polls when admins are mounted.
 })
 
 onBeforeUnmount(() => {
-  mobileQuery?.removeEventListener('change', handleMobileChange)
-  mediumQuery?.removeEventListener('change', handleMediumChange)
+  window.removeEventListener('keydown', onGlobalKeydown)
 })
 
 function onNavClick() {
@@ -292,81 +410,138 @@ const localeOptions = computed<{ value: AppLocale; label: string; short: string 
   { value: 'en-US', label: t('settings.languageOptions.enUS'), short: 'EN' },
 ])
 
+// Capability-gated nav. Each item declares a capability or globalAdmin flag;
+// useWorkspaceStore.can() decides visibility from the backend access set so
+// the sidebar can't drift from the route guard or controller annotations.
+type NavItem = {
+  path: string
+  label: string
+  icon: string
+  tooltip?: string
+  requiredCapability?:
+    | 'chat'
+    | 'view:wiki'
+    | 'view:memory'
+    | 'view:dashboard'
+    | 'manage:wiki'
+    | 'manage:agents'
+    | 'manage:skills'
+    | 'manage:channels'
+    | 'manage:models'
+    | 'manage:security'
+    | 'manage:settings'
+  globalAdmin?: boolean
+}
+
+function filterNav(items: NavItem[]): NavItem[] {
+  // Default deny while access is still loading — render an empty group rather
+  // than flashing the full menu before refreshAccess() returns.
+  if (!workspaceStore.accessLoaded) return []
+  return items.filter((item) => {
+    if (item.globalAdmin) return workspaceStore.isGlobalAdmin
+    if (item.requiredCapability && !workspaceStore.can(item.requiredCapability as never)) return false
+    return true
+  })
+}
+
 const navGroups = computed(() => [
   {
     key: 'core',
     label: t('nav.core'),
-    items: [
+    items: filterNav([
       {
         path: '/dashboard',
         label: t('nav.dashboard', 'Dashboard'),
         icon: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>`,
+        requiredCapability: 'view:dashboard',
       },
       {
         path: '/chat',
         label: t('nav.chat'),
         icon: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>`,
+        requiredCapability: 'chat',
       },
       {
         path: '/agents',
         label: t('nav.agents'),
         icon: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M20 21a8 8 0 1 0-16 0"/></svg>`,
+        requiredCapability: 'manage:agents',
       },
       {
         path: '/wiki',
         label: t('nav.wiki'),
         icon: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/><line x1="8" y1="7" x2="16" y2="7"/><line x1="8" y1="11" x2="14" y2="11"/></svg>`,
+        requiredCapability: 'view:wiki',
       },
       {
         path: '/memory',
         label: t('nav.memory'),
         icon: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a4 4 0 0 1 4 4v2a4 4 0 0 1-8 0V6a4 4 0 0 1 4-4z"/><path d="M16 14H8a4 4 0 0 0-4 4v2h16v-2a4 4 0 0 0-4-4z"/><line x1="12" y1="11" x2="12" y2="14"/></svg>`,
+        requiredCapability: 'view:memory',
       },
-    ],
+      {
+        path: '/enterprise',
+        label: t('nav.enterprise'),
+        icon: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 21h18"/><path d="M5 21V7l7-4 7 4v14"/><path d="M9 9h.01"/><path d="M9 12h.01"/><path d="M9 15h.01"/><path d="M9 18h.01"/><path d="M15 9h.01"/><path d="M15 12h.01"/><path d="M15 15h.01"/><path d="M15 18h.01"/></svg>`,
+        requiredCapability: 'manage:agents',
+      },
+    ] as NavItem[]),
   },
   {
     key: 'connect',
     label: t('nav.connect'),
-    items: [
+    items: filterNav([
       {
         path: '/channels',
         label: t('nav.channels'),
         icon: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07A19.5 19.5 0 0 1 4.69 12a19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 3.6 1.18h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L7.91 8.73a16 16 0 0 0 6.29 6.29l1.62-1.62a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 16.92z"/></svg>`,
+        requiredCapability: 'manage:channels',
       },
       {
         path: '/skills',
         label: t('nav.skills'),
         icon: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>`,
-      },
-      {
-        path: '/tools',
-        label: t('nav.tools'),
-        icon: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>`,
+        requiredCapability: 'manage:skills',
       },
       {
         path: '/plugins',
         label: t('nav.plugins'),
         icon: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="7" width="20" height="14" rx="2" ry="2"/><path d="M16 3h-8v4h8V3z"/></svg>`,
+        requiredCapability: 'manage:settings',
       },
-    ],
+      // RFC-090 Phase 4: Activity 提升到顶层
+      {
+        path: '/activity',
+        label: t('nav.activity'),
+        icon: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>`,
+        requiredCapability: 'manage:security',
+      },
+    ] as NavItem[]),
   },
   {
     key: 'system',
     label: t('nav.system'),
-    items: [
+    items: filterNav([
       {
         path: '/settings/models',
         label: t('nav.settings'),
         icon: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M4.93 4.93a10 10 0 0 0 0 14.14"/></svg>`,
+        requiredCapability: 'manage:models',
       },
       {
         path: '/security',
         label: t('nav.security'),
         icon: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>`,
+        requiredCapability: 'manage:security',
       },
-    ],
+      {
+        path: '/docs',
+        label: t('nav.docs'),
+        icon: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>`,
+      },
+    ] as NavItem[]),
   },
-])
+].filter((group) => group.items.length > 0))
 
 function toggleSidebar() {
   sidebarCollapsed.value = !sidebarCollapsed.value
@@ -383,6 +558,9 @@ function isNavItemActive(item: { path: string; label: string }) {
   }
   if (item.path === '/security') {
     return route.path.startsWith('/security')
+  }
+  if (item.path === '/docs') {
+    return route.path.startsWith('/docs')
   }
   return route.path === item.path
 }
@@ -627,6 +805,14 @@ watch(() => workspaceStore.currentWorkspaceId, () => {
 
 /* Active indicator bar removed — active state uses bg color + font weight only */
 
+/* Collapsed rail: the label is hidden, so center the lone icon on the
+   sidebar's vertical axis instead of leaving it left-aligned by the
+   nav-item's horizontal padding. */
+.sidebar.collapsed .nav-item {
+  justify-content: center;
+  gap: 0;
+}
+
 .nav-icon { display: flex; align-items: center; flex-shrink: 0; }
 .nav-label { overflow: hidden; text-overflow: ellipsis; }
 
@@ -638,8 +824,93 @@ watch(() => workspaceStore.currentWorkspaceId, () => {
   backdrop-filter: blur(14px);
   position: relative;
 }
-.health-indicator { display: flex; align-items: center; gap: 8px; width: 100%; padding: 8px 10px; border: 1px solid var(--mc-border-light); background: var(--mc-bg-muted); border-radius: 12px; cursor: pointer; color: var(--mc-text-secondary); font-size: 12px; margin-bottom: 8px; }
+/* Status row: doctor health + (optional) auto-approve chip side by side, so
+   the footer never gives up a whole banner-row for a single state badge. When
+   the chip is hidden, .health-indicator naturally expands back to full width. */
+.footer-status-row {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+  margin-bottom: 8px;
+}
+.health-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--mc-border-light);
+  background: var(--mc-bg-muted);
+  border-radius: 12px;
+  cursor: pointer;
+  color: var(--mc-text-secondary);
+  font-size: 12px;
+}
 .health-indicator:hover { background: var(--mc-bg-sunken); }
+.health-indicator .health-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* When the chip is showing, the health card yields half of the row so the
+   two states stay visually balanced. */
+.health-indicator.is-half { flex: 1 1 50%; }
+
+/*
+  Auto-approve chip — persistent indicator that this workspace currently has
+  at least one active auto-approve rule. Designed to be informative, not
+  alarming: a soft danger-tinted pill with a steady pulse on the dot, sized
+  to fit beside the doctor indicator on one row. Colors come from the
+  mateclaw token system (`var(--mc-danger-*)`), so dark mode picks up the
+  appropriate dim variants automatically.
+*/
+.auto-approve-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 50%;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--mc-danger-border, rgba(192, 57, 43, 0.4));
+  background: var(--mc-danger-bg, rgba(192, 57, 43, 0.12));
+  color: var(--mc-danger, #C0392B);
+  border-radius: 12px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.2;
+  transition: background-color 0.15s, border-color 0.15s;
+}
+.auto-approve-chip:hover {
+  background: var(--mc-danger-bg, rgba(192, 57, 43, 0.18));
+  border-color: var(--mc-danger, #C0392B);
+}
+.auto-approve-chip__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Small live-status dot that gently pulses to suggest "this is active right
+   now" without being aggressive about it. The animation pauses when the user
+   prefers reduced motion. */
+.auto-approve-chip__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--mc-danger, #C0392B);
+  box-shadow: 0 0 0 0 var(--mc-danger, #C0392B);
+  animation: auto-approve-pulse 2.4s ease-in-out infinite;
+  flex-shrink: 0;
+}
+@keyframes auto-approve-pulse {
+  0%   { box-shadow: 0 0 0 0 var(--mc-danger, #C0392B); opacity: 1; }
+  60%  { box-shadow: 0 0 0 6px transparent; opacity: 0.6; }
+  100% { box-shadow: 0 0 0 0 transparent; opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .auto-approve-chip__dot { animation: none; }
+}
 .health-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
 .health-indicator.healthy .health-dot { background: var(--mc-success); }
 .health-indicator.warning .health-dot { background: var(--mc-primary); }
@@ -674,6 +945,36 @@ watch(() => workspaceStore.currentWorkspaceId, () => {
 }
 
 .utility-label { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.12em; color: var(--mc-text-tertiary); margin: 0 0 8px; padding-left: 2px; }
+
+.shortcuts-hint {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+  margin-top: 8px;
+  padding: 4px 6px;
+  font-size: 10px;
+  color: var(--mc-text-tertiary);
+  letter-spacing: 0.02em;
+  user-select: none;
+}
+.shortcuts-hint kbd {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 5px;
+  border-radius: 4px;
+  border: 1px solid var(--mc-border-light);
+  background: var(--mc-bg-muted);
+  color: var(--mc-text-secondary);
+  font-family: inherit;
+  font-size: 9.5px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+.shortcuts-hint__sep {
+  opacity: 0.45;
+}
 
 /* 主题切换 */
 .theme-toggle-row {
